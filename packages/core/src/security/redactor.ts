@@ -1,0 +1,33 @@
+import { homedir } from 'node:os';
+
+/** §19.2 统一脱敏函数：输入字符串，输出脱敏后的字符串。 */
+export type Redactor = (input: string) => string;
+
+// Cookie：`cookie`/`Cookie` 后跟 `:` 或 `=`，然后整个值（包括 `;`-分隔的额外 cookie）。
+const COOKIE_RE = /(\bcookie\s*[:=]\s*)([^\n\r]+)/gi;
+// Authorization 头：整个剩余值。
+const AUTH_RE = /(\bauthorization\s*[:=]\s*)([^\n\r]+)/gi;
+// 任意 `*_token` 或单独 `token` 的赋值。
+const TOKEN_RE = /(\b[\w-]*token\s*[:=]\s*)(\S+)/gi;
+// 中英文验证码：保留前缀冒号或等号。
+const VERIFYCODE_RE =
+  /(验证码|verification code|otp)(\s*[:=]?\s*)(\d{4,8})/gi;
+// 中国大陆 11 位手机号：1[3-9]xxxxxxxxx，可选 +86 前缀。
+const PHONE_RE = /(\+?86[- ]?)?1[3-9]\d{9}/g;
+const EMAIL_RE = /[\w.+-]+@[\w-]+\.[\w.-]+/g;
+
+export function createRedactor(): Redactor {
+  const home = homedir();
+  const homeRe = new RegExp(home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+  return (input: string) => {
+    let s = input;
+    s = s.replace(COOKIE_RE, '$1[REDACTED]');
+    s = s.replace(AUTH_RE, '$1[REDACTED]');
+    s = s.replace(TOKEN_RE, '$1[REDACTED]');
+    s = s.replace(VERIFYCODE_RE, '$1$2[REDACTED]');
+    s = s.replace(EMAIL_RE, '[REDACTED_EMAIL]');
+    s = s.replace(PHONE_RE, '[REDACTED_PHONE]');
+    s = s.replace(homeRe, '[HOME]');
+    return s;
+  };
+}
