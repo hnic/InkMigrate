@@ -1,2 +1,17 @@
 .worktrees/
 .DS_Store
+
+# §19.1 sensitive local state
+.inkmigrate/
+reports/
+logs/
+playwright/.auth/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.enex
+
+# build artifacts
+node_modules/
+dist/
+*.tsbuildinfo
