@@ -1,0 +1,20 @@
+version: 1
+
+workspace:
+  stateDir: ".inkmigrate"
+  reportsDir: "reports"
+  diagnosticsDir: ".inkmigrate/diagnostics"
+  logLevel: "info"
+  minFreeDiskBytes: 1073741824
+
+sources: []
+targets: []
+
+sourceCleanup:
+  enabled: false
+
+privacy:
+  telemetry: false
+  redactLogs: true
+  retainFailureScreenshots: true
+  saveSanitizedHtml: true
