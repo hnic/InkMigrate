@@ -1,0 +1,361 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { makeMemoryDb } from '../helpers/db.js';
+import type { DB } from '../../src/index.js';
+
+let db: DB;
+beforeEach(() => {
+  db = makeMemoryDb();
+});
+afterEach(() => db.close());
+
+function seedInstancesAndJob() {
+  db.prepare(
+    `INSERT INTO source_instances(id,adapter_kind,adapter_version,adapter_api_version,config_hash,created_at,updated_at)
+     VALUES('s1','a','1','1.0.0','h','t','t')`,
+  ).run();
+  db.prepare(
+    `INSERT INTO target_instances(id,adapter_kind,adapter_version,adapter_api_version,config_hash,created_at,updated_at)
+     VALUES('t1','a','1','1.0.0','h','t','t')`,
+  ).run();
+  db.prepare(
+    `INSERT INTO migration_jobs(id,source_instance_id,target_instance_id,status,current_stage,created_at,updated_at)
+     VALUES('j1','s1','t1','created','preflight','t','t')`,
+  ).run();
+}
+
+/** Seed source_item + cleanup_plans → cleanup_jobs → cleanup_items chain with id=1. */
+function seedFullCleanupChain() {
+  db.prepare(
+    `INSERT INTO source_items(source_instance_id,external_id,fingerprint,stable_key,item_key,stable_short_id,content_kind,discovered_at,status,created_at,updated_at)
+     VALUES('s1','e1','fp','sk','ik','sid','article','t','verified','t','t')`,
+  ).run();
+  db.prepare(
+    `INSERT INTO cleanup_plans(id,source_instance_id,migration_job_id,action,plan_hash,config_hash,candidate_count,excluded_count,status,created_at)
+     VALUES('cp1','s1','j1','unfavorite','ph','ch',1,0,'executed','t')`,
+  ).run();
+  db.prepare(
+    `INSERT INTO cleanup_jobs(id,plan_id,plan_hash,action,status,candidate_count,created_at,updated_at)
+     VALUES('cj1','cp1','ph','unfavorite','completed',1,'t','t')`,
+  ).run();
+  db.prepare(
+    `INSERT INTO cleanup_items(job_id,source_item_id,precheck_status,action_status,created_at,updated_at)
+     VALUES('cj1',1,'favorited','unfavorited_verified','t','t')`,
+  ).run();
+}
+
+describe('schema enforcement (§16.12, §24.5)', () => {
+  describe('foreign_keys pragma', () => {
+    it('foreign_keys is ON after openDatabase', () => {
+      expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
+    });
+  });
+
+  describe('FK RESTRICT enforcement', () => {
+    it('migration_jobs.source_instance_id RESTRICT blocks source_instances delete', () => {
+      seedInstancesAndJob();
+      expect(() =>
+        db.prepare(`DELETE FROM source_instances WHERE id='s1'`).run(),
+      ).toThrow(/FOREIGN KEY/);
+    });
+
+    it('migration_jobs.target_instance_id RESTRICT blocks target_instances delete', () => {
+      seedInstancesAndJob();
+      expect(() =>
+        db.prepare(`DELETE FROM target_instances WHERE id='t1'`).run(),
+      ).toThrow(/FOREIGN KEY/);
+    });
+
+    it('cleanup_plans.source_instance_id RESTRICT blocks source_instances delete', () => {
+      seedInstancesAndJob();
+      db.prepare(
+        `INSERT INTO cleanup_plans(id,source_instance_id,migration_job_id,action,plan_hash,config_hash,candidate_count,excluded_count,status,created_at)
+         VALUES('cp1','s1','j1','unfavorite','ph','ch',1,0,'created','t')`,
+      ).run();
+      expect(() =>
+        db.prepare(`DELETE FROM source_instances WHERE id='s1'`).run(),
+      ).toThrow(/FOREIGN KEY/);
+    });
+  });
+
+  describe('FK CASCADE enforcement', () => {
+    it('deleting a source_item CASCADEs to assets', () => {
+      seedInstancesAndJob();
+      db.prepare(
+        `INSERT INTO source_items(source_instance_id,external_id,fingerprint,stable_key,item_key,stable_short_id,content_kind,discovered_at,status,created_at,updated_at)
+         VALUES('s1','e1','fp','sk','ik','sid','article','t','discovered','t','t')`,
+      ).run();
+      db.prepare(
+        `INSERT INTO assets(source_item_id,original_url,status,created_at,updated_at)
+         VALUES(1,'u','pending','t','t')`,
+      ).run();
+      db.prepare(`DELETE FROM source_items WHERE id=1`).run();
+      const left = db
+        .prepare(`SELECT COUNT(*) c FROM assets WHERE source_item_id=1`)
+        .get() as { c: number };
+      expect(left.c).toBe(0);
+    });
+
+    it('deleting a migration_job CASCADEs to migration_attempts', () => {
+      seedInstancesAndJob();
+      db.prepare(
+        `INSERT INTO migration_attempts(migration_job_id,attempt_scope,source_item_id,stage,action_code,attempt_no,started_at,created_at)
+         VALUES('j1','job',NULL,'preflight','stage_attempt',1,'t','t')`,
+      ).run();
+      db.prepare(`DELETE FROM migration_jobs WHERE id='j1'`).run();
+      const left = db
+        .prepare(`SELECT COUNT(*) c FROM migration_attempts WHERE migration_job_id='j1'`)
+        .get() as { c: number };
+      expect(left.c).toBe(0);
+    });
+
+    it('deleting a cleanup_item CASCADEs to cleanup_action_attempts', () => {
+      seedInstancesAndJob();
+      seedFullCleanupChain();
+      db.prepare(
+        `INSERT INTO cleanup_action_attempts(cleanup_item_id,attempt_no,started_at,created_at)
+         VALUES(1,1,'t','t')`,
+      ).run();
+      db.prepare(`DELETE FROM cleanup_items WHERE id=1`).run();
+      const left = db
+        .prepare(`SELECT COUNT(*) c FROM cleanup_action_attempts WHERE cleanup_item_id=1`)
+        .get() as { c: number };
+      expect(left.c).toBe(0);
+    });
+  });
+
+  describe('FK RESTRICT on cleanup_items.source_item_id (§16.10)', () => {
+    it('cleanup_items.source_item_id RESTRICT blocks source_items delete', () => {
+      seedInstancesAndJob();
+      seedFullCleanupChain();
+      expect(() =>
+        db.prepare(`DELETE FROM source_items WHERE id=1`).run(),
+      ).toThrow(/FOREIGN KEY/);
+    });
+  });
+
+  describe('FK SET NULL on migration_attempts.target_artifact_id (§16.7)', () => {
+    it('deleting a target_artifact SET NULLs migration_attempts.target_artifact_id', () => {
+      seedInstancesAndJob();
+      db.prepare(
+        `INSERT INTO source_items(source_instance_id,external_id,fingerprint,stable_key,item_key,stable_short_id,content_kind,discovered_at,status,created_at,updated_at)
+         VALUES('s1','e1','fp','sk','ik','sid','article','t','discovered','t','t')`,
+      ).run();
+      db.prepare(
+        `INSERT INTO target_artifacts(migration_job_id,source_item_id,artifact_kind,target_instance_id,relative_path,status,created_at,updated_at)
+         VALUES('j1',1,'note','t1','n.md','verified','t','t')`,
+      ).run();
+      db.prepare(
+        `INSERT INTO migration_attempts(migration_job_id,attempt_scope,source_item_id,target_artifact_id,stage,action_code,attempt_no,started_at,created_at)
+         VALUES('j1','item',1,1,'writing_target','stage_attempt',1,'t','t')`,
+      ).run();
+      db.prepare(`DELETE FROM target_artifacts WHERE id=1`).run();
+      const row = db
+        .prepare(`SELECT target_artifact_id taid FROM migration_attempts WHERE id=1`)
+        .get() as { taid: number | null };
+      expect(row.taid).toBeNull();
+    });
+  });
+
+  describe('FK SET NULL enforcement', () => {
+    it('deleting a source_item SET NULLs target_artifacts.source_item_id', () => {
+      seedInstancesAndJob();
+      db.prepare(
+        `INSERT INTO source_items(source_instance_id,external_id,fingerprint,stable_key,item_key,stable_short_id,content_kind,discovered_at,status,created_at,updated_at)
+         VALUES('s1','e1','fp','sk','ik','sid','article','t','discovered','t','t')`,
+      ).run();
+      db.prepare(
+        `INSERT INTO target_artifacts(migration_job_id,source_item_id,artifact_kind,target_instance_id,relative_path,status,created_at,updated_at)
+         VALUES('j1',1,'note','t1','x.md','verified','t','t')`,
+      ).run();
+      db.prepare(`DELETE FROM source_items WHERE id=1`).run();
+      const row = db
+        .prepare(`SELECT source_item_id sid FROM target_artifacts WHERE id=1`)
+        .get() as { sid: number | null };
+      expect(row.sid).toBeNull();
+    });
+  });
+
+  describe('CHECK constraints', () => {
+    it('target_artifacts.status CHECK rejects unknown value', () => {
+      seedInstancesAndJob();
+      expect(() =>
+        db.prepare(
+          `INSERT INTO target_artifacts(migration_job_id,artifact_kind,target_instance_id,relative_path,status,created_at,updated_at)
+           VALUES('j1','note','t1','x.md','bogus','t','t')`,
+        ).run(),
+      ).toThrow(/CHECK/);
+    });
+
+    it('target_artifacts.status CHECK accepts all six spec values', () => {
+      seedInstancesAndJob();
+      for (const s of [
+        'planned',
+        'written',
+        'verified',
+        'conflict',
+        'superseded',
+        'invalid',
+      ]) {
+        db.prepare(
+          `INSERT INTO target_artifacts(migration_job_id,artifact_kind,target_instance_id,relative_path,status,created_at,updated_at)
+           VALUES('j1','note','t1','p-${s}.md',?, 't','t')`,
+        ).run(s);
+      }
+      const n = db
+        .prepare(`SELECT COUNT(*) c FROM target_artifacts`)
+        .get() as { c: number };
+      expect(n.c).toBe(6);
+    });
+
+    it('migration_attempts.attempt_scope CHECK rejects unknown value', () => {
+      seedInstancesAndJob();
+      expect(() =>
+        db.prepare(
+          `INSERT INTO migration_attempts(migration_job_id,attempt_scope,source_item_id,stage,action_code,attempt_no,started_at,created_at)
+           VALUES('j1','batch',NULL,'preflight','stage_attempt',1,'t','t')`,
+        ).run(),
+      ).toThrow(/CHECK/);
+    });
+
+    it('migration_attempts compound CHECK rejects item scope with NULL source_item_id', () => {
+      seedInstancesAndJob();
+      expect(() =>
+        db.prepare(
+          `INSERT INTO migration_attempts(migration_job_id,attempt_scope,source_item_id,stage,action_code,attempt_no,started_at,created_at)
+           VALUES('j1','item',NULL,'preflight','stage_attempt',1,'t','t')`,
+        ).run(),
+      ).toThrow(/CHECK/);
+    });
+
+    it('migration_attempts compound CHECK rejects job scope with non-NULL source_item_id', () => {
+      seedInstancesAndJob();
+      db.prepare(
+        `INSERT INTO source_items(source_instance_id,external_id,fingerprint,stable_key,item_key,stable_short_id,content_kind,discovered_at,status,created_at,updated_at)
+         VALUES('s1','e1','fp','sk','ik','sid','article','t','discovered','t','t')`,
+      ).run();
+      expect(() =>
+        db.prepare(
+          `INSERT INTO migration_attempts(migration_job_id,attempt_scope,source_item_id,stage,action_code,attempt_no,started_at,created_at)
+           VALUES('j1','job',1,'preflight','stage_attempt',1,'t','t')`,
+        ).run(),
+      ).toThrow(/CHECK/);
+    });
+  });
+
+  describe('partial unique indexes (§16.6, §16.7)', () => {
+    it('uq_migration_attempts_job prevents duplicate job-scope attempt', () => {
+      seedInstancesAndJob();
+      const ins = db.prepare(
+        `INSERT INTO migration_attempts(migration_job_id,attempt_scope,source_item_id,stage,action_code,attempt_no,started_at,created_at)
+         VALUES('j1','job',NULL,'preflight','stage_attempt',1,'t','t')`,
+      );
+      ins.run();
+      expect(() => ins.run()).toThrow(/UNIQUE/);
+    });
+
+    it('uq_migration_attempts_item prevents duplicate item-scope attempt', () => {
+      seedInstancesAndJob();
+      db.prepare(
+        `INSERT INTO source_items(source_instance_id,external_id,fingerprint,stable_key,item_key,stable_short_id,content_kind,discovered_at,status,created_at,updated_at)
+         VALUES('s1','e1','fp','sk','ik','sid','article','t','discovered','t','t')`,
+      ).run();
+      const ins = db.prepare(
+        `INSERT INTO migration_attempts(migration_job_id,attempt_scope,source_item_id,stage,action_code,attempt_no,started_at,created_at)
+         VALUES('j1','item',1,'extracting','stage_attempt',1,'t','t')`,
+      );
+      ins.run();
+      expect(() => ins.run()).toThrow(/UNIQUE/);
+    });
+
+    it('item-scope attempt does NOT collide with job-scope attempt of same (job,stage,action,attempt_no)', () => {
+      // This is the §16.7 NULL-distinct problem the partial indexes solve.
+      seedInstancesAndJob();
+      db.prepare(
+        `INSERT INTO source_items(source_instance_id,external_id,fingerprint,stable_key,item_key,stable_short_id,content_kind,discovered_at,status,created_at,updated_at)
+         VALUES('s1','e1','fp','sk','ik','sid','article','t','discovered','t','t')`,
+      ).run();
+      db.prepare(
+        `INSERT INTO migration_attempts(migration_job_id,attempt_scope,source_item_id,stage,action_code,attempt_no,started_at,created_at)
+         VALUES('j1','job',NULL,'preflight','stage_attempt',1,'t','t')`,
+      ).run();
+      expect(() =>
+        db.prepare(
+          `INSERT INTO migration_attempts(migration_job_id,attempt_scope,source_item_id,stage,action_code,attempt_no,started_at,created_at)
+           VALUES('j1','item',1,'preflight','stage_attempt',1,'t','t')`,
+        ).run(),
+      ).not.toThrow();
+    });
+
+    it('uq_target_artifacts_job_path prevents duplicate job-scope artifact', () => {
+      seedInstancesAndJob();
+      db.prepare(
+        `INSERT INTO target_artifacts(migration_job_id,source_item_id,artifact_kind,target_instance_id,relative_path,status,created_at,updated_at)
+         VALUES('j1',NULL,'index','t1','idx.md','verified','t','t')`,
+      ).run();
+      expect(() =>
+        db.prepare(
+          `INSERT INTO target_artifacts(migration_job_id,source_item_id,artifact_kind,target_instance_id,relative_path,status,created_at,updated_at)
+           VALUES('j1',NULL,'index','t1','idx.md','verified','t','t')`,
+        ).run(),
+      ).toThrow(/UNIQUE/);
+    });
+
+    it('uq_target_artifacts_source_bound prevents duplicate source-bound artifact', () => {
+      seedInstancesAndJob();
+      db.prepare(
+        `INSERT INTO source_items(source_instance_id,external_id,fingerprint,stable_key,item_key,stable_short_id,content_kind,discovered_at,status,created_at,updated_at)
+         VALUES('s1','e1','fp','sk','ik','sid','article','t','discovered','t','t')`,
+      ).run();
+      db.prepare(
+        `INSERT INTO target_artifacts(migration_job_id,source_item_id,artifact_kind,target_instance_id,relative_path,status,created_at,updated_at)
+         VALUES('j1',1,'note','t1','a.md','verified','t','t')`,
+      ).run();
+      // same (job,item,kind) → conflict, even with different path
+      expect(() =>
+        db.prepare(
+          `INSERT INTO target_artifacts(migration_job_id,source_item_id,artifact_kind,target_instance_id,relative_path,status,created_at,updated_at)
+           VALUES('j1',1,'note','t1','b.md','verified','t','t')`,
+        ).run(),
+      ).toThrow(/UNIQUE/);
+    });
+  });
+
+  describe('unique constraints (non-partial)', () => {
+    it('source_items fingerprint unique per instance', () => {
+      seedInstancesAndJob();
+      const ins = db.prepare(
+        `INSERT INTO source_items(source_instance_id,fingerprint,stable_key,item_key,stable_short_id,content_kind,discovered_at,status,created_at,updated_at)
+         VALUES('s1','fp','sk','ik','sid','article','t','discovered','t','t')`,
+      );
+      ins.run();
+      expect(() => ins.run()).toThrow(/UNIQUE/);
+    });
+  });
+
+  describe('database transactions (§16.12)', () => {
+    it('rolls back on error inside a transaction', () => {
+      seedInstancesAndJob();
+      const before = (
+        db.prepare(`SELECT COUNT(*) c FROM source_items`).get() as { c: number }
+      ).c;
+      expect(() => {
+        const tx = db.transaction(() => {
+          db.prepare(
+            `INSERT INTO source_items(source_instance_id,fingerprint,stable_key,item_key,stable_short_id,content_kind,discovered_at,status,created_at,updated_at)
+             VALUES('s1','fp','sk','ik','sid','article','t','discovered','t','t')`,
+          ).run();
+          // second insert with same fingerprint → UNIQUE violation → rollback
+          db.prepare(
+            `INSERT INTO source_items(source_instance_id,fingerprint,stable_key,item_key,stable_short_id,content_kind,discovered_at,status,created_at,updated_at)
+             VALUES('s1','fp','sk2','ik2','sid2','article','t','discovered','t','t')`,
+          ).run();
+        });
+        tx();
+      }).toThrow(/UNIQUE/);
+      const after = (
+        db.prepare(`SELECT COUNT(*) c FROM source_items`).get() as { c: number }
+      ).c;
+      expect(after).toBe(before); // first insert rolled back too
+    });
+  });
+});
