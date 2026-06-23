@@ -58,6 +58,9 @@ export {
   ConfigValidationError,
 } from './config/loader.js';
 
+// reports
+export { writeCsv, escapeCsvField } from './reports/csv-writer.js';
+
 // runtime
 export { acquireLock, LockConflictError } from './runtime/locks.js';
 export type { AcquireOptions, HeldLock } from './runtime/locks.js';
