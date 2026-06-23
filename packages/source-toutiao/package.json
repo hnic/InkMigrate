@@ -15,7 +15,8 @@
     "build": "tsc -b",
     "typecheck": "tsc -b",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "record:fixture": "tsx scripts/record-toutiao-fixture.ts"
   },
   "dependencies": {
     "@inkmigrate/core": "workspace:*",
