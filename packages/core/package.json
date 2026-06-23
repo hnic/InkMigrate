@@ -25,6 +25,8 @@
     "semver": "^7.6.3"
   },
   "devDependencies": {
+    "@inkmigrate/source-toutiao": "workspace:*",
+    "@inkmigrate/target-obsidian": "workspace:*",
     "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^24.0.0",
     "@types/semver": "^7.5.8",

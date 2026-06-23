@@ -45,6 +45,12 @@ importers:
         specifier: ^3.23.8
         version: 3.25.76
     devDependencies:
+      '@inkmigrate/source-toutiao':
+        specifier: workspace:*
+        version: link:../source-toutiao
+      '@inkmigrate/target-obsidian':
+        specifier: workspace:*
+        version: link:../target-obsidian
       '@types/better-sqlite3':
         specifier: ^7.6.11
         version: 7.6.13
