@@ -1,0 +1,106 @@
+import TurndownService from 'turndown';
+import { gfm } from 'turndown-plugin-gfm';
+import type { SourceItem } from '@inkmigrate/core';
+
+/** §13.6 共享的 turndown 实例（启用 GFM 表格/任务列表）。 */
+const turndown = new TurndownService({
+  headingStyle: 'atx',
+  codeBlockStyle: 'fenced',
+  bulletListMarker: '-',
+  emDelimiter: '*',
+});
+turndown.use(gfm);
+
+// 显式移除 script/style，避免任何残留（turndown 默认会忽略未知标签，
+// 但脚本内容可能漏出）。
+turndown.remove('script');
+turndown.remove('style');
+
+/** §13.6 把来源 HTML 转为 Markdown。 */
+export function htmlToMarkdown(html: string): string {
+  if (html.trim().length === 0) return '';
+  return turndown.turndown(html).trim();
+}
+
+export interface AssetLink {
+  /** 在 markdownBody 中占位的字符串，渲染后会被替换为实际嵌入语法。 */
+  markdownPlaceholder: string;
+  /** 附件在 Vault 内的相对路径。 */
+  relativePath: string;
+}
+
+export interface RenderBodyInput {
+  item: SourceItem;
+  /** 已经 HTML→Markdown 转换好的正文。 */
+  markdownBody: string;
+  /** 正文中的附件引用。 */
+  assetLinks: AssetLink[];
+  /** §13.7 链接风格，默认 wikilink。 */
+  linkStyle?: 'wikilink' | 'markdown';
+}
+
+/** §13.6 正文模板渲染。 */
+export function renderBody(i: RenderBodyInput): string {
+  const { item } = i;
+  const linkStyle = i.linkStyle ?? 'wikilink';
+
+  const lines: string[] = [];
+  lines.push(`# ${item.title}`);
+  lines.push('');
+
+  // 来源信息 callout
+  const infoLines: string[] = [];
+  infoLines.push(`- 来源：${sourceLabel(item)}`);
+  if (item.author !== undefined) infoLines.push(`- 作者：${item.author}`);
+  if (item.publishedAt !== undefined) {
+    infoLines.push(`- 发布时间：${formatDateLine(item.publishedAt)}`);
+  }
+  if (item.favoritedAt !== undefined) {
+    infoLines.push(`- 收藏时间：${formatDateLine(item.favoritedAt)}`);
+  }
+  if (item.ref.canonicalUrl !== undefined) {
+    infoLines.push(`- [打开原文](${item.ref.canonicalUrl})`);
+  }
+  lines.push('> [!info] 来源信息');
+  for (const l of infoLines) lines.push(`> ${l}`);
+  lines.push('');
+
+  // 正文
+  lines.push('## 正文');
+  lines.push('');
+  let body = i.markdownBody;
+  // 替换附件占位符
+  for (const link of i.assetLinks) {
+    const embed =
+      linkStyle === 'wikilink'
+        ? `![[${link.relativePath}]]`
+        : `![](${link.relativePath})`;
+    body = body.split(link.markdownPlaceholder).join(embed);
+  }
+  lines.push(body);
+  lines.push('');
+
+  // 迁移说明 callout
+  lines.push('---');
+  lines.push('');
+  lines.push('> [!note] 迁移说明');
+  lines.push('> 本文由 InkMigrate 在本地从用户自己的来源数据中导入。');
+  lines.push('');
+
+  return lines.join('\n');
+}
+
+/** 从 sourceInstanceId 推导中文来源标签（仅用于显示）。 */
+function sourceLabel(item: SourceItem): string {
+  const id = item.ref.sourceInstanceId;
+  if (id.startsWith('toutiao')) return '今日头条';
+  if (id.startsWith('evernote')) return 'Evernote';
+  return id;
+}
+
+/** 把 ISO 8601 时间格式化为 "YYYY-MM-DD HH:mm" 显示。 */
+function formatDateLine(iso: string): string {
+  // 保持时区信息：直接切片 "2025-12-20T10:35:00+08:00" → "2025-12-20 10:35"
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(iso);
+  return m ? `${m[1]} ${m[2]}` : iso;
+}
