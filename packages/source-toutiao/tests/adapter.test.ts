@@ -17,9 +17,9 @@ import {
 import { loadFixture } from './helpers/fixtures.js';
 
 describe('TOUTIAO_CAPABILITIES (§12.1)', () => {
-  it('v1.0 declares supportsSourceCleanup=false', () => {
-    expect(TOUTIAO_CAPABILITIES.supportsSourceCleanup).toBe(false);
-    expect(TOUTIAO_CAPABILITIES.cleanupActions).toEqual([]);
+  it('v1.1 declares supportsSourceCleanup=true with unfavorite action', () => {
+    expect(TOUTIAO_CAPABILITIES.supportsSourceCleanup).toBe(true);
+    expect(TOUTIAO_CAPABILITIES.cleanupActions).toEqual(['unfavorite']);
   });
   it('declares correct authMode and discoveryMode', () => {
     expect(TOUTIAO_CAPABILITIES.authMode).toBe('browser-profile');
@@ -36,7 +36,8 @@ describe('createToutiaoSource (§8.2 contract)', () => {
     expect(source.kind).toBe('toutiao');
     expect(source.adapterApiVersion).toMatch(/^1\./);
     expect(source.capabilities).toBe(TOUTIAO_CAPABILITIES);
-    expect(source.cleanup).toBeUndefined();
+    expect(source.cleanup).toBeDefined();
+    expect(source.cleanup?.supportedActions).toEqual(['unfavorite']);
   });
 
   it('scan yields SourceItemRefs from favorites fixture (via inject)', async () => {

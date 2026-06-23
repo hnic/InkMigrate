@@ -30,7 +30,13 @@ export function createToutiaoSource(): SourceAdapter {
     version: SOURCE_TOUTIAO_VERSION,
     adapterApiVersion: SOURCE_TOUTIAO_ADAPTER_API_VERSION,
     capabilities: TOUTIAO_CAPABILITIES,
-    // §12.1 v1.0 supportsSourceCleanup=false → cleanup 必须 undefined
+    // §12.1 v1.1 supportsSourceCleanup=true → cleanup 必须存在（§8.2 不变量）
+    cleanup: {
+      supportedActions: ['unfavorite'],
+      inspectActionState: async () => ({ state: 'unknown' }),
+      executeAction: async () => ({ success: false, reason: 'requires real browser session' }),
+      verifyAction: async () => ({ verified: false }),
+    },
     validateConfig: async () => ({ ok: true }),
     prepare: async () => {
       // 真实实现：启动 Playwright、加载 Profile；stage 3 占位
