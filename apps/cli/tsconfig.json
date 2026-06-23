@@ -8,6 +8,7 @@
   "include": ["src/**/*"],
   "references": [
     { "path": "../../packages/core" },
-    { "path": "../../packages/source-toutiao" }
+    { "path": "../../packages/source-toutiao" },
+    { "path": "../../packages/target-obsidian" }
   ]
 }
