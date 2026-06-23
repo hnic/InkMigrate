@@ -6,7 +6,7 @@
 
 ## 状态
 
-当前仓库处于 v1.0 阶段 3（今日头条只读来源适配器）。阶段 1（基础工程）、阶段 2（Obsidian 目标适配器）与阶段 3 已完成；阶段 4（v1.0 迁移闭环）将交付 Job 编排、断点续传、重试与完整性对账。完整需求见 `docs/InkMigrate_Product_and_Technical_Requirements_v1.4_zh-CN.md`。
+当前仓库处于 v1.0 阶段 4（v1.0 迁移闭环）。阶段 1-4 全部完成。v1.0 发布前需通过 §24.6 人工真实账号 E2E 验收清单（`docs/e2e-v1.0-acceptance-checklist.md`）。完整需求见 `docs/InkMigrate_Product_and_Technical_Requirements_v1.4_zh-CN.md`。
 
 ## 环境要求
 

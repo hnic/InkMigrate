@@ -6,7 +6,7 @@ Local-first, verifiable, resumable, auditable knowledge-migration toolkit. Plugg
 
 ## Status
 
-Currently at v1.0 stage 3 (Toutiao read-only source adapter). Stages 1 (foundation), 2 (Obsidian target adapter), and 3 are complete; stage 4 (v1.0 migration closure) will deliver Job orchestration, resume, retry, and integrity reconciliation. Full spec: `docs/InkMigrate_Product_and_Technical_Requirements_v1.4_zh-CN.md`.
+Currently at v1.0 stage 4 (v1.0 migration closure). Stages 1-4 are all complete. Pre-release requires passing the §24.6 manual real-account E2E acceptance checklist (`docs/e2e-v1.0-acceptance-checklist.md`). Full spec: `docs/InkMigrate_Product_and_Technical_Requirements_v1.4_zh-CN.md`.
 
 ## Requirements
 
