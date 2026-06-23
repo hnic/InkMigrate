@@ -20,3 +20,18 @@ export const FIXTURE_NAMES = [
   'challenge',
   'favorites-list',
 ] as const;
+
+const CLEANUP_FIXTURES_DIR = join(__dirname, '..', 'fixtures', 'toutiao-cleanup');
+
+export function loadCleanupFixture(name: string): string {
+  return readFileSync(join(CLEANUP_FIXTURES_DIR, `${name}.html`), 'utf8');
+}
+
+export const CLEANUP_FIXTURE_NAMES = [
+  'favorited-article',
+  'not-favorited-article',
+  'unfavorite-success',
+  'unfavorite-failed',
+  'list-edit-mode',
+  'ambiguous-button-state',
+] as const;
