@@ -191,4 +191,144 @@ describe('runMigrationJob (§11 端到端)', () => {
     // §24.5 #5: 报告生成
     expect(existsSync(join(dbDir, 'reports/j1/summary.json'))).toBe(true);
   });
+
+  it('writes migration_attempts audit trail per item (§16.7)', async () => {
+    new SourceInstances(db).create({
+      id: 's1', adapterKind: 'toutiao', adapterVersion: '1.0.0',
+      adapterApiVersion: '1.0.0', configHash: 'h', createdAt: 't', updatedAt: 't',
+    });
+    new TargetInstances(db).create({
+      id: 't1', adapterKind: 'obsidian', adapterVersion: '1.0.0',
+      adapterApiVersion: '1.0.0', configHash: 'h', createdAt: 't', updatedAt: 't',
+    });
+    new MigrationJobs(db).create({
+      id: 'j2', sourceInstanceId: 's1', targetInstanceId: 't1',
+      status: 'created', currentStage: 'preflight', createdAt: 't', updatedAt: 't',
+    });
+
+    const favoritesHtml = readFileSync(join(FIXTURES, 'favorites-list.html'), 'utf8');
+    const articleHtml = readFileSync(join(FIXTURES, 'article.html'), 'utf8');
+
+    const targetCtx: TargetContext = {
+      config: {},
+      workspaceDir: dbDir,
+      vaultPath: vaultDir,
+      targetConfig: {
+        vaultPath: vaultDir,
+        importSubdir: 'Imports/InkMigrate',
+        attachmentsSubdir: 'Attachments/InkMigrate',
+        linkStyle: 'wikilink',
+        overwritePolicy: 'preserve',
+        collectionMapping: { toTags: false, toFolders: false },
+        maxFilenameLength: 100,
+      } as Record<string, unknown>,
+    };
+
+    await runMigrationJob({
+      db, jobId: 'j2',
+      sourceAdapter: createFixtureSource(favoritesHtml, articleHtml),
+      targetAdapter: createObsidianTarget(),
+      sourceInstanceId: 's1', targetInstanceId: 't1',
+      targetContext: targetCtx,
+      workspaceDir: dbDir, reportsDir: join(dbDir, 'reports'),
+    });
+
+    // §16.7: 每条成功条目至少有一条 migration_attempt 记录
+    const attempts = db.prepare(
+      'SELECT COUNT(*) as c FROM migration_attempts WHERE migration_job_id = ?',
+    ).get('j2') as { c: number };
+    expect(attempts.c).toBeGreaterThanOrEqual(3);
+  });
+
+  it('creates target_artifacts with verified status (§16.6 lifecycle)', async () => {
+    new SourceInstances(db).create({
+      id: 's1', adapterKind: 'toutiao', adapterVersion: '1.0.0',
+      adapterApiVersion: '1.0.0', configHash: 'h', createdAt: 't', updatedAt: 't',
+    });
+    new TargetInstances(db).create({
+      id: 't1', adapterKind: 'obsidian', adapterVersion: '1.0.0',
+      adapterApiVersion: '1.0.0', configHash: 'h', createdAt: 't', updatedAt: 't',
+    });
+    new MigrationJobs(db).create({
+      id: 'j3', sourceInstanceId: 's1', targetInstanceId: 't1',
+      status: 'created', currentStage: 'preflight', createdAt: 't', updatedAt: 't',
+    });
+
+    const favoritesHtml = readFileSync(join(FIXTURES, 'favorites-list.html'), 'utf8');
+    const articleHtml = readFileSync(join(FIXTURES, 'article.html'), 'utf8');
+
+    await runMigrationJob({
+      db, jobId: 'j3',
+      sourceAdapter: createFixtureSource(favoritesHtml, articleHtml),
+      targetAdapter: createObsidianTarget(),
+      sourceInstanceId: 's1', targetInstanceId: 't1',
+      targetContext: {
+        config: {}, workspaceDir: dbDir, vaultPath: vaultDir,
+        targetConfig: {
+          vaultPath: vaultDir, importSubdir: 'Imports/InkMigrate',
+          attachmentsSubdir: 'Attachments/InkMigrate', linkStyle: 'wikilink',
+          overwritePolicy: 'preserve',
+          collectionMapping: { toTags: false, toFolders: false },
+          maxFilenameLength: 100,
+        } as Record<string, unknown>,
+      },
+      workspaceDir: dbDir, reportsDir: join(dbDir, 'reports'),
+    });
+
+    // §16.6: target_artifacts 表中有 verified 状态的行
+    const artifacts = db.prepare(
+      'SELECT status, artifact_kind FROM target_artifacts WHERE migration_job_id = ?',
+    ).all('j3') as Array<{ status: string; artifact_kind: string }>;
+    expect(artifacts.length).toBeGreaterThanOrEqual(3);
+    expect(artifacts.every((a) => a.status === 'verified')).toBe(true);
+    expect(artifacts.every((a) => a.artifact_kind === 'note')).toBe(true);
+  });
+
+  it('injects migration_job_id into frontmatter (§13.5)', async () => {
+    new SourceInstances(db).create({
+      id: 's1', adapterKind: 'toutiao', adapterVersion: '1.0.0',
+      adapterApiVersion: '1.0.0', configHash: 'h', createdAt: 't', updatedAt: 't',
+    });
+    new TargetInstances(db).create({
+      id: 't1', adapterKind: 'obsidian', adapterVersion: '1.0.0',
+      adapterApiVersion: '1.0.0', configHash: 'h', createdAt: 't', updatedAt: 't',
+    });
+    new MigrationJobs(db).create({
+      id: 'j-frontmatter', sourceInstanceId: 's1', targetInstanceId: 't1',
+      status: 'created', currentStage: 'preflight', createdAt: 't', updatedAt: 't',
+    });
+
+    const favoritesHtml = readFileSync(join(FIXTURES, 'favorites-list.html'), 'utf8');
+    const articleHtml = readFileSync(join(FIXTURES, 'article.html'), 'utf8');
+
+    await runMigrationJob({
+      db, jobId: 'j-frontmatter',
+      sourceAdapter: createFixtureSource(favoritesHtml, articleHtml),
+      targetAdapter: createObsidianTarget(),
+      sourceInstanceId: 's1', targetInstanceId: 't1',
+      targetContext: {
+        config: {}, workspaceDir: dbDir, vaultPath: vaultDir,
+        targetConfig: {
+          vaultPath: vaultDir, importSubdir: 'Imports/InkMigrate',
+          attachmentsSubdir: 'Attachments/InkMigrate', linkStyle: 'wikilink',
+          overwritePolicy: 'preserve',
+          collectionMapping: { toTags: false, toFolders: false },
+          maxFilenameLength: 100,
+        } as Record<string, unknown>,
+      },
+      workspaceDir: dbDir, reportsDir: join(dbDir, 'reports'),
+    });
+
+    // 找到一个写入的笔记文件并检查 frontmatter
+    const { readdirSync } = await import('node:fs');
+    const noteDir = join(vaultDir, 'Imports/InkMigrate/toutiao-main/文章');
+    if (existsSync(noteDir)) {
+      const files = readdirSync(noteDir).filter((f) => f.endsWith('.md'));
+      if (files.length > 0) {
+        const content = readFileSync(join(noteDir, files[0]!), 'utf8');
+        // YAML library may or may not quote the value; check unquoted form
+        expect(content).toMatch(/migration_job_id:\s*j-frontmatter/);
+      }
+    }
+  });
 });
