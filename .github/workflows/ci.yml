@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'stage*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node-version: [24]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build core + testkit (for downstream imports)
+        run: |
+          pnpm --filter @inkmigrate/core build
+          pnpm --filter @inkmigrate/testkit build
+
+      - name: Typecheck
+        run: pnpm -r run typecheck
+
+      - name: Test
+        run: pnpm -r run test
+
+      - name: Build all
+        run: pnpm -r run build
+
+      - name: CLI smoke test
+        run: |
+          node apps/cli/dist/index.js --help
+          node apps/cli/dist/index.js --version
