@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@inkmigrate/core": "workspace:*",
+    "@inkmigrate/source-toutiao": "workspace:*",
     "commander": "^12.1.0"
   },
   "devDependencies": {

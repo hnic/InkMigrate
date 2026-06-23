@@ -13,6 +13,9 @@ importers:
       '@inkmigrate/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@inkmigrate/source-toutiao':
+        specifier: workspace:*
+        version: link:../../packages/source-toutiao
       commander:
         specifier: ^12.1.0
         version: 12.1.0

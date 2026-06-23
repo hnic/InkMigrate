@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import { CORE_VERSION } from '@inkmigrate/core';
+import { createAuthCommand } from './commands/auth.js';
 
 const program = new Command();
 
@@ -11,9 +12,8 @@ program
   )
   .version(CORE_VERSION);
 
-// 阶段 1 暂不注册业务子命令；阶段 2-6 起逐步加入
-// init / source / target / auth / scan / migrate / resume / verify / status /
-// report / conflict / cleanup / diagnostics / doctor / config。
+// auth 子命令（§12.2）在阶段 3 注册；其余子命令在后续阶段加入。
+program.addCommand(createAuthCommand());
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   console.error(err instanceof Error ? err.message : String(err));
