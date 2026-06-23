@@ -27,8 +27,14 @@ export interface ScanInput {
    * scanner 只做去重和解析。
    */
   scrollForMore: () => Promise<string | null | undefined>;
+  /**
+   * 连续多少轮无新条目后终止。§12.5 默认 5。调用方可覆盖。
+   */
   maxEmptyCycles: number;
 }
+
+/** §12.5 默认终止阈值：连续 5 次没有新条目。 */
+export const DEFAULT_MAX_EMPTY_CYCLES = 5;
 
 export interface ScanResult {
   items: FavoriteItem[];

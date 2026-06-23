@@ -15,7 +15,7 @@ export {
 } from './config.js';
 export { runSafetyPipeline } from './pipeline/pipeline.js';
 export { extractDetail } from './extract/detail-extractor.js';
-export { scanFavoritesList } from './scan/scanner.js';
+export { scanFavoritesList, DEFAULT_MAX_EMPTY_CYCLES } from './scan/scanner.js';
 export {
   canonicalizeToutiaoUrl,
   extractToutiaoContentId,
