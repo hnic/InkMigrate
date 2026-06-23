@@ -168,13 +168,14 @@ async function writeNote(
     case 'write_canonical':
     case 'forced_overwrite':
     case 'update_metadata_only':
-      atomicWrite(absPath, contentToWrite);
+      atomicWrite(absPath, contentToWrite, config.vaultPath);
       break;
     case 'write_new_variant': {
       finalRelativePath = oplan.relativePath.replace(/\.md$/, '.imported-new.md');
       atomicWrite(
         noteAbsolutePath(config.vaultPath, finalRelativePath),
         contentToWrite,
+        config.vaultPath,
       );
       break;
     }

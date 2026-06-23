@@ -20,7 +20,14 @@ export const ObsidianTargetConfigSchema = z
     overwritePolicy: z
       .enum(['preserve', 'replace', 'write-new', 'metadata-only'])
       .default('preserve'),
-    /** §13.5 集合映射策略，默认原样写入 source_collections，不转标签/目录。 */
+    /**
+     * §13.5 集合映射策略，默认原样写入 source_collections，不转标签/目录。
+     *
+     * **阶段 2 边界**：本字段在 schema 中接受并校验，但 `frontmatter.ts`/
+     * `paths.ts` 当前不读取它。`toTags: true` / `toFolders: true` 在阶段 2
+     * 是静默 no-op。完整映射逻辑（按 §13.5 把 collection 转成标签或目录段）
+     * 在阶段 4 Job 编排层接入时实现，届时会同步加测试。
+     */
     collectionMapping: z
       .object({
         toTags: z.boolean().default(false),

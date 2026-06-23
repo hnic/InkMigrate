@@ -8,6 +8,7 @@ import {
 } from 'node:fs';
 import { dirname, join, basename } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { assertSymlinkSafe } from '@inkmigrate/core';
 
 /**
  * §13.10 原子写入流程：
@@ -18,9 +19,16 @@ import { randomBytes } from 'node:crypto';
  * 4. 验证非空。
  * 5. 原子 rename 到目标路径。
  *
+ * §13.2 任何目标路径都必须在解引用符号链接后再次确认位于 Vault 内。
+ * 本函数要求调用方传入 `vaultRoot`，写入前对目标路径做 `assertSymlinkSafe`。
+ *
  * 任何验证失败都不触碰目标文件，并清理临时文件。
  */
-export function atomicWrite(targetPath: string, content: string): void {
+export function atomicWrite(
+  targetPath: string,
+  content: string,
+  vaultRoot?: string,
+): void {
   // Step 4 (early): 非空检查
   if (content.length === 0) {
     throw new Error('atomicWrite: content is empty');
@@ -28,6 +36,11 @@ export function atomicWrite(targetPath: string, content: string): void {
 
   // Step 3: frontmatter 结构验证
   validateFrontmatterStructure(content);
+
+  // §13.2 符号链接逃逸防护：如果调用方提供了 vaultRoot，写入前再次确认
+  if (vaultRoot !== undefined && existsSync(targetPath)) {
+    assertSymlinkSafe(vaultRoot, targetPath);
+  }
 
   const dir = dirname(targetPath);
   mkdirSync(dir, { recursive: true });
