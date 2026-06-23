@@ -13,6 +13,7 @@ import { createStatusCommand } from './commands/status.js';
 import { createReportCommand } from './commands/report.js';
 import { createDiagnosticsCommand } from './commands/diagnostics.js';
 import { createDoctorCommand } from './commands/doctor.js';
+import { createCleanupCommand } from './commands/cleanup.js';
 
 const program = new Command();
 
@@ -35,6 +36,7 @@ program.addCommand(createStatusCommand());
 program.addCommand(createReportCommand());
 program.addCommand(createDiagnosticsCommand());
 program.addCommand(createDoctorCommand());
+program.addCommand(createCleanupCommand());
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   console.error(err instanceof Error ? err.message : String(err));
