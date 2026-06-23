@@ -6,7 +6,7 @@
 
 ## 状态
 
-当前仓库处于 v1.0 阶段 1（基础工程）。阶段 2 起将逐步交付 Obsidian 目标适配器与今日头条来源适配器。完整需求见 `docs/InkMigrate_Product_and_Technical_Requirements_v1.4_zh-CN.md`。
+当前仓库处于 v1.0 阶段 2（Obsidian 目标适配器）。阶段 1（基础工程）与阶段 2 已完成；阶段 3 起将逐步交付今日头条来源适配器。完整需求见 `docs/InkMigrate_Product_and_Technical_Requirements_v1.4_zh-CN.md`。
 
 ## 环境要求
 
@@ -33,6 +33,7 @@ pnpm inkmigrate --version
 Monorepo（pnpm workspace）：
 
 - `packages/core` — 通用迁移核心：领域模型、状态机、SQLite 持久化（含 Foreign Keys、CHECK 约束和部分唯一索引）、适配器注册表与 API 版本检查、安全（三类哈希、日志脱敏、路径防护、文件名清理）、配置 Schema、运行时锁与信号处理。
+- `packages/target-obsidian` — Obsidian 目标适配器：把标准 `SourceItem` 渲染为 Vault 中的 Markdown 笔记，实现 §13 全部 v1.0 要求（目录结构、YAML Properties、正文模板、附件写入、原子写入、三类哈希、四策略用户修改保护）。
 - `packages/testkit` — 适配器契约测试套件（§24.2）。
 - `apps/cli` — `inkmigrate` 命令行入口。
 

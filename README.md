@@ -6,7 +6,7 @@ Local-first, verifiable, resumable, auditable knowledge-migration toolkit. Plugg
 
 ## Status
 
-Currently at v1.0 stage 1 (foundation). Obsidian target and Toutiao source adapters arrive in later stages. Full spec: `docs/InkMigrate_Product_and_Technical_Requirements_v1.4_zh-CN.md`.
+Currently at v1.0 stage 2 (Obsidian target adapter). Stage 1 (foundation) and stage 2 are complete; the Toutiao source adapter arrives in stage 3. Full spec: `docs/InkMigrate_Product_and_Technical_Requirements_v1.4_zh-CN.md`.
 
 ## Requirements
 
