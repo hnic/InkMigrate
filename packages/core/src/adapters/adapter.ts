@@ -3,6 +3,7 @@ import type {
   SourceItem,
   SourceItemRef,
 } from '../domain/models.js';
+import type { ArtifactKind } from '../domain/states.js';
 
 export interface ValidationResult {
   ok: boolean;
@@ -20,6 +21,8 @@ export type VerifyContext = AdapterContext;
 
 export interface TargetContext extends AdapterContext {
   vaultPath: string;
+  /** §10.2 目标适配器运行时配置（已通过适配器自己的 Zod schema 校验）。 */
+  targetConfig: Record<string, unknown>;
 }
 export interface CleanupContext extends AdapterContext {}
 
@@ -89,7 +92,8 @@ export interface SourceAdapter {
 /** §8.4 目标适配器 plan/write/verify 结果类型 */
 export interface TargetPlan {
   relativePath: string;
-  artifactKind: string;
+  /** §16.6 受控值，由 ARTIFACT_KINDS 枚举约束。 */
+  artifactKind: ArtifactKind;
 }
 
 export interface TargetWriteResult {
