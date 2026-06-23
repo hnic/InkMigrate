@@ -6,7 +6,7 @@
 
 ## 状态
 
-当前仓库处于 v1.0 阶段 4（v1.0 迁移闭环）。阶段 1-4 全部完成。v1.0 发布前需通过 §24.6 人工真实账号 E2E 验收清单（`docs/e2e-v1.0-acceptance-checklist.md`）。完整需求见 `docs/InkMigrate_Product_and_Technical_Requirements_v1.4_zh-CN.md`。
+当前仓库处于 v1.1 阶段 5（索引与增强诊断）。v1.0 阶段 1-4 全部完成（v1.0-rc1）。阶段 5 交付 Obsidian 分片索引、页面选择器诊断、脱敏 HTML/截图、磁盘预估和备份提示。阶段 6（源端清理）后续单独交付。完整需求见 `docs/InkMigrate_Product_and_Technical_Requirements_v1.4_zh-CN.md`。
 
 ## 环境要求
 
