@@ -6,7 +6,7 @@
 
 ## 状态
 
-当前仓库处于 v1.0 阶段 2（Obsidian 目标适配器）。阶段 1（基础工程）与阶段 2 已完成；阶段 3 起将逐步交付今日头条来源适配器。完整需求见 `docs/InkMigrate_Product_and_Technical_Requirements_v1.4_zh-CN.md`。
+当前仓库处于 v1.0 阶段 3（今日头条只读来源适配器）。阶段 1（基础工程）、阶段 2（Obsidian 目标适配器）与阶段 3 已完成；阶段 4（v1.0 迁移闭环）将交付 Job 编排、断点续传、重试与完整性对账。完整需求见 `docs/InkMigrate_Product_and_Technical_Requirements_v1.4_zh-CN.md`。
 
 ## 环境要求
 
@@ -34,6 +34,7 @@ Monorepo（pnpm workspace）：
 
 - `packages/core` — 通用迁移核心：领域模型、状态机、SQLite 持久化（含 Foreign Keys、CHECK 约束和部分唯一索引）、适配器注册表与 API 版本检查、安全（三类哈希、日志脱敏、路径防护、文件名清理）、配置 Schema、运行时锁与信号处理。
 - `packages/target-obsidian` — Obsidian 目标适配器：把标准 `SourceItem` 渲染为 Vault 中的 Markdown 笔记，实现 §13 全部 v1.0 要求（目录结构、YAML Properties、正文模板、附件写入、原子写入、三类哈希、四策略用户修改保护）。
+- `packages/source-toutiao` — 今日头条只读来源适配器：浏览器 Profile 登录、收藏页扫描（DOM + 网络响应观察）、详情提取四策略、固定 9 阶段 HTML→Markdown 安全流水线、图片下载。通过 8 个脱敏 fixture 驱动测试（§24.3）；真实账号 E2E 是发布前人工 Gate。
 - `packages/testkit` — 适配器契约测试套件（§24.2）。
 - `apps/cli` — `inkmigrate` 命令行入口。
 
