@@ -76,6 +76,9 @@ importers:
         specifier: ^3.23.8
         version: 3.25.76
     devDependencies:
+      '@inkmigrate/testkit':
+        specifier: workspace:*
+        version: link:../testkit
       '@types/node':
         specifier: ^24.0.0
         version: 24.13.2

@@ -25,6 +25,7 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@inkmigrate/testkit": "workspace:*",
     "@types/turndown": "^5.0.5",
     "@types/node": "^24.0.0",
     "typescript": "^5.6.0",
