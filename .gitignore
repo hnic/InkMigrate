@@ -3,7 +3,7 @@
 
 # §19.1 sensitive local state
 .inkmigrate/
-reports/
+/reports/
 logs/
 playwright/.auth/
 *.sqlite
