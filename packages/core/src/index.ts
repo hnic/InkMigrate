@@ -67,3 +67,14 @@ export {
 } from './runtime/lock-content.js';
 export { installSignalHandlers } from './runtime/signals.js';
 export type { GracefulShutdownHandlers } from './runtime/signals.js';
+export { runMigrationJob } from './runtime/job-runner.js';
+export type { JobRunnerInput, JobRunnerResult } from './runtime/job-runner.js';
+export { withRetry, DEFAULT_RETRY_POLICY } from './runtime/retry.js';
+export type { RetryPolicy } from './runtime/retry.js';
+export {
+  canTransitionTo,
+  isAllowedPauseReason,
+  isTerminalStatus,
+  canResumeFrom,
+} from './runtime/job-state.js';
+export { reconcileJob, deriveFinalStateCounts } from './runtime/reconciliation.js';

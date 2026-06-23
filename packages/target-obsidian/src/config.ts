@@ -36,6 +36,12 @@ export const ObsidianTargetConfigSchema = z
       .default({ toTags: false, toFolders: false }),
     /** §13.4 文件名主体最大长度，默认 100。 */
     maxFilenameLength: z.number().int().positive().default(100),
+    /**
+     * 内部注入键（非用户配置）：Job Runner 注入的 migration_job_id，
+     * 用于 frontmatter。用户配置中不需要提供。`.strict()` 仍然生效，
+     * 但这个键是允许的内部扩展点。
+     */
+    __migrationJobId: z.string().optional(),
   })
   .strict();
 
