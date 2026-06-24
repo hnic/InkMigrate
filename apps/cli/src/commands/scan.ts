@@ -28,12 +28,14 @@ export function createScanCommand(): Command {
       '收藏列表 URL',
       'https://www.toutiao.com/favorites',
     )
+    .option('--max-items <n>', '限制扫描条目数（达到后立即停止滚动）')
     .action(async (opts: {
       source: string;
       stateDir: string;
       fixtureDir?: string;
       headless?: boolean;
       favoritesUrl: string;
+      maxItems?: string;
     }) => {
       if (opts.fixtureDir) {
         return runFixtureScan({
@@ -47,6 +49,9 @@ export function createScanCommand(): Command {
         stateDir: opts.stateDir,
         ...(opts.headless !== undefined ? { headless: opts.headless } : {}),
         favoritesUrl: opts.favoritesUrl,
+        ...(opts.maxItems !== undefined
+          ? { maxItems: parseInt(opts.maxItems, 10) }
+          : {}),
       });
     });
 }
@@ -91,6 +96,7 @@ async function runBrowserScan(opts: {
   stateDir: string;
   headless?: boolean;
   favoritesUrl: string;
+  maxItems?: number;
 }): Promise<void> {
   const profileDir = profilePath(opts.stateDir, opts.source);
   if (!profileExists(opts.stateDir, opts.source)) {
@@ -113,12 +119,16 @@ async function runBrowserScan(opts: {
     await session.launch();
     const page = await session.newPage();
 
-    const { refs, scanResult } = await driveScanFavorites({
+    const scanDriverOpts: Parameters<typeof driveScanFavorites>[0] = {
       page,
       favoritesUrl: opts.favoritesUrl,
       baseUrl: 'https://www.toutiao.com/',
       sourceInstanceId: opts.source,
-    });
+    };
+    if (opts.maxItems !== undefined) {
+      scanDriverOpts.maxItems = opts.maxItems;
+    }
+    const { refs, scanResult } = await driveScanFavorites(scanDriverOpts);
 
     await page.close();
 
