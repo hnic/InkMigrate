@@ -111,8 +111,8 @@ export function createMigrateCommand(): Command {
           vaultPath: opts.vaultPath,
           targetConfig: {
             vaultPath: opts.vaultPath,
-            importSubdir: 'Imports/InkMigrate',
-            attachmentsSubdir: 'Attachments/InkMigrate',
+            importSubdir: '',
+            attachmentsSubdir: 'Attachments',
             linkStyle: 'wikilink',
             overwritePolicy: 'preserve',
             collectionMapping: { toTags: false, toFolders: false },

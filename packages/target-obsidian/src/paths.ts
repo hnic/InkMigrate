@@ -58,11 +58,15 @@ export interface NotePathInput {
  * 文件名主体过 `sanitizeFilename` 并截断到 `maxFilenameLength`。
  */
 export function noteRelativePath(i: NotePathInput): string {
-  const dir = CONTENT_KIND_DIR[i.contentKind];
   const body = sanitizeFilename(i.title, {
     maxLength: i.config.maxFilenameLength,
   });
   const filename = `${body}-${i.stableShortId}.md`;
+  // importSubdir 为空时，笔记直接放 Vault 根目录（不加来源/类型子目录）
+  if (!i.config.importSubdir) {
+    return filename;
+  }
+  const dir = CONTENT_KIND_DIR[i.contentKind];
   return [i.config.importSubdir, i.sourceInstanceId, dir, filename]
     .filter(Boolean)
     .join('/');
