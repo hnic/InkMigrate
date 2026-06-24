@@ -105,6 +105,12 @@ export async function runMigrationJob(
       updatedAt: now(),
     });
 
+    // §8.2 prepare source adapter (launch browser for real adapters)
+    await i.sourceAdapter.prepare({
+      config: {},
+      workspaceDir: i.workspaceDir,
+    });
+
     // scanning
     jobs.updateStatus(i.jobId, {
       status: 'running',
@@ -152,6 +158,7 @@ export async function runMigrationJob(
         attempts,
         jobId: i.jobId,
         targetInstanceId: i.targetInstanceId,
+        workspaceDir: i.workspaceDir,
         retryPolicy: DEFAULT_RETRY_POLICY,
       });
       itemStates.push(state);
@@ -246,6 +253,10 @@ export async function runMigrationJob(
     }
     return result;
   } finally {
+    // §8.2 close source adapter (close browser for real adapters)
+    await i.sourceAdapter.close().catch(() => {
+      // close 失败不应阻塞 finally 中的其他清理
+    });
     uninstallSignals();
     lock.release();
   }
@@ -289,6 +300,7 @@ interface ProcessOneItemInput {
   attempts: MigrationAttempts;
   jobId: string;
   targetInstanceId: string;
+  workspaceDir: string;
   retryPolicy: import('./retry.js').RetryPolicy;
 }
 
@@ -319,7 +331,11 @@ async function processOneItem(
   try {
     // §18.1/§18.2 retry-wrapped extract
     const item = await withRetry(
-      () => i.sourceAdapter.extract(i.ref, { config: {}, workspaceDir: '.' }),
+      () =>
+        i.sourceAdapter.extract(i.ref, {
+          config: {},
+          workspaceDir: i.workspaceDir,
+        }),
       i.retryPolicy,
     );
 
