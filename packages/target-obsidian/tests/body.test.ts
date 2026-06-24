@@ -78,13 +78,13 @@ describe('renderBody (§13.6 正文模板)', () => {
     expect(body).not.toContain('收藏时间');
   });
 
-  it('includes 迁移说明 callout at the end', () => {
+  it('does not include 迁移说明 callout', () => {
     const body = renderBody({
       item,
       markdownBody: 'x',
       assetLinks: [],
     });
-    expect(body).toContain('> [!note] 迁移说明');
+    expect(body).not.toContain('迁移说明');
   });
 
   it('renders wikilink-style asset embeds when linkStyle=wikilink', () => {

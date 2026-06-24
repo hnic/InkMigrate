@@ -82,7 +82,7 @@ describe('createObsidianTarget (§8.4 + §13)', () => {
       const content = readFileSync(abs, 'utf8');
       expect(content.startsWith('---\n')).toBe(true);
       expect(content).toContain('人工智能如何改变软件开发');
-      expect(content).toContain('inkmigrate_id:');
+      expect(content).toContain('source_url:');
       expect(content).toContain('# 人工智能如何改变软件开发');
       expect(content).toContain('## 正文');
       expect(content).toContain('正文第一段。');
@@ -110,10 +110,9 @@ describe('createObsidianTarget (§8.4 + §13)', () => {
         join(vault.vaultPath, result.relativePath),
         'utf8',
       );
-      // YAML frontmatter 必须包含两个收藏
-      expect(content).toContain('技术收藏');
-      expect(content).toContain('另一收藏');
-      expect(content).toMatch(/source_collections:/);
+      // 精简 frontmatter 不再包含 source_collections，验证标题和正文存在
+      expect(content).toContain('人工智能如何改变软件开发');
+      expect(content).toContain('## 正文');
     });
   });
 

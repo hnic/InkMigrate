@@ -326,8 +326,9 @@ describe('runMigrationJob (§11 端到端)', () => {
       const files = readdirSync(noteDir).filter((f) => f.endsWith('.md'));
       if (files.length > 0) {
         const content = readFileSync(join(noteDir, files[0]!), 'utf8');
-        // YAML library may or may not quote the value; check unquoted form
-        expect(content).toMatch(/migration_job_id:\s*j-frontmatter/);
+        // 精简 frontmatter：只保留 title 和 source_url
+        expect(content).toMatch(/^---\n.*title:/s);
+        expect(content).toMatch(/source_url:\s*https:\/\/www\.toutiao\.com/);
       }
     }
   });

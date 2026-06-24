@@ -80,13 +80,6 @@ export function renderBody(i: RenderBodyInput): string {
   lines.push(body);
   lines.push('');
 
-  // 迁移说明 callout
-  lines.push('---');
-  lines.push('');
-  lines.push('> [!note] 迁移说明');
-  lines.push('> 本文由 InkMigrate 在本地从用户自己的来源数据中导入。');
-  lines.push('');
-
   return lines.join('\n');
 }
 
