@@ -65,9 +65,6 @@ export function renderBody(i: RenderBodyInput): string {
   for (const l of infoLines) lines.push(`> ${l}`);
   lines.push('');
 
-  // 正文
-  lines.push('## 正文');
-  lines.push('');
   let body = i.markdownBody;
   // 替换附件占位符
   for (const link of i.assetLinks) {

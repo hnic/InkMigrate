@@ -48,13 +48,13 @@ describe('renderBody (§13.6 正文模板)', () => {
     expect(body).toContain('https://www.toutiao.com/article/7428193012345678901/');
   });
 
-  it('includes ## 正文 section with rendered body', () => {
+  it('includes rendered body without ## 正文 heading', () => {
     const body = renderBody({
       item,
       markdownBody: '正文第一段。',
       assetLinks: [],
     });
-    expect(body).toContain('## 正文');
+    expect(body).not.toContain('## 正文');
     expect(body).toContain('正文第一段。');
   });
 
@@ -114,7 +114,7 @@ describe('renderBody (§13.6 正文模板)', () => {
     expect(body).toContain('![](a/b.webp)');
   });
 
-  it('renders degraded item with placeholder body section', () => {
+  it('renders degraded item with title and source info but empty body', () => {
     const degraded = makeDegradedItem();
     const body = renderBody({
       item: degraded,
@@ -122,6 +122,6 @@ describe('renderBody (§13.6 正文模板)', () => {
       assetLinks: [],
     });
     expect(body).toContain('# 人工智能如何改变软件开发');
-    expect(body).toContain('## 正文');
+    expect(body).toContain('来源信息');
   });
 });

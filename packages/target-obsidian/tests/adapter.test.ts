@@ -84,7 +84,7 @@ describe('createObsidianTarget (§8.4 + §13)', () => {
       expect(content).toContain('人工智能如何改变软件开发');
       expect(content).toContain('source_url:');
       expect(content).toContain('# 人工智能如何改变软件开发');
-      expect(content).toContain('## 正文');
+      expect(content).toContain('正文第一段');
       expect(content).toContain('正文第一段。');
       // 三类哈希齐全
       expect(result.targetContentHash).toMatch(/^sha256:/);
@@ -112,7 +112,7 @@ describe('createObsidianTarget (§8.4 + §13)', () => {
       );
       // 精简 frontmatter 不再包含 source_collections，验证标题和正文存在
       expect(content).toContain('人工智能如何改变软件开发');
-      expect(content).toContain('## 正文');
+      expect(content).toContain('正文第一段');
     });
   });
 
@@ -205,7 +205,7 @@ describe('createObsidianTarget (§8.4 + §13)', () => {
         'utf8',
       );
       expect(content).toContain('# 人工智能如何改变软件开发');
-      expect(content).toContain('## 正文');
+      expect(content).toContain('来源信息');
     });
   });
 
