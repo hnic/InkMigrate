@@ -2,6 +2,7 @@ export {
   createToutiaoSource,
   buildRefFromFavorite,
   stableKeyForRef,
+  type ToutiaoBrowserAdapterConfig,
 } from './adapters/adapter.js';
 export {
   SOURCE_TOUTIAO_KIND,
@@ -29,3 +30,15 @@ export {
 } from './auth/login-detector.js';
 export { profilePath, profileExists, ensureProfileDir } from './auth/profile.js';
 export { downloadImage } from './assets/image-downloader.js';
+export {
+  ToutiaoBrowserSession,
+  type BrowserSessionConfig,
+  driveScanFavorites,
+  type ScanDriverOptions,
+  type ScanDriverResult,
+  driveExtractDetail,
+  type ExtractDriverOptions,
+  runLoginFlow,
+  type LoginFlowOptions,
+  type LoginFlowResult,
+} from './browser/index.js';

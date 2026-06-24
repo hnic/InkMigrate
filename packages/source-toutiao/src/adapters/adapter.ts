@@ -7,24 +7,58 @@ import {
 } from '@inkmigrate/core';
 import { TOUTIAO_CAPABILITIES } from '../capabilities.js';
 import { deriveFingerprintInput } from '../normalize/fingerprint.js';
+import { ToutiaoBrowserSession } from '../browser/browser-session.js';
+import { driveScanFavorites } from '../browser/scan-driver.js';
+import { driveExtractDetail } from '../browser/extract-driver.js';
 
 export const SOURCE_TOUTIAO_KIND = 'toutiao' as const;
 export const SOURCE_TOUTIAO_VERSION = '1.0.0' as const;
 export const SOURCE_TOUTIAO_ADAPTER_API_VERSION = '1.0.0' as const;
 
+/** 默认收藏列表 URL。真实 URL 由配置或 CLI 提供。 */
+const DEFAULT_FAVORITES_URL = 'https://www.toutiao.com/favorites';
+const DEFAULT_BASE_URL = 'https://www.toutiao.com/';
+
 /**
- * §12 + §8.2 今日头条来源适配器工厂。
- *
- * Stage 3 返回的对象在 scan/extract 中需要真实 Playwright 浏览器；本工厂
- * 返回的实例假设调用方在 ctx 中传入浏览器会话。fixture-driven 测试用
- * 一个包装对象覆盖 scan/extract（见 adapter.test.ts）。
- *
- * 真实浏览器版的 scan/extract 在 stage 4 Job 编排层接入时由本包的
- * browser-pool + auth-session + scanner + detail-extractor 组合实现。
- * stage 3 的契约是：capabilities 正确、scan/extract 的形状正确、
- * fixture 可驱动。
+ * 浏览器适配器配置。传入 createToutiaoSource 时启用真实浏览器模式；
+ * 不传时返回桩适配器（fixture-driven 测试用）。
  */
-export function createToutiaoSource(): SourceAdapter {
+export interface ToutiaoBrowserAdapterConfig {
+  sourceInstanceId: string;
+  profileDir: string;
+  headless?: boolean;
+  favoritesUrl?: string;
+  scanMaxEmptyCycles?: number;
+  scanWaitAfterScrollMs?: number;
+  navigationTimeoutMs?: number;
+  maxImageBytes?: number;
+}
+
+/**
+ * §12 + §8.2 今日头条来源适配器工厂（双模式）。
+ *
+ * - 无参数：返回桩适配器。scan 产生空序列，extract 抛异常。
+ *   fixture-driven 测试通过包装对象覆盖 scan/extract（见 adapter.test.ts）。
+ *
+ * - 有参数：返回真实浏览器适配器。
+ *   prepare() 启动 Playwright 持久化上下文；
+ *   scan() 用 driveScanFavorites 滚动收藏列表；
+ *   extract() 用 driveExtractDetail 导航详情页；
+ *   close() 关闭浏览器。
+ *
+ * 浏览器生命周期由适配器自身管理（adapter-owned），不通过 AdapterContext 传递。
+ * 这符合 §8.2 prepare/scan/extract/close 生命周期契约。
+ */
+export function createToutiaoSource(
+  browserConfig?: ToutiaoBrowserAdapterConfig,
+): SourceAdapter {
+  const session = browserConfig
+    ? new ToutiaoBrowserSession({
+        profileDir: browserConfig.profileDir,
+        headless: browserConfig.headless ?? false,
+      })
+    : undefined;
+
   return {
     kind: SOURCE_TOUTIAO_KIND,
     version: SOURCE_TOUTIAO_VERSION,
@@ -39,22 +73,61 @@ export function createToutiaoSource(): SourceAdapter {
     },
     validateConfig: async () => ({ ok: true }),
     prepare: async () => {
-      // 真实实现：启动 Playwright、加载 Profile；stage 3 占位
+      if (session !== undefined) {
+        await session.launch();
+      }
     },
     scan: async function* (_ctx) {
-      // 真实实现：scanFavoritesList + scrollForMore（用 Playwright）
-      // stage 3 通过 fixture-driven 包装覆盖本方法做测试
+      if (session === undefined || browserConfig === undefined) return;
       void _ctx;
+      const page = await session.newPage();
+      try {
+        const scanOpts: Parameters<typeof driveScanFavorites>[0] = {
+          page,
+          favoritesUrl: browserConfig.favoritesUrl ?? DEFAULT_FAVORITES_URL,
+          baseUrl: DEFAULT_BASE_URL,
+          sourceInstanceId: browserConfig.sourceInstanceId,
+        };
+        if (browserConfig.scanMaxEmptyCycles !== undefined) {
+          scanOpts.maxEmptyCycles = browserConfig.scanMaxEmptyCycles;
+        }
+        if (browserConfig.scanWaitAfterScrollMs !== undefined) {
+          scanOpts.waitAfterScrollMs = browserConfig.scanWaitAfterScrollMs;
+        }
+        if (browserConfig.navigationTimeoutMs !== undefined) {
+          scanOpts.navigationTimeoutMs = browserConfig.navigationTimeoutMs;
+        }
+        const { refs } = await driveScanFavorites(scanOpts);
+        for (const ref of refs) yield ref;
+      } finally {
+        await page.close();
+      }
     },
-    extract: async (_ref, _ctx) => {
-      // 真实实现：detail-extractor + pipeline
-      // stage 3 通过 fixture-driven 包装覆盖本方法做测试
-      throw new Error(
-        'createToutiaoSource().extract requires a real browser session; use fixture-driven wrapper for tests',
-      );
+    extract: async (ref, _ctx) => {
+      void _ctx;
+      if (session === undefined || browserConfig === undefined) {
+        throw new Error(
+          'createToutiaoSource().extract requires a real browser session; use fixture-driven wrapper for tests',
+        );
+      }
+      const page = await session.newPage();
+      try {
+        const extractOpts: Parameters<typeof driveExtractDetail>[0] = { page, ref };
+        if (browserConfig.navigationTimeoutMs !== undefined) {
+          extractOpts.navigationTimeoutMs = browserConfig.navigationTimeoutMs;
+        }
+        if (browserConfig.maxImageBytes !== undefined) {
+          extractOpts.maxImageBytes = browserConfig.maxImageBytes;
+        }
+        return await driveExtractDetail(extractOpts);
+      } finally {
+        await page.close();
+      }
     },
     close: async () => {
-      // 真实实现：关闭 Playwright
+      if (session !== undefined) {
+        await session.close();
+      }
     },
   };
 }
