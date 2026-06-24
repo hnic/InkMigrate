@@ -18,6 +18,8 @@ import {
   scanFavoritesList,
   extractDetail,
   deriveFingerprintInput,
+  profilePath,
+  profileExists,
 } from '@inkmigrate/source-toutiao';
 import { createObsidianTarget } from '@inkmigrate/target-obsidian';
 import { readFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -75,7 +77,21 @@ export function createMigrateCommand(): Command {
         // 构造 source adapter
         const sourceAdapter = opts.fixtureDir
           ? createFixtureSource(opts.fixtureDir, opts.source)
-          : createToutiaoSource();
+          : (() => {
+              const profileDir = profilePath(opts.stateDir, opts.source);
+              if (!profileExists(opts.stateDir, opts.source)) {
+                console.error(`未找到 Profile：${profileDir}`);
+                console.error(
+                  `请先运行：inkmigrate auth login --source ${opts.source} --state-dir ${opts.stateDir}`,
+                );
+                process.exit(1);
+              }
+              return createToutiaoSource({
+                sourceInstanceId: opts.source,
+                profileDir,
+                headless: false,
+              });
+            })();
 
         // 构造 target adapter + context
         const targetAdapter = createObsidianTarget();
