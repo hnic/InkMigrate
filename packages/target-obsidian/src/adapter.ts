@@ -12,13 +12,15 @@ import {
   type ValidationResult,
 } from '@inkmigrate/core';
 import { ObsidianTargetConfigSchema, type ObsidianTargetConfig } from './config.js';
-import { validateVault, noteRelativePath, noteAbsolutePath } from './paths.js';
+import { validateVault, noteRelativePath, noteAbsolutePath, assetRelativePath, assetAbsolutePath } from './paths.js';
 import { stringifyFrontmatter } from './frontmatter.js';
-import { renderBody, htmlToMarkdown } from './body.js';
+import { renderBody, htmlToMarkdown, type AssetLink } from './body.js';
 import { atomicWrite, readTargetIfExists } from './atomic-write.js';
 import { decideOverwrite } from './overwrite-policy.js';
 import type { ObsidianWriteResult } from './result.js';
+import { writeAsset, deriveMimeExtension } from './assets.js';
 import { existsSync, readFileSync } from 'node:fs';
+import { deriveItemKey } from '@inkmigrate/core';
 
 export const OBSIDIAN_TARGET_KIND = 'obsidian' as const;
 export const OBSIDIAN_TARGET_VERSION = '1.0.0' as const;
@@ -107,10 +109,53 @@ async function planNote(
   const markdownBody = item.bodyHtml
     ? htmlToMarkdown(item.bodyHtml)
     : (item.bodyText ?? '');
+
+  // §13.7 写入有字节的图片附件到 Vault，构建 assetLinks 供正文替换
+  const assetLinks: AssetLink[] = [];
+  for (const asset of item.assets) {
+    if (asset.bytes === undefined || asset.originalUrl === undefined) continue;
+    const ext = deriveMimeExtension(asset.mimeType ?? 'image/jpeg');
+    const filename = `${asset.sha256?.replace('sha256:', '').substring(0, 16) ?? 'asset'}.${ext}`;
+    const assetRelPath = assetRelativePath({
+      config,
+      sourceInstanceId: item.ref.sourceInstanceId,
+      itemKey: stableShortId,
+      filename,
+    });
+    writeAsset({
+      vaultPath: config.vaultPath,
+      relativePath: assetRelPath,
+      bytes: asset.bytes,
+    });
+    // 把远程 URL 替换为本地占位符，renderBody 会替换为 wikilink/markdown
+    const placeholder = `__INKMIGRATE_ASSET_${assetLinks.length}__`;
+    assetLinks.push({ markdownPlaceholder: placeholder, relativePath: assetRelPath });
+    // 在 markdownBody 中把原始 URL 替换为占位符
+    // turndown 输出的图片格式是 ![alt](url) 或 ![](url)
+  }
+
+  // 替换正文中的远程图片 URL 为本地占位符
+  let bodyWithAssets = markdownBody;
+  for (let i = 0; i < item.assets.length; i++) {
+    const asset = item.assets[i]!;
+    if (asset.bytes === undefined || asset.originalUrl === undefined) continue;
+    const linkIdx = assetLinks.findIndex(
+      (al) => al.markdownPlaceholder === `__INKMIGRATE_ASSET_${i}__`,
+    );
+    if (linkIdx >= 0) {
+      // 替换 ![](url) 或 ![alt](url) 中的 URL 部分
+      const escapedUrl = asset.originalUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      bodyWithAssets = bodyWithAssets.replace(
+        new RegExp(`!\\[([^\\]]*)\\]\\(${escapedUrl}\\)`, 'g'),
+        `![$1](${assetLinks[linkIdx]!.markdownPlaceholder})`,
+      );
+    }
+  }
+
   const body = renderBody({
     item,
-    markdownBody,
-    assetLinks: [],
+    markdownBody: bodyWithAssets,
+    assetLinks,
     linkStyle: config.linkStyle,
   });
 

@@ -77,6 +77,13 @@ export interface SourceAsset {
   byteSize?: number;
   sha256?: string;
   kind: 'image' | 'pdf' | 'audio' | 'video' | 'office' | 'other';
+  /**
+   * 下载后的图片/附件字节。由 source adapter 在 extract 时填充（best-effort）。
+   * target adapter 在 plan/write 时将其落地到 Vault Attachments 目录。
+   * 不参与 sourceContentHash（hash 只用 metadata 字段）。
+   * fixture-driven 测试不填充此字段。
+   */
+  bytes?: Buffer;
 }
 
 export interface SourceLink {
