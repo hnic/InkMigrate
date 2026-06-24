@@ -31,6 +31,11 @@ export interface ScanInput {
    * 连续多少轮无新条目后终止。§12.5 默认 5。调用方可覆盖。
    */
   maxEmptyCycles: number;
+  /**
+   * 达到多少唯一条目后立即终止（不再滚动）。用于测试或限量迁移。
+   * 不传则扫描到底。
+   */
+  maxItems?: number;
 }
 
 /** §12.5 默认终止阈值：连续 5 次没有新条目。 */
@@ -75,7 +80,13 @@ export async function scanFavoritesList(i: ScanInput): Promise<ScanResult> {
       seen.add(key);
       items.set(key, item);
       newInThisRound++;
+      // 达到 maxItems 立即终止，不再继续解析或滚动
+      if (i.maxItems !== undefined && items.size >= i.maxItems) {
+        terminationReason = `max_items_reached_${items.size}`;
+        break;
+      }
     }
+    if (terminationReason.startsWith('max_items_reached')) break;
     if (newInThisRound === 0) {
       emptyCycles++;
       if (emptyCycles >= i.maxEmptyCycles) {

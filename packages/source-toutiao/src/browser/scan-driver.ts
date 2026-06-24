@@ -23,6 +23,8 @@ export interface ScanDriverOptions {
   waitAfterScrollMs?: number;
   /** 页面导航超时毫秒。 */
   navigationTimeoutMs?: number;
+  /** 达到多少唯一条目后立即终止（不再滚动）。用于测试或限量迁移。 */
+  maxItems?: number;
 }
 
 export interface ScanDriverResult {
@@ -78,12 +80,16 @@ export async function driveScanFavorites(
     return opts.page.content();
   };
 
-  const scanResult = await scanFavoritesList({
+  const scanInput: Parameters<typeof scanFavoritesList>[0] = {
     initialHtml,
     baseUrl: opts.baseUrl,
     scrollForMore,
     maxEmptyCycles: opts.maxEmptyCycles ?? DEFAULT_MAX_EMPTY_CYCLES,
-  });
+  };
+  if (opts.maxItems !== undefined) {
+    scanInput.maxItems = opts.maxItems;
+  }
+  const scanResult = await scanFavoritesList(scanInput);
 
   const discoveredAt = new Date().toISOString();
   const refs: SourceItemRef[] = scanResult.items.map((fav) =>

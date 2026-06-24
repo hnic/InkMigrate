@@ -99,13 +99,12 @@ export function createToutiaoSource(
         if (browserConfig.navigationTimeoutMs !== undefined) {
           scanOpts.navigationTimeoutMs = browserConfig.navigationTimeoutMs;
         }
+        if (browserConfig.maxScanItems !== undefined) {
+          scanOpts.maxItems = browserConfig.maxScanItems;
+        }
         const { refs } = await driveScanFavorites(scanOpts);
-        const limit = browserConfig.maxScanItems;
-        let count = 0;
         for (const ref of refs) {
           yield ref;
-          count++;
-          if (limit !== undefined && count >= limit) break;
         }
       } finally {
         await page.close();
