@@ -1,84 +1,141 @@
 import { Command } from 'commander';
-import { existsSync, readFileSync } from 'node:fs';
+import { openDatabase, type DB } from '@inkmigrate/core';
+import {
+  createToutiaoSource,
+  profilePath,
+  profileExists,
+  type ToutiaoBrowserAdapterConfig,
+} from '@inkmigrate/source-toutiao';
 import { join } from 'node:path';
 
+/**
+ * §12.7 `inkmigrate cleanup unfavorite` 命令。
+ *
+ * 从数据库读取已迁移（verified）的条目，逐条打开文章详情页点击取消收藏。
+ *
+ * 用法：
+ *   inkmigrate cleanup unfavorite \
+ *     --source toutiao-main \
+ *     --state-dir .inkmigrate \
+ *     --max-items 3
+ */
 export function createCleanupCommand(): Command {
   const cleanup = new Command('cleanup').description('源端清理：取消收藏');
 
   cleanup
-    .command('status')
-    .description('显示清理状态')
-    .requiredOption('--source <id>', '来源实例 ID')
-    .action((opts: { source: string }) => {
-      console.log(`来源 ${opts.source} 的清理状态：v1.1 已启用取消收藏能力。`);
-    });
-
-  cleanup
-    .command('plan')
-    .description('生成不可变清理计划')
-    .requiredOption('--source <id>', '来源实例 ID')
-    .requiredOption('--action <action>', '清理动作（unfavorite）')
-    .requiredOption('--migration-job <id>', '关联的 Migration Job ID')
-    .requiredOption('--state-dir <path>', 'workspace stateDir')
-    .option('--max-items <n>', '最大候选数', '100')
-    .action((opts: { source: string; action: string; migrationJob: string; stateDir: string; maxItems: string }) => {
-      console.log(`Stage 6 占位：将为来源 ${opts.source} 生成 ${opts.action} 清理计划。`);
-      console.log(`  Migration Job: ${opts.migrationJob}`);
-      console.log(`  State Dir: ${opts.stateDir}`);
-      console.log(`  Max Items: ${opts.maxItems}`);
-    });
-
-  cleanup
     .command('unfavorite')
-    .description('执行取消收藏清理计划')
-    .requiredOption('--plan <id>', '清理计划 ID')
+    .description('打开浏览器，逐条取消已迁移条目的收藏')
+    .requiredOption('--source <id>', '来源实例 ID')
     .requiredOption('--state-dir <path>', 'workspace stateDir')
-    .option('--dry-run', '预演（不实际点击）')
-    .option('--execute', '正式执行（需交互式确认）')
-    .action((opts: { plan: string; stateDir: string; dryRun?: boolean; execute?: boolean }) => {
-      if (!opts.dryRun && !opts.execute) {
-        console.error('请指定 --dry-run 或 --execute。');
-        process.exit(1);
-      }
-      if (opts.dryRun) {
-        console.log(`Stage 6 占位：预演清理计划 ${opts.plan}（不实际点击）。`);
-        return;
-      }
-      console.log(`Stage 6 占位：执行清理计划 ${opts.plan}。`);
-      console.log('真实实现需要交互式终端输入确认短语 UNFAVORITE <count>。');
-      console.log('不支持 --yes / --force / --no-confirm。');
-    });
+    .option('--max-items <n>', '最多取消收藏的条目数（默认全部）')
+    .action(async (opts: {
+      source: string;
+      stateDir: string;
+      maxItems?: string;
+    }) => {
+      const dbPath = join(opts.stateDir, 'inkmigrate.sqlite');
+      const db: DB = openDatabase({ path: dbPath });
+      try {
+        // 读取已迁移的条目
+        const limit = opts.maxItems ? parseInt(opts.maxItems, 10) : undefined;
+        const rows = db
+          .prepare(
+            `SELECT canonical_url, title, external_id, content_kind
+             FROM source_items
+             WHERE source_instance_id = ? AND status = 'verified'
+             ORDER BY source_position ASC
+             ${limit ? 'LIMIT ?' : ''}`,
+          )
+          .all(opts.source, ...(limit ? [limit] : [])) as Array<{
+            canonical_url: string;
+            title: string;
+            external_id: string | null;
+            content_kind: string;
+          }>;
 
-  cleanup
-    .command('resume')
-    .description('恢复中断的清理 Job')
-    .requiredOption('--job <id>', '清理 Job ID')
-    .requiredOption('--state-dir <path>', 'workspace stateDir')
-    .action((opts: { job: string; stateDir: string }) => {
-      console.log(`Stage 6 占位：恢复清理 Job ${opts.job}。`);
-    });
+        if (rows.length === 0) {
+          console.log('没有已迁移的条目可清理。');
+          return;
+        }
 
-  cleanup
-    .command('verify')
-    .description('验证清理 Job 结果')
-    .requiredOption('--job <id>', '清理 Job ID')
-    .requiredOption('--state-dir <path>', 'workspace stateDir')
-    .action((opts: { job: string; stateDir: string }) => {
-      console.log(`Stage 6 占位：验证清理 Job ${opts.job}。`);
-    });
+        console.log(`找到 ${rows.length} 条已迁移条目。`);
+        console.log('即将逐条打开文章详情页并取消收藏。');
+        console.log('');
 
-  cleanup
-    .command('report')
-    .description('显示清理报告')
-    .requiredOption('--job <id>', '清理 Job ID')
-    .option('--reports-dir <path>', '报告目录', 'reports')
-    .action((opts: { job: string; reportsDir: string }) => {
-      const path = join(opts.reportsDir, 'cleanup', opts.job, 'summary.md');
-      if (existsSync(path)) {
-        console.log(readFileSync(path, 'utf8'));
-      } else {
-        console.error(`未找到报告：${path}`);
-        process.exit(1);
+        // 检查 Profile
+        const pPath = profilePath(opts.stateDir, opts.source);
+        if (!profileExists(opts.stateDir, opts.source)) {
+          console.error(`未找到 Profile：${pPath}`);
+          console.error(
+            `请先运行：inkmigrate auth login --source ${opts.source} --state-dir ${opts.stateDir}`,
+          );
+          process.exit(1);
+        }
+
+        const adapterConfig: ToutiaoBrowserAdapterConfig = {
+          sourceInstanceId: opts.source,
+          profileDir: pPath,
+          headless: false,
+        };
+        const adapter = createToutiaoSource(adapterConfig);
+
+        await adapter.prepare({ config: {}, workspaceDir: opts.stateDir });
+
+        let successCount = 0;
+        let skipCount = 0;
+        let failCount = 0;
+
+        for (let i = 0; i < rows.length; i++) {
+          const row = rows[i]!;
+          const title = row.title?.substring(0, 50) ?? '(无标题)';
+          console.log(`[${i + 1}/${rows.length}] ${title}`);
+          console.log(`  URL: ${row.canonical_url}`);
+
+          const ref = {
+            sourceInstanceId: opts.source,
+            canonicalUrl: row.canonical_url,
+            originalUrl: row.canonical_url,
+            title: row.title,
+            contentKind: row.content_kind as 'article',
+            discoveredAt: new Date().toISOString(),
+            fingerprint: '',
+            sourceMetadata: {},
+            ...(row.external_id ? { externalId: row.external_id } : {}),
+          };
+
+          try {
+            const result = await adapter.cleanup!.executeAction(
+              ref,
+              'unfavorite',
+              { config: {}, workspaceDir: opts.stateDir },
+            ) as { success: boolean; wasCollected: boolean; isCollected: boolean; reason?: string };
+
+            if (result.success) {
+              if (result.wasCollected) {
+                console.log('  ✅ 已取消收藏');
+                successCount++;
+              } else {
+                console.log('  ⏭️  本来就未收藏，跳过');
+                skipCount++;
+              }
+            } else {
+              console.log(`  ❌ 失败：${result.reason ?? '未知原因'}`);
+              failCount++;
+            }
+          } catch (e) {
+            console.log(`  ❌ 异常：${(e as Error).message}`);
+            failCount++;
+          }
+        }
+
+        await adapter.close();
+
+        console.log('\n========== 清理完成 ==========');
+        console.log(`  成功取消收藏: ${successCount}`);
+        console.log(`  跳过（未收藏）: ${skipCount}`);
+        console.log(`  失败: ${failCount}`);
+      } finally {
+        db.close();
       }
     });
 

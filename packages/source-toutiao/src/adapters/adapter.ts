@@ -10,6 +10,7 @@ import { deriveFingerprintInput } from '../normalize/fingerprint.js';
 import { ToutiaoBrowserSession } from '../browser/browser-session.js';
 import { driveScanFavorites } from '../browser/scan-driver.js';
 import { driveExtractDetail } from '../browser/extract-driver.js';
+import { driveUnfavorite } from '../browser/unfavorite-driver.js';
 
 export const SOURCE_TOUTIAO_KIND = 'toutiao' as const;
 export const SOURCE_TOUTIAO_VERSION = '1.0.0' as const;
@@ -69,9 +70,59 @@ export function createToutiaoSource(
     // §12.1 v1.1 supportsSourceCleanup=true → cleanup 必须存在（§8.2 不变量）
     cleanup: {
       supportedActions: ['unfavorite'],
-      inspectActionState: async () => ({ state: 'unknown' }),
-      executeAction: async () => ({ success: false, reason: 'requires real browser session' }),
-      verifyAction: async () => ({ verified: false }),
+      inspectActionState: async (ref) => {
+        if (session === undefined) return { state: 'unknown' as const };
+        const page = await session.newPage();
+        try {
+          const url = ref.canonicalUrl;
+          if (url === undefined) return { state: 'unknown' as const };
+          await page.goto(url, { waitUntil: 'networkidle', timeout: 45_000 });
+          const collectBtn = page.locator('.detail-interaction-collect').first();
+          const exists = await collectBtn.count().catch(() => 0);
+          if (exists === 0) return { state: 'unknown' as const };
+          const collected = await collectBtn.evaluate((el) =>
+            el.classList.contains('collected'),
+          );
+          return { state: collected ? 'favorited' as const : 'not-favorited' as const };
+        } finally {
+          await page.close();
+        }
+      },
+      executeAction: async (ref, _action) => {
+        if (session === undefined || browserConfig === undefined) {
+          return { success: false, reason: 'requires real browser session' };
+        }
+        const page = await session.newPage();
+        try {
+          const unfavOpts: Parameters<typeof driveUnfavorite>[0] = { page, ref };
+          if (browserConfig.navigationTimeoutMs !== undefined) {
+            unfavOpts.navigationTimeoutMs = browserConfig.navigationTimeoutMs;
+          }
+          const result = await driveUnfavorite(unfavOpts);
+          return result;
+        } finally {
+          await page.close();
+        }
+      },
+      verifyAction: async (ref) => {
+        if (session === undefined) return { verified: false };
+        const page = await session.newPage();
+        try {
+          const url = ref.canonicalUrl;
+          if (url === undefined) return { verified: false };
+          await page.goto(url, { waitUntil: 'networkidle', timeout: 45_000 });
+          const collectBtn = page.locator('.detail-interaction-collect').first();
+          const exists = await collectBtn.count().catch(() => 0);
+          if (exists === 0) return { verified: false };
+          const collected = await collectBtn.evaluate((el) =>
+            el.classList.contains('collected'),
+          );
+          // 验证取消收藏成功 = 不再是已收藏状态
+          return { verified: !collected };
+        } finally {
+          await page.close();
+        }
+      },
     },
     validateConfig: async () => ({ ok: true }),
     prepare: async () => {
