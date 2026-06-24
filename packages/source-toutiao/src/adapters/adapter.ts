@@ -32,6 +32,8 @@ export interface ToutiaoBrowserAdapterConfig {
   scanWaitAfterScrollMs?: number;
   navigationTimeoutMs?: number;
   maxImageBytes?: number;
+  /** 限制扫描条目数（用于测试）；不传则扫描全部。 */
+  maxScanItems?: number;
 }
 
 /**
@@ -98,7 +100,13 @@ export function createToutiaoSource(
           scanOpts.navigationTimeoutMs = browserConfig.navigationTimeoutMs;
         }
         const { refs } = await driveScanFavorites(scanOpts);
-        for (const ref of refs) yield ref;
+        const limit = browserConfig.maxScanItems;
+        let count = 0;
+        for (const ref of refs) {
+          yield ref;
+          count++;
+          if (limit !== undefined && count >= limit) break;
+        }
       } finally {
         await page.close();
       }

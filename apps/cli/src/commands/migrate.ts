@@ -42,6 +42,8 @@ export function createMigrateCommand(): Command {
     .requiredOption('--state-dir <path>', 'workspace stateDir')
     .requiredOption('--vault-path <path>', 'Obsidian Vault 路径')
     .option('--fixture-dir <path>', 'fixture HTML 目录（测试模式，不启动浏览器）')
+    .option('--favorites-url <url>', '收藏列表 URL（真实模式）')
+    .option('--max-items <n>', '限制扫描+迁移条目数（用于测试）')
     .option('--dry-run', '不写入目标（仅扫描+提取+计划）')
     .action(async (opts: {
       source: string;
@@ -49,6 +51,8 @@ export function createMigrateCommand(): Command {
       stateDir: string;
       vaultPath: string;
       fixtureDir?: string;
+      favoritesUrl?: string;
+      maxItems?: string;
       dryRun?: boolean;
     }) => {
       const dbPath = join(opts.stateDir, 'inkmigrate.sqlite');
@@ -90,6 +94,12 @@ export function createMigrateCommand(): Command {
                 sourceInstanceId: opts.source,
                 profileDir,
                 headless: false,
+                ...(opts.favoritesUrl !== undefined
+                  ? { favoritesUrl: opts.favoritesUrl }
+                  : {}),
+                ...(opts.maxItems !== undefined
+                  ? { maxScanItems: parseInt(opts.maxItems, 10) }
+                  : {}),
               });
             })();
 
