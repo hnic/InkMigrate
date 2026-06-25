@@ -55,7 +55,31 @@ export async function driveScanFavorites(
     timeout: opts.navigationTimeoutMs ?? 45_000,
   });
 
-  const initialHtml = await opts.page.content();
+  /**
+   * 只提取收藏条目容器的外层 HTML，不返回整页 content()。
+   * 整页 HTML 随滚动越来越长（几十 MB），4719 条 × 479 轮会导致 OOM。
+   * 只提取 .feed-card-wrapper 等条目容器，内存占用恒定（只含条目 DOM）。
+   */
+  const extractItemsHtml = async (): Promise<string> => {
+    return opts.page.evaluate((selectorsJson: string) => {
+      const selectors = JSON.parse(selectorsJson) as string[];
+      // 找到所有匹配的条目元素，拼接它们的 outerHTML
+      const els: Element[] = [];
+      for (const sel of selectors) {
+        const found = document.querySelectorAll(sel);
+        if (found.length > 0) {
+          els.push(...Array.from(found));
+          break;
+        }
+      }
+      // 包裹在一个 div 里，保证 parseItemsFromHtml 能正确解析
+      const wrapper = document.createElement('div');
+      for (const el of els) wrapper.appendChild(el.cloneNode(true));
+      return wrapper.innerHTML;
+    }, JSON.stringify(FAVORITES_SELECTORS.item));
+  };
+
+  const initialHtml = await extractItemsHtml();
   const waitMs = opts.waitAfterScrollMs ?? 1500;
 
   const scrollForMore = async (): Promise<string | null> => {
@@ -77,7 +101,7 @@ export async function driveScanFavorites(
       }
     }
 
-    return opts.page.content();
+    return extractItemsHtml();
   };
 
   const scanInput: Parameters<typeof scanFavoritesList>[0] = {
