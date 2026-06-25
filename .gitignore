@@ -15,3 +15,5 @@ playwright/.auth/
 node_modules/
 dist/
 *.tsbuildinfo
+
+docs/superpowers/
