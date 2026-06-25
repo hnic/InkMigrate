@@ -31,6 +31,14 @@ export default function App() {
         <span style={{ fontSize: '18px' }}>🔄</span>
         <span style={{ fontWeight: 700, fontSize: '16px' }}>InkMigrate 墨迁</span>
         <span style={{ flex: 1 }} />
+        {settings.stateDir && (
+          <span style={{
+            fontSize: '12px',
+            color: settings.loggedIn ? 'var(--success)' : 'var(--text-dim)',
+          }}>
+            ● {settings.loggedIn ? '已登录' : '未登录'}
+          </span>
+        )}
         {busy && <span style={{ color: 'var(--warning)', fontSize: '12px' }}>● 处理中</span>}
       </header>
 

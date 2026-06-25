@@ -6,6 +6,8 @@ export interface AppSettings {
   favoritesUrl: string;
   source: string;
   target: string;
+  /** 登录状态（由 LoginPage 检测后写入） */
+  loggedIn?: boolean;
 }
 
 export interface ProgressEvent {

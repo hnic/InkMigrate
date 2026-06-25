@@ -53,9 +53,21 @@ export function ScanPage({ settings, update, rpcCall, addLog, busy }: Props) {
           将打开浏览器扫描你的头条收藏列表。扫描数据会保存到数据库，供后续迁移使用。
         </div>
 
-        <button onClick={handleScan} disabled={busy || !settings.stateDir || !settings.favoritesUrl}>
+        <button onClick={handleScan} disabled={busy || !settings.stateDir || !settings.favoritesUrl || !settings.loggedIn}>
           {busy ? '扫描中...' : '开始扫描'}
         </button>
+
+        {settings.stateDir && settings.favoritesUrl && !settings.loggedIn && (
+          <div style={{
+            padding: '10px 12px',
+            background: 'rgba(243, 156, 18, 0.15)',
+            borderRadius: '6px',
+            border: '1px solid rgba(243, 156, 18, 0.3)',
+            fontSize: '13px',
+          }}>
+            ⚠️ 请先在「登录」页面完成登录
+          </div>
+        )}
 
         {error && (
           <div style={{

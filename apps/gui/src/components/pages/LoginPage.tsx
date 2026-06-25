@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import type { AppSettings, OperationState } from '../../lib/types.js';
 
 interface Props {
@@ -13,6 +13,13 @@ export function LoginPage({ settings, update, rpcCall, addLog }: Props) {
   const [profilePath, setProfilePath] = useState('');
   const [loading, setLoading] = useState(false);
 
+  // 进入页面时自动检查 Profile 状态（如果 stateDir 已配置）
+  useEffect(() => {
+    if (settings.stateDir) {
+      checkStatus();
+    }
+  }, [settings.stateDir]);
+
   async function checkStatus() {
     try {
       const result = await rpcCall('auth.status', {
@@ -21,6 +28,7 @@ export function LoginPage({ settings, update, rpcCall, addLog }: Props) {
       }) as { profileExists: boolean; profilePath: string };
       setProfilePath(result.profileExists ? result.profilePath : '');
       setLoginState(result.profileExists ? 'success' : 'idle');
+      update({ loggedIn: result.profileExists });
     } catch {
       // ignore
     }
@@ -37,6 +45,7 @@ export function LoginPage({ settings, update, rpcCall, addLog }: Props) {
       }) as { state: string; favoritesUrl?: string };
       const ok = result.state === 'logged-in';
       setLoginState(ok ? 'success' : 'failed');
+      update({ loggedIn: ok });
       addLog(ok ? 'info' : 'error', `登录结果：${result.state}`);
       if (ok) {
         // 登录成功后自动填充收藏页 URL
@@ -65,6 +74,7 @@ export function LoginPage({ settings, update, rpcCall, addLog }: Props) {
       addLog('info', result.cleared ? 'Profile 已删除' : 'Profile 不存在');
       setProfilePath('');
       setLoginState('idle');
+      update({ loggedIn: false });
     } catch (e) {
       addLog('error', `清除失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {

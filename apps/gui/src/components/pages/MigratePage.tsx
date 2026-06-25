@@ -93,10 +93,22 @@ export function MigratePage({ settings, update, rpcCall, addLog, busy }: Props) 
 
         <button
           onClick={handleMigrate}
-          disabled={busy || !settings.stateDir || !settings.vaultPath || !settings.favoritesUrl}
+          disabled={busy || !settings.stateDir || !settings.vaultPath || !settings.favoritesUrl || !settings.loggedIn}
         >
           {busy ? '迁移中...' : '开始迁移'}
         </button>
+
+        {settings.stateDir && settings.vaultPath && settings.favoritesUrl && !settings.loggedIn && (
+          <div style={{
+            padding: '10px 12px',
+            background: 'rgba(243, 156, 18, 0.15)',
+            borderRadius: '6px',
+            border: '1px solid rgba(243, 156, 18, 0.3)',
+            fontSize: '13px',
+          }}>
+            ⚠️ 请先在「登录」页面完成登录
+          </div>
+        )}
 
         {error && (
           <div style={{
