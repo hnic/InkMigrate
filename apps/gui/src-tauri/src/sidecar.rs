@@ -139,9 +139,9 @@ impl SidecarManager {
         };
         // 锁已释放，等待响应不阻塞其他 RPC
 
-        // 2. 锁外等待响应
+        // 2. 锁外等待响应（长任务如全量扫描/迁移可能需要数小时）
         let response = tokio::time::timeout(
-            std::time::Duration::from_secs(600), // 长任务超时 10 分钟
+            std::time::Duration::from_secs(6 * 3600), // 6 小时
             rx,
         )
         .await
