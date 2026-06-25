@@ -44,6 +44,7 @@ export function createMigrateCommand(): Command {
     .option('--fixture-dir <path>', 'fixture HTML 目录（测试模式，不启动浏览器）')
     .option('--favorites-url <url>', '收藏列表 URL（真实模式）')
     .option('--max-items <n>', '限制扫描+迁移条目数（用于测试）')
+    .option('--interval <ms>', '条目间请求间隔毫秒数（默认 1500，防风控）')
     .option('--dry-run', '不写入目标（仅扫描+提取+计划）')
     .action(async (opts: {
       source: string;
@@ -53,6 +54,7 @@ export function createMigrateCommand(): Command {
       fixtureDir?: string;
       favoritesUrl?: string;
       maxItems?: string;
+      interval?: string;
       dryRun?: boolean;
     }) => {
       const dbPath = join(opts.stateDir, 'inkmigrate.sqlite');
@@ -106,7 +108,11 @@ export function createMigrateCommand(): Command {
         // 构造 target adapter + context
         const targetAdapter = createObsidianTarget();
         const targetContext: TargetContext = {
-          config: {},
+          config: {
+            ...(opts.interval !== undefined
+              ? { intervalMs: parseInt(opts.interval, 10) }
+              : {}),
+          },
           workspaceDir: opts.stateDir,
           vaultPath: opts.vaultPath,
           targetConfig: {

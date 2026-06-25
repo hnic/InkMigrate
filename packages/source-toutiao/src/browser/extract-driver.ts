@@ -40,10 +40,25 @@ export async function driveExtractDetail(
     throw new Error('SourceItemRef has no canonicalUrl; cannot navigate');
   }
 
-  await opts.page.goto(url, {
-    waitUntil: 'networkidle',
-    timeout: opts.navigationTimeoutMs ?? 45_000,
-  });
+  try {
+    await opts.page.goto(url, {
+      waitUntil: 'networkidle',
+      timeout: opts.navigationTimeoutMs ?? 45_000,
+    });
+  } catch (e) {
+    // 包装 Playwright 导航错误，附带 retryable 标志
+    // 让 job-runner catch 块能正确分类为永久失败（不卡在同一条上反复超时）
+    const msg = e instanceof Error ? e.message : String(e);
+    const wrapped = new Error(`navigation failed for ${url}: ${msg}`) as Error & {
+      retryable: false;
+      code: string;
+    };
+    wrapped.retryable = false;
+    wrapped.code = msg.includes('Timeout') || msg.includes('timeout')
+      ? 'NAVIGATION_TIMEOUT'
+      : 'NAVIGATION_FAILED';
+    throw wrapped;
+  }
 
   const html = await opts.page.content();
   const detail = extractDetail({

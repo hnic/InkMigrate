@@ -56,25 +56,57 @@ export async function driveScanFavorites(
   });
 
   /**
-   * 只提取收藏条目容器的外层 HTML，不返回整页 content()。
-   * 整页 HTML 随滚动越来越长（几十 MB），4719 条 × 479 轮会导致 OOM。
-   * 只提取 .feed-card-wrapper 等条目容器，内存占用恒定（只含条目 DOM）。
+   * 增量提取：每轮只返回 DOM 中【新出现】的收藏条目 HTML。
+   * 通过 window.__inkmigrate_seen Set 记录已提取过的条目 key（href），
+   * 避免每轮返回全部累积条目（O(N×R) → O(N)）。
    */
   const extractItemsHtml = async (): Promise<string> => {
     return opts.page.evaluate((selectorsJson: string) => {
       const selectors = JSON.parse(selectorsJson) as string[];
-      // 找到所有匹配的条目元素，拼接它们的 outerHTML
-      const els: Element[] = [];
+
+      // 页面级 Set，跨多轮 evaluate 保持状态
+      const w = window as unknown as { __inkmigrate_seen?: Set<string> };
+      if (w.__inkmigrate_seen === undefined) {
+        w.__inkmigrate_seen = new Set<string>();
+      }
+      const seen = w.__inkmigrate_seen;
+
+      // 找到第一个匹配的条目选择器
+      let allEls: Element[] = [];
       for (const sel of selectors) {
         const found = document.querySelectorAll(sel);
         if (found.length > 0) {
-          els.push(...Array.from(found));
+          allEls = Array.from(found);
           break;
         }
       }
-      // 包裹在一个 div 里，保证 parseItemsFromHtml 能正确解析
+
+      // 只收集本轮新出现的条目
+      const newEls: Element[] = [];
+      for (const el of allEls) {
+        // 提取条目的唯一 key（内容链接的 href）
+        const link = el.querySelector(
+          'a[href*="/article/"], a[href*="/video/"], a[href*="/wenda/"], a[href*="/group/"]',
+        );
+        const href = link?.getAttribute('href');
+        if (href !== null && href !== undefined) {
+          if (!seen.has(href)) {
+            seen.add(href);
+            newEls.push(el);
+          }
+        } else {
+          // 没有 href 的条目（fallback），用文本内容 hash 作为 key
+          const textKey = el.textContent?.trim().substring(0, 100) ?? '';
+          if (textKey && !seen.has(textKey)) {
+            seen.add(textKey);
+            newEls.push(el);
+          }
+        }
+      }
+
+      // 包裹在一个 div 里
       const wrapper = document.createElement('div');
-      for (const el of els) wrapper.appendChild(el.cloneNode(true));
+      for (const el of newEls) wrapper.appendChild(el.cloneNode(true));
       return wrapper.innerHTML;
     }, JSON.stringify(FAVORITES_SELECTORS.item));
   };

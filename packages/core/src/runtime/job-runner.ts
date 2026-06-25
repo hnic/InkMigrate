@@ -137,8 +137,12 @@ export async function runMigrationJob(
     jobs.updateCounts(i.jobId, { candidateCount: refs.length });
 
     // 逐条 extract → write → verify
+    // §18.1 条目间速率控制：默认每条之间等待 1500ms，避免触发风控
+    const configRecord = i.targetContext.config as Record<string, unknown>;
+    const intervalMs = (configRecord['intervalMs'] as number | undefined) ?? 1500;
     const itemStates: ItemFinalState[] = [];
-    for (const ref of refs) {
+    for (let idx = 0; idx < refs.length; idx++) {
+      const ref = refs[idx]!;
       // §18.3 检查中断标志——完成当前条目后停止
       if (interrupted) break;
 
@@ -162,6 +166,11 @@ export async function runMigrationJob(
         retryPolicy: DEFAULT_RETRY_POLICY,
       });
       itemStates.push(state);
+
+      // §18.1 最后一条不需要等待
+      if (idx < refs.length - 1 && intervalMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      }
     }
 
     // §18.3 如果被中断，把未处理条目标记为 interrupted
@@ -452,7 +461,7 @@ async function processOneItem(
 
     return finalState;
   } catch (e) {
-    // §11.5 + §20.2 错误处置
+    // §11.5 + §20.2 错误处置：单条失败不中断整个 Job
     const err = e as {
       retryable?: boolean;
       itemDisposition?: string;
@@ -460,15 +469,17 @@ async function processOneItem(
       message?: string;
     };
 
-    // §18.1 retry 耗尽后：retryable 错误标记为 retryable_failed
-    if (err.retryable === true) {
-      return 'permanent_failed' as ItemFinalState; // retryable_failed 不在 ItemFinalState 中
-    }
+    // 诊断日志（不写入 DB，避免与正常路径的 migration_attempts 冲突）
+    console.warn(
+      `[job ${i.jobId}] 条目处理失败: ${err.code ?? 'UNKNOWN'} - ${err.message?.substring(0, 200) ?? 'unknown error'}`,
+    );
 
-    // §20.2 显式 itemDisposition
+    // 显式 itemDisposition 优先
     const disposition = err.itemDisposition;
     if (disposition === 'unsupported') return 'unsupported';
     if (disposition === 'blocked') return 'blocked';
+    // 导航超时、网络错误等临时性故障也标记为 permanent_failed，
+    // 这样 resume 时会跳过（不会卡在同一条上反复超时）
     return 'permanent_failed';
   }
 }
