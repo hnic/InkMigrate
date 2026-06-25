@@ -1,14 +1,16 @@
 import { useState } from 'react';
 import type { AppSettings } from '../../lib/types.js';
+import { ConfigPrompt } from '../ConfigPrompt.js';
 
 interface Props {
   settings: AppSettings;
+  update: (partial: Partial<AppSettings>) => void;
   rpcCall: (method: string, params: Record<string, unknown>) => Promise<unknown>;
   addLog: (level: 'info' | 'warn' | 'error', message: string) => void;
   busy: boolean;
 }
 
-export function ScanPage({ settings, rpcCall, addLog, busy }: Props) {
+export function ScanPage({ settings, update, rpcCall, addLog, busy }: Props) {
   const [result, setResult] = useState<{ uniqueItems: number; terminationReason: string } | null>(null);
 
   async function handleScan() {
@@ -29,6 +31,13 @@ export function ScanPage({ settings, rpcCall, addLog, busy }: Props) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
       <h2 style={{ fontSize: '18px' }}>扫描收藏</h2>
+
+      <ConfigPrompt
+        settings={settings}
+        update={update}
+        required={['stateDir', 'favoritesUrl']}
+        message="⚠️ 请先填写以下配置才能扫描"
+      />
 
       <div style={{ padding: '16px', background: 'var(--bg-panel)', borderRadius: '8px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
         <div style={{ fontSize: '13px', color: 'var(--text-dim)' }}>

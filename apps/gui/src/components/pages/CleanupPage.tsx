@@ -1,14 +1,16 @@
 import { useState } from 'react';
 import type { AppSettings } from '../../lib/types.js';
+import { ConfigPrompt } from '../ConfigPrompt.js';
 
 interface Props {
   settings: AppSettings;
+  update: (partial: Partial<AppSettings>) => void;
   rpcCall: (method: string, params: Record<string, unknown>) => Promise<unknown>;
   addLog: (level: 'info' | 'warn' | 'error', message: string) => void;
   busy: boolean;
 }
 
-export function CleanupPage({ settings, rpcCall, addLog, busy }: Props) {
+export function CleanupPage({ settings, update, rpcCall, addLog, busy }: Props) {
   const [maxItems, setMaxItems] = useState('');
   const [result, setResult] = useState<{ successCount: number; skipCount: number; failCount: number } | null>(null);
 
@@ -34,6 +36,13 @@ export function CleanupPage({ settings, rpcCall, addLog, busy }: Props) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
       <h2 style={{ fontSize: '18px' }}>取消收藏（清理源端）</h2>
+
+      <ConfigPrompt
+        settings={settings}
+        update={update}
+        required={['stateDir']}
+        message="⚠️ 请先填写工作区目录"
+      />
 
       <div style={{
         padding: '16px',

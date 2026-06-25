@@ -1,16 +1,18 @@
 import { useState } from 'react';
 import type { AppSettings } from '../../lib/types.js';
+import { ConfigPrompt } from '../ConfigPrompt.js';
 
 interface Props {
   settings: AppSettings;
+  update: (partial: Partial<AppSettings>) => void;
   rpcCall: (method: string, params: Record<string, unknown>) => Promise<unknown>;
   addLog: (level: 'info' | 'warn' | 'error', message: string) => void;
   busy: boolean;
 }
 
-export function MigratePage({ settings, rpcCall, addLog, busy }: Props) {
+export function MigratePage({ settings, update, rpcCall, addLog, busy }: Props) {
   const [maxItems, setMaxItems] = useState('');
-  const [interval, setInterval] = useState('1500');
+  const [interval, setIntervalMs] = useState('1500');
   const [result, setResult] = useState<{ status: string; scanCount: number; jobId: string } | null>(null);
 
   async function handleMigrate() {
@@ -43,6 +45,13 @@ export function MigratePage({ settings, rpcCall, addLog, busy }: Props) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
       <h2 style={{ fontSize: '18px' }}>迁移到 Obsidian</h2>
 
+      <ConfigPrompt
+        settings={settings}
+        update={update}
+        required={['stateDir', 'vaultPath', 'favoritesUrl']}
+        message="⚠️ 请先填写以下配置才能迁移"
+      />
+
       <div style={{ padding: '16px', background: 'var(--bg-panel)', borderRadius: '8px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
         <div>
           <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>限制条目数（留空=全量，测试用）</label>
@@ -60,7 +69,7 @@ export function MigratePage({ settings, rpcCall, addLog, busy }: Props) {
           <input
             type="number"
             value={interval}
-            onChange={(e) => setInterval(e.target.value)}
+            onChange={(e) => setIntervalMs(e.target.value)}
             style={{ width: '120px' }}
           />
         </div>

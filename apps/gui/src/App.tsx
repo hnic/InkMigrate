@@ -17,8 +17,6 @@ export default function App() {
   const { settings, update } = useSettings();
   const { rpcCall, progress, logs, busy, addLog } = useSidecar();
 
-  const rpcProps = { settings, rpcCall, addLog };
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
       {/* 顶栏 */}
@@ -55,9 +53,9 @@ export default function App() {
           {/* 当前页面 */}
           <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
             {page === 'login' && <LoginPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} />}
-            {page === 'scan' && <ScanPage {...rpcProps} busy={busy} />}
-            {page === 'migrate' && <MigratePage {...rpcProps} busy={busy} />}
-            {page === 'cleanup' && <CleanupPage {...rpcProps} busy={busy} />}
+            {page === 'scan' && <ScanPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} busy={busy} />}
+            {page === 'migrate' && <MigratePage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} busy={busy} />}
+            {page === 'cleanup' && <CleanupPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} busy={busy} />}
             {page === 'report' && <ReportPage settings={settings} rpcCall={rpcCall} />}
             {page === 'settings' && <SettingsPage settings={settings} update={update} />}
           </div>
