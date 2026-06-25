@@ -99,7 +99,19 @@ export function acquireLock(opts: AcquireOptions): HeldLock {
       if (released) return;
       released = true;
       clearInterval(beat);
-      rmSync(path, { force: true });
+      // 竞态防护：只删除自己持有的锁。如果锁已被其他进程接管（jobId 不同），不删除。
+      if (existsSync(path)) {
+        try {
+          const raw = readFileSync(path, 'utf8');
+          const current = JSON.parse(raw) as LockFileContent;
+          if (current.jobId === opts.jobId) {
+            rmSync(path, { force: true });
+          }
+        } catch {
+          // 锁文件损坏或无法读取，安全删除
+          rmSync(path, { force: true });
+        }
+      }
     },
   };
 }

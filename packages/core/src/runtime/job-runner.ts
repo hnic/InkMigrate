@@ -459,8 +459,8 @@ async function processOneItem(
     if (!verification.ok) {
       // verify 失败 → conflict（用户修改导致 hash 不匹配）
       if (existingItem?.id !== undefined) {
-        // 记录失败的 attempt
-        i.attempts.createItem({
+        // 记录失败的 attempt 并闭环（finishAttempt 标记结束）
+        const attemptId = i.attempts.createItem({
           migrationJobId: i.jobId,
           sourceItemId: existingItem.id,
           stage: 'verifying_target',
@@ -468,6 +468,12 @@ async function processOneItem(
           attemptNo: 1,
           startedAt: now(),
           createdAt: now(),
+        });
+        i.attempts.finishAttempt(attemptId, {
+          success: false,
+          finishedAt: now(),
+          errorCode: 'VERIFICATION_FAILED',
+          errorMessage: 'verification failed (possible user-modified mismatch)',
         });
       }
       return 'conflict';

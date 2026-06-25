@@ -26,15 +26,29 @@ const RESIDUAL_HTML = /<\/?[a-z][\s\S]*?>/gi;
 const DANGEROUS_SCHEME = /\((javascript|vbscript|file|data):[^)]*\)/gi;
 const CONTROL_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F]/g;
 const MULTI_BLANK = /\n{3,}/g;
-// §12.9 stage 8 异常嵌套链接：把 `[text [inner](url1)](url2)` 形式的畸形链接
-// 折叠为内层链接（保留最内层的 URL）。非贪婪匹配两层方括号。
 const NESTED_LINK = /\[((?:\[[^\]]*\]|[^\]])*)\]\(([^)]*)\)/g;
-// 空段落：连续的空强调/弱化标记，或仅含空白
 const EMPTY_PARAGRAPH = /\n\s*\n\s*\n/g;
+
+// 代码块/行内代码匹配
+const CODE_BLOCK = /```[\s\S]*?```/g;
+const INLINE_CODE = /`[^`]+`/g;
 
 /** §12.9 stage 8：Markdown 后清洗。 */
 export function postCleanMarkdown(md: string): string {
-  let s = md;
+  // 先隔离代码块和行内代码，避免正则误杀代码中的尖括号（如 List<String>）
+  const placeholders: string[] = [];
+  let s = md
+    .replace(CODE_BLOCK, (m) => {
+      const idx = placeholders.length;
+      placeholders.push(m);
+      return `\x00CODE${idx}\x00`;
+    })
+    .replace(INLINE_CODE, (m) => {
+      const idx = placeholders.length;
+      placeholders.push(m);
+      return `\x00CODE${idx}\x00`;
+    });
+
   s = s.replace(RESIDUAL_HTML, '');
   s = s.replace(DANGEROUS_SCHEME, '()');
   s = s.replace(CONTROL_CHARS, '');
@@ -42,9 +56,7 @@ export function postCleanMarkdown(md: string): string {
   for (let i = 0; i < 3; i++) {
     const before = s;
     s = s.replace(NESTED_LINK, (match, text: string, url: string) => {
-      // 如果 text 内部还含 `](...)`，说明是嵌套链接，折叠为内层
       if (/\]\([^)]*\)/.test(text)) {
-        // 提取最内层 `[inner](innerUrl)`
         const inner = /\[([^\]]*)\]\(([^)]*)\)/.exec(text);
         if (inner) {
           return `[${inner[1]}](${inner[2]})`;
@@ -54,8 +66,11 @@ export function postCleanMarkdown(md: string): string {
     });
     if (before === s) break;
   }
-  // 删除空段落（连续 3+ 换行折叠为 2，再处理残留）
   s = s.replace(EMPTY_PARAGRAPH, '\n\n');
   s = s.replace(MULTI_BLANK, '\n\n');
+
+  // 还原代码块和行内代码
+  s = s.replace(/\x00CODE(\d+)\x00/g, (_, idx) => placeholders[Number(idx)] ?? '');
+
   return s.trim();
 }

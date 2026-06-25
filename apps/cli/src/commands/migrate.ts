@@ -67,8 +67,8 @@ export function createMigrateCommand(): Command {
         const now = new Date().toISOString();
 
         // 确保实例记录存在
-        ensureInstance(db, opts.source, 'toutiao', 's');
-        ensureInstance(db, opts.target, 'obsidian', 't');
+        ensureInstance(db, opts.source, 'toutiao', 'source');
+        ensureInstance(db, opts.target, 'obsidian', 'target');
 
         new MigrationJobs(db).create({
           id: jobId,
@@ -158,24 +158,13 @@ function ensureInstance(
   db: DB,
   id: string,
   adapterKind: string,
-  _prefix: string,
+  role: 'source' | 'target',
 ): void {
-  // 如果实例不存在，创建一个最小记录
-  const existing = db
-    .prepare('SELECT id FROM source_instances WHERE id = ?')
-    .get(id);
+  const table = role === 'source' ? 'source_instances' : 'target_instances';
+  const existing = db.prepare(`SELECT id FROM ${table} WHERE id = ?`).get(id);
   if (!existing) {
     db.prepare(
-      `INSERT INTO source_instances(id,adapter_kind,adapter_version,adapter_api_version,config_hash,created_at,updated_at)
-       VALUES(?,?,?,?,?,?,?)`,
-    ).run(id, adapterKind, '1.0.0', '1.0.0', 'h', new Date().toISOString(), new Date().toISOString());
-  }
-  const existingTarget = db
-    .prepare('SELECT id FROM target_instances WHERE id = ?')
-    .get(id);
-  if (!existingTarget) {
-    db.prepare(
-      `INSERT INTO target_instances(id,adapter_kind,adapter_version,adapter_api_version,config_hash,created_at,updated_at)
+      `INSERT INTO ${table}(id,adapter_kind,adapter_version,adapter_api_version,config_hash,created_at,updated_at)
        VALUES(?,?,?,?,?,?,?)`,
     ).run(id, adapterKind, '1.0.0', '1.0.0', 'h', new Date().toISOString(), new Date().toISOString());
   }

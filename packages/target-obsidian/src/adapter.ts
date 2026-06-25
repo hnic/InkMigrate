@@ -26,12 +26,14 @@ export const OBSIDIAN_TARGET_VERSION = '1.0.0' as const;
 export const OBSIDIAN_ADAPTER_API_VERSION = '1.0.0' as const;
 
 export function createObsidianTarget(): ObsidianTargetAdapter {
+  // adapter 实例级路径去重 Set，防止同一 Job 内标题重复的条目分配到相同路径
+  const assignedPaths = new Set<string>();
   return {
     kind: OBSIDIAN_TARGET_KIND,
     version: OBSIDIAN_TARGET_VERSION,
     adapterApiVersion: OBSIDIAN_ADAPTER_API_VERSION,
     validateConfig,
-    plan: planNote,
+    plan: (item, ctx) => planNote(item, ctx, assignedPaths),
     write: writeNote,
     verify: verifyNote,
   };
@@ -75,6 +77,7 @@ async function validateConfig(ctx: TargetContext): Promise<ValidationResult> {
 async function planNote(
   item: SourceItem,
   ctx: TargetContext,
+  assignedPaths: Set<string>,
 ): Promise<ObsidianTargetPlan> {
   const config = parseConfig(ctx);
   validateVault(config.vaultPath);
@@ -102,18 +105,23 @@ async function planNote(
     }
   }
 
-  if (await fileExists(noteAbsolutePath(config.vaultPath, relativePath))) {
+  // 文件名冲突解决：检查磁盘文件 + 当前 Job 内已分配路径（防止并发穿透）
+  async function pathInUse(p: string): Promise<boolean> {
+    if (assignedPaths.has(p)) return true;
+    return fileExists(noteAbsolutePath(config.vaultPath, p));
+  }
+
+  if (await pathInUse(relativePath)) {
     const baseName = relativePath.replace(/\.md$/, '');
     let suffix = 2;
     let candidate = relativePath;
-    while (await fileExists(noteAbsolutePath(config.vaultPath, candidate))) {
+    while (await pathInUse(candidate)) {
       candidate = `${baseName}-${suffix}.md`;
       suffix++;
     }
-    if (candidate !== relativePath) {
-      relativePath = candidate;
-    }
+    relativePath = candidate;
   }
+  assignedPaths.add(relativePath);
 
   const srcHash = sourceContentHash(
     JSON.stringify(canonicalContentForHash(item)),

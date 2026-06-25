@@ -29,10 +29,20 @@ export interface DetailResult {
  * 4. 元数据占位
  *
  * 任何路径返回的正文都必须进入 §12.9 安全流水线，不能跳过清洗。
+ *
+ * 性能优化：只解析一次 JSDOM，detectSpecialPage/extractAuthor/extractTime 复用。
  */
 export function extractDetail(i: DetailInput): DetailResult {
-  // 先检测特殊情况：删除/登录/验证码（这些 fixture 用 data-testid 标识）
-  const special = detectSpecialPage(i.html);
+  // 解析一次 JSDOM，后续复用 document 对象
+  const dom = new JSDOM(i.html, {
+    url: i.canonicalUrl,
+    runScripts: 'outside-only',
+    resources: undefined,
+  });
+  const doc = dom.window.document;
+
+  // 先检测特殊情况：删除/登录/验证码
+  const special = detectSpecialPageFromDoc(doc);
   if (special !== undefined) {
     return {
       title: deriveTitleFromUrl(i.canonicalUrl),
@@ -44,7 +54,7 @@ export function extractDetail(i: DetailInput): DetailResult {
     };
   }
 
-  // 提取元数据（JSON-LD/OG）—— 不论正文走哪条路径都用得上
+  // 提取元数据（JSON-LD/OG）
   const sd = extractStructuredData(i.html, i.canonicalUrl);
   const rb = readabilityFallback(i.html, i.canonicalUrl);
   const title =
@@ -53,7 +63,7 @@ export function extractDetail(i: DetailInput): DetailResult {
     rb.title ??
     deriveTitleFromUrl(i.canonicalUrl);
 
-  // 选正文 HTML：用 readability 回退（article/content 选择器）
+  // 选正文 HTML：用 readability 回退
   const bodyHtml = rb.contentHtml;
 
   // §12.9 安全流水线
@@ -61,10 +71,9 @@ export function extractDetail(i: DetailInput): DetailResult {
     baseUrl: i.canonicalUrl,
   });
 
-  const author =
-    sd.author ?? extractAuthorFromBody(i.html, i.canonicalUrl);
-  const publishedAt =
-    sd.datePublished ?? extractTimeFromBody(i.html, i.canonicalUrl);
+  // 从已解析的 DOM 提取 author/time（不再重复创建 JSDOM）
+  const author = sd.author ?? extractAuthorFromDoc(doc);
+  const publishedAt = sd.datePublished ?? extractTimeFromDoc(doc);
 
   const result: DetailResult = {
     title,
@@ -79,12 +88,7 @@ export function extractDetail(i: DetailInput): DetailResult {
   return result;
 }
 
-function detectSpecialPage(html: string): SourceDegradation | undefined {
-  const dom = new JSDOM(html, {
-    runScripts: 'outside-only',
-    resources: undefined,
-  });
-  const doc = dom.window.document;
+function detectSpecialPageFromDoc(doc: Document): SourceDegradation | undefined {
   if (doc.querySelector('[data-testid="content-deleted"]')) {
     return {
       code: 'content-unavailable',
@@ -119,30 +123,14 @@ function deriveTitleFromUrl(url: string): string {
   }
 }
 
-function extractAuthorFromBody(
-  html: string,
-  baseUrl: string,
-): string | undefined {
-  const dom = new JSDOM(html, {
-    url: baseUrl,
-    runScripts: 'outside-only',
-    resources: undefined,
-  });
-  const el = dom.window.document.querySelector('.author-name, .author');
+function extractAuthorFromDoc(doc: Document): string | undefined {
+  const el = doc.querySelector('.author-name, .author');
   const v = el?.textContent?.trim();
   return v || undefined;
 }
 
-function extractTimeFromBody(
-  html: string,
-  baseUrl: string,
-): string | undefined {
-  const dom = new JSDOM(html, {
-    url: baseUrl,
-    runScripts: 'outside-only',
-    resources: undefined,
-  });
-  const el = dom.window.document.querySelector('time');
+function extractTimeFromDoc(doc: Document): string | undefined {
+  const el = doc.querySelector('time');
   const v = el?.getAttribute('datetime') ?? el?.textContent?.trim();
   return v || undefined;
 }

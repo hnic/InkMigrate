@@ -53,6 +53,12 @@ export function atomicWrite(
     // Step 2: 写入临时文件
     writeFileSync(tmpPath, content, { encoding: 'utf8' });
 
+    // 安全校验：写入 tmp 后、rename 前，校验 tmpPath 的真实路径不逃逸 Vault。
+    // 即使 targetPath 原本不存在，父目录链中的符号链接也能被检测到。
+    if (vaultRoot !== undefined) {
+      assertSymlinkSafe(vaultRoot, tmpPath);
+    }
+
     // Step 5: 原子 rename
     renameSync(tmpPath, targetPath);
   } catch (e) {
