@@ -102,32 +102,40 @@ impl SidecarManager {
     }
 
     /// 发送 RPC 请求并等待响应。
+    /// 只在写 stdin 时持锁，等待响应时不持锁（允许并发查询）。
     pub async fn send_rpc(
         &mut self,
         method: String,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let stdin = self.stdin.as_mut().ok_or("sidecar 未启动")?;
-        let id = self.next_id;
-        self.next_id += 1;
+        // 1. 短暂持锁：分配 id + 注册 pending + 写 stdin
+        let rx = {
+            let stdin = self.stdin.as_mut().ok_or("sidecar 未启动")?;
+            let id = self.next_id;
+            self.next_id += 1;
 
-        let request = RpcRequest {
-            jsonrpc: "2.0".to_string(),
-            id,
-            method: method.clone(),
-            params: Some(params),
+            let request = RpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id,
+                method: method.clone(),
+                params: Some(params),
+            };
+
+            let (tx, rx) = oneshot::channel();
+            self.pending.lock().await.insert(id, tx);
+
+            let json = serde_json::to_string(&request)
+                .map_err(|e| format!("序列化请求失败: {}", e))?;
+            stdin
+                .write_all(format!("{}\n", json).as_bytes())
+                .await
+                .map_err(|e| format!("写入 stdin 失败: {}", e))?;
+
+            rx
         };
+        // 锁已释放，等待响应不阻塞其他 RPC
 
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
-
-        let json = serde_json::to_string(&request)
-            .map_err(|e| format!("序列化请求失败: {}", e))?;
-        stdin
-            .write_all(format!("{}\n", json).as_bytes())
-            .await
-            .map_err(|e| format!("写入 stdin 失败: {}", e))?;
-
+        // 2. 锁外等待响应
         let response = tokio::time::timeout(
             std::time::Duration::from_secs(600), // 长任务超时 10 分钟
             rx,
@@ -195,4 +203,9 @@ async fn read_stdout(
     }
 
     eprintln!("sidecar stdout 已关闭");
+
+    // sidecar 进程已退出（崩溃或正常关闭），通知前端
+    let _ = app.emit("sidecar://crashed", serde_json::json!({
+        "message": "sidecar 进程已退出，请重启应用"
+    }));
 }

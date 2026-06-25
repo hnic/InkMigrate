@@ -95,7 +95,7 @@ export interface MigrateResumeParams {
   stateDir: string;
   vaultPath: string;
   favoritesUrl?: string;
-  maxItems?: string;
+  maxItems?: number;
 }
 
 export interface MigrateResult {

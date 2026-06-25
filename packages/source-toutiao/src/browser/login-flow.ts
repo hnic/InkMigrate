@@ -78,6 +78,7 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginFlowRes
   }).catch(() => {});
 
   // 合并头像+用户名检测为单次 evaluate，减少往返
+  let isFirstRound = true;
   while (Date.now() < deadline) {
     const loginCheck = await page.evaluate(() => {
       const profile = document.querySelector('.ttp-header-profile img, .header-profile-wrapper img, .user-icon img');
@@ -96,8 +97,11 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginFlowRes
       return { state, signals, ...(favUrl !== undefined ? { favoritesUrl: favUrl } : {}) };
     }
 
-    // 首轮不等 pollMs（已登录时立即检测），后续轮询等待
-    await new Promise((resolve) => setTimeout(resolve, pollMs));
+    // 首轮不等 pollMs（已登录时 waitForSelector 后立即检测），后续轮询等待
+    if (!isFirstRound) {
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+    isFirstRound = false;
   }
 
   // 超时：返回最终状态

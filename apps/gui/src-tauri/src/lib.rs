@@ -1,6 +1,7 @@
 mod sidecar;
 
 use sidecar::SidecarManager;
+use tauri::Emitter;
 use std::sync::Arc;
 use tauri::State;
 use tokio::sync::Mutex;
@@ -40,8 +41,11 @@ pub fn run() {
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let mut mgr = sidecar_clone.lock().await;
-                if let Err(e) = mgr.start(app_handle).await {
+                if let Err(e) = mgr.start(app_handle.clone()).await {
                     eprintln!("启动 sidecar 失败: {}", e);
+                    let _ = app_handle.emit("sidecar://crashed", serde_json::json!({
+                        "message": format!("sidecar 启动失败: {}", e)
+                    }));
                 } else {
                     eprintln!("sidecar 启动成功");
                 }

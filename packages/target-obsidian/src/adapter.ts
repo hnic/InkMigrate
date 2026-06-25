@@ -187,16 +187,17 @@ async function writeNote(
 
   let finalRelativePath = oplan.relativePath;
   const contentToWrite = oplan.renderedContent;
+  let finalHash: string;
 
   switch (decision.action) {
     case 'write_canonical':
     case 'forced_overwrite':
     case 'update_metadata_only':
-      atomicWrite(absPath, contentToWrite, config.vaultPath);
+      finalHash = atomicWrite(absPath, contentToWrite, config.vaultPath);
       break;
     case 'write_new_variant': {
       finalRelativePath = oplan.relativePath.replace(/\.md$/, '.imported-new.md');
-      atomicWrite(
+      finalHash = atomicWrite(
         noteAbsolutePath(config.vaultPath, finalRelativePath),
         contentToWrite,
         config.vaultPath,
@@ -216,9 +217,6 @@ async function writeNote(
         actionCode: 'stage_attempt',
       };
   }
-
-  const finalAbs = noteAbsolutePath(config.vaultPath, finalRelativePath);
-  const finalHash = writtenFileHash(readFileSync(finalAbs));
 
   const result: ObsidianWriteResult = {
     relativePath: finalRelativePath,

@@ -39,6 +39,11 @@ export async function withRetry<T>(
     } catch (e) {
       lastError = e;
       const httpStatus = (e as { httpStatus?: number }).httpStatus;
+      const retryable = (e as { retryable?: boolean }).retryable;
+      // 显式标记 retryable=false 的错误不重试（如导航超时）
+      if (retryable === false) {
+        throw e;
+      }
       if (httpStatus !== undefined && isPermanentHttpError(httpStatus)) {
         throw e;
       }

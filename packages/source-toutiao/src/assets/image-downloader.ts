@@ -33,6 +33,8 @@ const ALLOWED_MIME = new Set([
 const MAGIC_SIGNATURES: ReadonlyArray<{
   mime: string;
   prefix: ReadonlyArray<number>;
+  extraOffset?: number;
+  extraPrefix?: ReadonlyArray<number>;
 }> = [
   { mime: 'image/jpeg', prefix: [0xff, 0xd8, 0xff] },
   {
@@ -40,7 +42,7 @@ const MAGIC_SIGNATURES: ReadonlyArray<{
     prefix: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
   },
   { mime: 'image/gif', prefix: [0x47, 0x49, 0x46, 0x38] },
-  { mime: 'image/webp', prefix: [0x52, 0x49, 0x46, 0x46] }, // RIFF
+  { mime: 'image/webp', prefix: [0x52, 0x49, 0x46, 0x46], extraOffset: 8, extraPrefix: [0x57, 0x45, 0x42, 0x50] }, // RIFF + WEBP at offset 8
 ];
 
 /**
@@ -132,10 +134,14 @@ async function tryDownloadOnce(i: DownloadInput): Promise<DownloadResult> {
     return { ok: false, reason: 'empty/zero-byte response' };
   }
 
-  // Magic Bytes 一致性
-  const sigMatch = MAGIC_SIGNATURES.find((s) =>
-    s.prefix.every((b, idx) => bytes[idx] === b),
-  );
+  // Magic Bytes 一致性（含可选的偏移校验，如 webp 的 WEBP 标记）
+  const sigMatch = MAGIC_SIGNATURES.find((s) => {
+    if (!s.prefix.every((b, idx) => bytes[idx] === b)) return false;
+    if (s.extraOffset !== undefined && s.extraPrefix !== undefined) {
+      return s.extraPrefix.every((b, idx) => bytes[s.extraOffset! + idx] === b);
+    }
+    return true;
+  });
   if (sigMatch === undefined) {
     return {
       ok: false,

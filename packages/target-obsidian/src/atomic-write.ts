@@ -8,7 +8,7 @@ import {
 } from 'node:fs';
 import { dirname, join, basename } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { assertSymlinkSafe } from '@inkmigrate/core';
+import { assertSymlinkSafe, writtenFileHash } from '@inkmigrate/core';
 
 /**
  * §13.10 原子写入流程：
@@ -28,7 +28,7 @@ export function atomicWrite(
   targetPath: string,
   content: string,
   vaultRoot?: string,
-): void {
+): string {
   // Step 4 (early): 非空检查
   if (content.length === 0) {
     throw new Error('atomicWrite: content is empty');
@@ -60,6 +60,9 @@ export function atomicWrite(
     if (existsSync(tmpPath)) rmSync(tmpPath, { force: true });
     throw e;
   }
+
+  // 返回写入内容的 hash（避免调用方写后再回读）
+  return writtenFileHash(Buffer.from(content, 'utf8'));
 }
 
 /**

@@ -149,7 +149,7 @@ export async function runMigrationJob(
       workspaceDir: i.workspaceDir,
     })) {
       refs.push(ref);
-      persistSourceItemRef(sourceItemsRepo, i.sourceInstanceId, ref);
+      persistSourceItemRef(sourceItemsRepo, i.sourceInstanceId, ref, refs.length - 1);
       // 扫描阶段实时推送进度
       if (i.onProgress !== undefined) {
         i.onProgress({
@@ -339,6 +339,7 @@ function persistSourceItemRef(
   repo: SourceItems,
   sourceInstanceId: string,
   ref: SourceItemRef,
+  position: number,
 ): void {
   const existing = repo.findByFingerprint(sourceInstanceId, ref.fingerprint);
   if (existing !== undefined) return;
@@ -351,6 +352,7 @@ function persistSourceItemRef(
     stableShortId: deriveStableShortId(stableKey),
     contentKind: ref.contentKind,
     discoveredAt: ref.discoveredAt,
+    sourcePosition: position,
     status: 'discovered',
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
