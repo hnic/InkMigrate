@@ -9,6 +9,9 @@ import {
 /** §12.2 登录/收藏页面 URL 中包含这些片段时判定为认证页面。 */
 const AUTH_URL_PATTERNS = ['login', 'passport', 'sso', 'account'];
 
+/** §12.2 无 favoritesUrl 时用首页检测登录态。 */
+const TOUTIAO_HOME = 'https://www.toutiao.com/';
+
 export interface LoginFlowOptions {
   session: ToutiaoBrowserSession;
   /** 收藏列表 URL。未登录时通常重定向到登录页。 */
@@ -49,14 +52,15 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginFlowRes
   const ownsPage = opts.page === undefined;
   const page = opts.page ?? (await opts.session.newPage());
 
-  const originalUrl = opts.favoritesUrl;
-  await page.goto(originalUrl, {
+  // 如果有收藏页 URL 就用它；否则用首页检测登录态
+  const targetUrl = opts.favoritesUrl ?? TOUTIAO_HOME;
+  await page.goto(targetUrl, {
     waitUntil: 'networkidle',
     timeout: 45_000,
   });
 
   // 第一轮检测
-  let signals = await collectLoginSignals(page, originalUrl);
+  let signals = await collectLoginSignals(page, targetUrl);
   let state = detectLoginState(signals);
 
   if (state === 'logged-in') {
@@ -77,7 +81,7 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginFlowRes
       const leftAuth = !AUTH_URL_PATTERNS.some((p) => currentUrl.toLowerCase().includes(p));
       if (leftAuth) {
         // 可能已登录，重新检测
-        signals = await collectLoginSignals(page, originalUrl);
+        signals = await collectLoginSignals(page, targetUrl);
         state = detectLoginState(signals);
         if (state === 'logged-in') {
           if (ownsPage) await page.close();
@@ -88,7 +92,7 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginFlowRes
   }
 
   // 超时：返回最终状态
-  signals = await collectLoginSignals(page, originalUrl);
+  signals = await collectLoginSignals(page, targetUrl);
   state = detectLoginState(signals);
   if (ownsPage) await page.close();
   return { state, signals };
