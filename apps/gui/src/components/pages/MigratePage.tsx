@@ -37,7 +37,7 @@ export function MigratePage({ settings, update, rpcCall, addLog, busy }: Props) 
         `迁移完成：status=${res.status}, count=${res.scanCount}, reconcile=${res.reconciliationOk}`,
       );
     } catch (e) {
-      addLog('error', `迁移失败：${(e as Error).message}`);
+      addLog('error', `迁移失败：${e instanceof Error ? e.message : String(e)}`);
     }
   }
 

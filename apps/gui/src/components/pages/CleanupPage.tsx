@@ -29,7 +29,7 @@ export function CleanupPage({ settings, update, rpcCall, addLog, busy }: Props) 
       setResult(res);
       addLog('info', `清理完成：成功 ${res.successCount}, 跳过 ${res.skipCount}, 失败 ${res.failCount}`);
     } catch (e) {
-      addLog('error', `清理失败：${(e as Error).message}`);
+      addLog('error', `清理失败：${e instanceof Error ? e.message : String(e)}`);
     }
   }
 

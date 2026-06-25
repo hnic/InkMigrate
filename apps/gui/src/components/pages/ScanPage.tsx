@@ -24,7 +24,7 @@ export function ScanPage({ settings, update, rpcCall, addLog, busy }: Props) {
       setResult(res);
       addLog('info', `扫描完成：${res.uniqueItems} 条（${res.terminationReason}）`);
     } catch (e) {
-      addLog('error', `扫描失败：${(e as Error).message}`);
+      addLog('error', `扫描失败：${e instanceof Error ? e.message : String(e)}`);
     }
   }
 

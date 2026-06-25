@@ -48,7 +48,8 @@ export function LoginPage({ settings, update, rpcCall, addLog }: Props) {
       }
     } catch (e) {
       setLoginState('failed');
-      addLog('error', `登录失败：${(e as Error).message}`);
+      const errMsg = e instanceof Error ? e.message : String(e);
+      addLog('error', `登录失败：${errMsg}`);
     } finally {
       setLoading(false);
     }
@@ -65,7 +66,7 @@ export function LoginPage({ settings, update, rpcCall, addLog }: Props) {
       setProfilePath('');
       setLoginState('idle');
     } catch (e) {
-      addLog('error', `清除失败：${(e as Error).message}`);
+      addLog('error', `清除失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setLoading(false);
     }

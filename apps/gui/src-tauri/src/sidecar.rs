@@ -72,6 +72,22 @@ impl SidecarManager {
 
         let stdin = child.stdin.take().ok_or("无法获取 stdin")?;
         let stdout = child.stdout.take().ok_or("无法获取 stdout")?;
+        let stderr = child.stderr.take().ok_or("无法获取 stderr")?;
+
+        // 启动 stderr 读取任务——转发到终端 + Tauri Event
+        let app_for_stderr = app.clone();
+        tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt;
+            let reader = tokio::io::BufReader::new(stderr);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                eprintln!("[sidecar] {}", line);
+                let _ = app_for_stderr.emit("sidecar://log", serde_json::json!({
+                    "level": "info",
+                    "message": line,
+                }));
+            }
+        });
 
         // 启动 stdout 读取任务
         let pending = self.pending.clone();
