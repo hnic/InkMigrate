@@ -20,9 +20,20 @@ async fn send_rpc(
 pub fn run() {
     let sidecar = Arc::new(Mutex::new(SidecarManager::new()));
 
+    let sidecar_for_exit = sidecar.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(sidecar.clone())
+        .on_window_event(move |_window, event| {
+            // 应用退出时关闭 sidecar 进程
+            if let tauri::WindowEvent::Destroyed = event {
+                let sc = sidecar_for_exit.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut mgr = sc.lock().await;
+                    mgr.shutdown().await;
+                });
+            }
+        })
         .setup(move |app| {
             // 启动 sidecar 进程
             let sidecar_clone = sidecar.clone();

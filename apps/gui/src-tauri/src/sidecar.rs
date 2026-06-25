@@ -30,6 +30,7 @@ pub struct RpcResponse {
 pub struct RpcError {
     pub code: i64,
     pub message: String,
+    #[allow(dead_code)]
     pub data: Option<serde_json::Value>,
 }
 
