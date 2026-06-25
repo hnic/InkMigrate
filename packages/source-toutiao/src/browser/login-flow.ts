@@ -59,13 +59,19 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginFlowRes
     timeout: 45_000,
   });
 
-  // 第一轮检测
-  let signals = await collectLoginSignals(page, targetUrl);
-  let state = detectLoginState(signals);
+  // 第一轮检测——只在收藏页场景下自动检测；
+  // 首页场景（无 favoritesUrl）不做自动检测，因为首页 DOM 可能有误判信号。
+  // 直接进入等待用户登录的轮询循环。
+  let signals: Partial<LoginSignals> = {};
+  let state: LoginState = 'auth-state-unknown';
 
-  if (state === 'logged-in') {
-    if (ownsPage) await page.close();
-    return { state, signals };
+  if (opts.favoritesUrl !== undefined) {
+    signals = await collectLoginSignals(page, targetUrl);
+    state = detectLoginState(signals);
+    if (state === 'logged-in') {
+      if (ownsPage) await page.close();
+      return { state, signals };
+    }
   }
 
   // 未登录或状态不确定 → 等待用户手动登录
