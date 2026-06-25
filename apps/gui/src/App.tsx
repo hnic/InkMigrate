@@ -54,7 +54,7 @@ export default function App() {
 
           {/* 当前页面 */}
           <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
-            {page === 'login' && <LoginPage {...rpcProps} />}
+            {page === 'login' && <LoginPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} />}
             {page === 'scan' && <ScanPage {...rpcProps} busy={busy} />}
             {page === 'migrate' && <MigratePage {...rpcProps} busy={busy} />}
             {page === 'cleanup' && <CleanupPage {...rpcProps} busy={busy} />}
