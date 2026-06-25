@@ -36,22 +36,6 @@ export function SettingsPage({ settings, update }: Props) {
         </div>
 
         <div>
-          <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>收藏页 URL</label>
-          <textarea
-            value={settings.favoritesUrl}
-            onChange={(e) => update({ favoritesUrl: e.target.value })}
-            placeholder="登录后自动获取"
-            rows={3}
-            style={{ fontFamily: 'monospace', fontSize: '12px', resize: 'vertical' }}
-          />
-          <div style={{ fontSize: '12px', color: 'var(--text-dim)', marginTop: '4px' }}>
-            💡 登录时自动获取，通常无需手动修改。仅当 URL 过期失效时才需要更新。
-          </div>
-        </div>
-          </div>
-        </div>
-
-        <div>
           <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>来源实例 ID</label>
           <input
             value={settings.source}
