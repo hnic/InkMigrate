@@ -151,12 +151,24 @@ async function handleScanStart(params: ScanStartParams | undefined): Promise<Sca
     await session.launch();
     const page = await session.newPage();
 
+    // 通知 GUI：开始扫描
+    sendNotification('log', { level: 'info', message: '正在打开收藏页...' });
+    sendNotification('progress', { phase: 'scanning', current: 0, total: 0 });
+
     const { refs, scanResult } = await driveScanFavorites({
       page,
       favoritesUrl: params.favoritesUrl,
       baseUrl: 'https://www.toutiao.com/',
       sourceInstanceId: params.source,
       ...(params.maxItems !== undefined ? { maxItems: params.maxItems } : {}),
+      onProgress: (info) => {
+        sendNotification('progress', {
+          phase: 'scanning',
+          current: info.found,
+          total: 0,
+          currentItem: `第 ${info.scrollRound} 轮滚动`,
+        });
+      },
     });
 
     await page.close();

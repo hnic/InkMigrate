@@ -25,6 +25,8 @@ export interface ScanDriverOptions {
   navigationTimeoutMs?: number;
   /** 达到多少唯一条目后立即终止（不再滚动）。用于测试或限量迁移。 */
   maxItems?: number;
+  /** 每轮滚动后的进度回调。 */
+  onProgress?: (info: { found: number; scrollRound: number; phase: string }) => void;
 }
 
 export interface ScanDriverResult {
@@ -115,8 +117,15 @@ export async function driveScanFavorites(
 
   const initialHtml = await extractItemsHtml();
   const waitMs = opts.waitAfterScrollMs ?? 1500;
+  let scrollRound = 0;
 
   const scrollForMore = async (): Promise<string | null> => {
+    scrollRound++;
+    // 进度通知：开始滚动
+    if (opts.onProgress !== undefined) {
+      opts.onProgress({ found: nodeSeen.size, scrollRound, phase: 'scrolling' });
+    }
+
     // §12.5 滚动到底部
     await opts.page.evaluate(() => {
       window.scrollTo(0, document.body.scrollHeight);
@@ -135,7 +144,14 @@ export async function driveScanFavorites(
       }
     }
 
-    return extractItemsHtml();
+    const html = extractItemsHtml();
+
+    // 进度通知：本轮滚动完成
+    if (opts.onProgress !== undefined) {
+      opts.onProgress({ found: nodeSeen.size, scrollRound, phase: 'loaded' });
+    }
+
+    return html;
   };
 
   const scanInput: Parameters<typeof scanFavoritesList>[0] = {
