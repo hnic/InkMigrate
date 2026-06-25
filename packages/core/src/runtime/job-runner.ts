@@ -313,6 +313,11 @@ async function processOneItem(
     i.ref.fingerprint,
   );
 
+  // §17.2 幂等：已 verified 的条目直接跳过（断点续跑场景）
+  if (existingItem !== undefined && existingItem.status === 'verified') {
+    return 'verified';
+  }
+
   // §16.7 创建 migration_attempts 记录
   const attemptInput: Parameters<MigrationAttempts['createItem']>[0] = {
     migrationJobId: i.jobId,
