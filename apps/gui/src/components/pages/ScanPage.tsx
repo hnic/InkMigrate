@@ -12,9 +12,16 @@ interface Props {
 
 export function ScanPage({ settings, update, rpcCall, addLog, busy }: Props) {
   const [result, setResult] = useState<{ uniqueItems: number; terminationReason: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const reasonLabels: Record<string, string> = {
+    no_new_items_after_5_cycles: '连续 5 轮无新内容',
+    no_load_more: '没有更多内容',
+  };
 
   async function handleScan() {
     setResult(null);
+    setError(null);
     try {
       const res = await rpcCall('scan.start', {
         source: settings.source,
@@ -22,9 +29,11 @@ export function ScanPage({ settings, update, rpcCall, addLog, busy }: Props) {
         favoritesUrl: settings.favoritesUrl,
       }) as { uniqueItems: number; terminationReason: string };
       setResult(res);
-      addLog('info', `扫描完成：${res.uniqueItems} 条（${res.terminationReason}）`);
+      addLog('info', `扫描完成：${res.uniqueItems} 条`);
     } catch (e) {
-      addLog('error', `扫描失败：${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg);
+      addLog('error', `扫描失败：${msg}`);
     }
   }
 
@@ -35,8 +44,8 @@ export function ScanPage({ settings, update, rpcCall, addLog, busy }: Props) {
       <ConfigPrompt
         settings={settings}
         update={update}
-        required={['stateDir', 'favoritesUrl']}
-        message="⚠️ 请先填写以下配置才能扫描"
+        required={['stateDir']}
+        message="⚠️ 请先填写工作区目录，并确保已登录"
       />
 
       <div style={{ padding: '16px', background: 'var(--bg-panel)', borderRadius: '8px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
@@ -48,13 +57,26 @@ export function ScanPage({ settings, update, rpcCall, addLog, busy }: Props) {
           {busy ? '扫描中...' : '开始扫描'}
         </button>
 
+        {error && (
+          <div style={{
+            padding: '10px 12px',
+            background: 'rgba(231, 76, 60, 0.15)',
+            borderRadius: '6px',
+            border: '1px solid rgba(231, 76, 60, 0.3)',
+            color: 'var(--error)',
+            fontSize: '13px',
+          }}>
+            ❌ {error}
+          </div>
+        )}
+
         {result && (
           <div style={{ marginTop: '8px', padding: '12px', background: 'var(--bg-hover)', borderRadius: '6px' }}>
             <div style={{ fontSize: '24px', fontWeight: 700, color: 'var(--success)' }}>
               {result.uniqueItems}
             </div>
             <div style={{ color: 'var(--text-dim)', fontSize: '12px' }}>
-              个唯一条目 · {result.terminationReason}
+              个唯一条目 · {reasonLabels[result.terminationReason] ?? result.terminationReason}
             </div>
           </div>
         )}

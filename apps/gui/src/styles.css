@@ -45,6 +45,14 @@ button:disabled {
   cursor: not-allowed;
 }
 
+button.btn-danger {
+  background: var(--error);
+}
+
+button.btn-danger:hover:not(:disabled) {
+  background: #c0392b;
+}
+
 input, textarea {
   background: var(--bg-panel);
   color: var(--text);

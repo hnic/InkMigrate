@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import type { AppSettings } from '../../lib/types.js';
 
 interface Props {
@@ -16,27 +16,37 @@ interface JobInfo {
 }
 
 export function ReportPage({ settings, rpcCall }: Props) {
-  const [jobs, setJobs] = useState<JobInfo[]>([]);
-  const [selectedJob, setSelectedJob] = useState<string>('');
+  const [selectedJob, setSelectedJob] = useState('');
   const [detail, setDetail] = useState<JobInfo | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  // 暂时只能查询单个 job。未来可以加一个 list jobs 的 RPC
   async function queryJob() {
     if (!selectedJob || !settings.stateDir) return;
     setLoading(true);
+    setError(null);
+    setDetail(null);
     try {
       const res = await rpcCall('status.query', {
         job: selectedJob,
         stateDir: settings.stateDir,
       }) as JobInfo;
       setDetail(res);
-    } catch {
-      setDetail(null);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg);
     } finally {
       setLoading(false);
     }
   }
+
+  const statusLabels: Record<string, string> = {
+    completed: '完成',
+    failed: '失败',
+    interrupted: '已中断',
+    created: '已创建',
+    running: '运行中',
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
@@ -52,9 +62,22 @@ export function ReportPage({ settings, rpcCall }: Props) {
             style={{ flex: 1 }}
           />
           <button onClick={queryJob} disabled={loading || !selectedJob || !settings.stateDir}>
-            查询
+            {loading ? '查询中...' : '查询'}
           </button>
         </div>
+
+        {error && (
+          <div style={{
+            padding: '10px 12px',
+            background: 'rgba(231, 76, 60, 0.15)',
+            borderRadius: '6px',
+            border: '1px solid rgba(231, 76, 60, 0.3)',
+            color: 'var(--error)',
+            fontSize: '13px',
+          }}>
+            ❌ {error}
+          </div>
+        )}
 
         {detail && (
           <div style={{ marginTop: '8px' }}>
@@ -62,7 +85,7 @@ export function ReportPage({ settings, rpcCall }: Props) {
               Job: {detail.jobId}
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
-              <StatCard label="状态" value={detail.status} color={detail.status === 'completed' ? 'var(--success)' : 'var(--warning)'} />
+              <StatCard label="状态" value={statusLabels[detail.status] ?? detail.status} color={detail.status === 'completed' ? 'var(--success)' : 'var(--warning)'} />
               <StatCard label="扫描总数" value={String(detail.scanCount)} />
               <StatCard label="已验证" value={String(detail.verifiedCount)} color="var(--success)" />
               <StatCard label="降级" value={String(detail.degradedCount)} color="var(--warning)" />
@@ -73,7 +96,8 @@ export function ReportPage({ settings, rpcCall }: Props) {
       </div>
 
       <div style={{ fontSize: '12px', color: 'var(--text-dim)' }}>
-        提示：详细报告文件（summary.md、items.csv）保存在<br/>
+        提示：Job ID 可在迁移页面的结果中查看。<br/>
+        详细报告文件（summary.md、items.csv）保存在<br/>
         <code>{settings.stateDir}/reports/{'<job-id>'}/</code>
       </div>
     </div>

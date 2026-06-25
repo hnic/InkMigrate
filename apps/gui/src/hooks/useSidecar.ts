@@ -56,6 +56,7 @@ export function useSidecar() {
       return result;
     } finally {
       setBusy(false);
+      setProgress(null);
     }
   }, []);
 

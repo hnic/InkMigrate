@@ -13,9 +13,13 @@ interface Props {
 export function CleanupPage({ settings, update, rpcCall, addLog, busy }: Props) {
   const [maxItems, setMaxItems] = useState('');
   const [result, setResult] = useState<{ successCount: number; skipCount: number; failCount: number } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
 
   async function handleCleanup() {
+    setConfirming(false);
     setResult(null);
+    setError(null);
     try {
       const params: Record<string, unknown> = {
         source: settings.source,
@@ -29,7 +33,9 @@ export function CleanupPage({ settings, update, rpcCall, addLog, busy }: Props) 
       setResult(res);
       addLog('info', `清理完成：成功 ${res.successCount}, 跳过 ${res.skipCount}, 失败 ${res.failCount}`);
     } catch (e) {
-      addLog('error', `清理失败：${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg);
+      addLog('error', `清理失败：${msg}`);
     }
   }
 
@@ -74,13 +80,41 @@ export function CleanupPage({ settings, update, rpcCall, addLog, busy }: Props) 
           />
         </div>
 
-        <button
-          onClick={handleCleanup}
-          disabled={busy || !settings.stateDir}
-          style={{ background: 'var(--error)' }}
-        >
-          {busy ? '清理中...' : '开始取消收藏'}
-        </button>
+        {!confirming ? (
+          <button
+            onClick={() => setConfirming(true)}
+            disabled={busy || !settings.stateDir}
+          >
+            开始取消收藏
+          </button>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <div style={{ fontSize: '14px', fontWeight: 600 }}>
+              确认要取消收藏吗？此操作不可撤销。
+            </div>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button onClick={handleCleanup} disabled={busy} className="btn-danger">
+                {busy ? '清理中...' : '确认取消收藏'}
+              </button>
+              <button onClick={() => setConfirming(false)} disabled={busy}>
+                取消
+              </button>
+            </div>
+          </div>
+        )}
+
+        {error && (
+          <div style={{
+            padding: '10px 12px',
+            background: 'rgba(231, 76, 60, 0.15)',
+            borderRadius: '6px',
+            border: '1px solid rgba(231, 76, 60, 0.3)',
+            color: 'var(--error)',
+            fontSize: '13px',
+          }}>
+            ❌ {error}
+          </div>
+        )}
 
         {result && (
           <div style={{ display: 'flex', gap: '20px', padding: '12px', background: 'var(--bg-hover)', borderRadius: '6px' }}>

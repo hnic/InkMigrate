@@ -10,13 +10,23 @@ interface Props {
   busy: boolean;
 }
 
+interface MigrateResult {
+  status: string;
+  scanCount: number;
+  reconciliationOk: boolean;
+  reconciliationReason?: string;
+  jobId: string;
+}
+
 export function MigratePage({ settings, update, rpcCall, addLog, busy }: Props) {
   const [maxItems, setMaxItems] = useState('');
   const [interval, setIntervalMs] = useState('1500');
-  const [result, setResult] = useState<{ status: string; scanCount: number; jobId: string } | null>(null);
+  const [result, setResult] = useState<MigrateResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   async function handleMigrate() {
     setResult(null);
+    setError(null);
     try {
       const params: Record<string, unknown> = {
         source: settings.source,
@@ -28,18 +38,21 @@ export function MigratePage({ settings, update, rpcCall, addLog, busy }: Props) 
       if (maxItems) params.maxItems = parseInt(maxItems, 10);
       if (interval) params.intervalMs = parseInt(interval, 10);
 
-      const res = await rpcCall('migrate.start', params) as {
-        status: string; scanCount: number; reconciliationOk: boolean; jobId: string;
-      };
+      const res = await rpcCall('migrate.start', params) as MigrateResult;
       setResult(res);
-      addLog(
-        res.reconciliationOk ? 'info' : 'warn',
-        `迁移完成：status=${res.status}, count=${res.scanCount}, reconcile=${res.reconciliationOk}`,
-      );
+      addLog(res.reconciliationOk ? 'info' : 'warn', `迁移完成：${res.scanCount} 条`);
     } catch (e) {
-      addLog('error', `迁移失败：${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg);
+      addLog('error', `迁移失败：${msg}`);
     }
   }
+
+  const statusLabels: Record<string, string> = {
+    completed: '完成',
+    failed: '失败',
+    interrupted: '已中断',
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
@@ -48,7 +61,7 @@ export function MigratePage({ settings, update, rpcCall, addLog, busy }: Props) 
       <ConfigPrompt
         settings={settings}
         update={update}
-        required={['stateDir', 'vaultPath', 'favoritesUrl']}
+        required={['stateDir', 'vaultPath']}
         message="⚠️ 请先填写以下配置才能迁移"
       />
 
@@ -85,13 +98,26 @@ export function MigratePage({ settings, update, rpcCall, addLog, busy }: Props) 
           {busy ? '迁移中...' : '开始迁移'}
         </button>
 
+        {error && (
+          <div style={{
+            padding: '10px 12px',
+            background: 'rgba(231, 76, 60, 0.15)',
+            borderRadius: '6px',
+            border: '1px solid rgba(231, 76, 60, 0.3)',
+            color: 'var(--error)',
+            fontSize: '13px',
+          }}>
+            ❌ {error}
+          </div>
+        )}
+
         {result && (
           <div style={{ padding: '12px', background: 'var(--bg-hover)', borderRadius: '6px' }}>
-            <div style={{ display: 'flex', gap: '20px' }}>
+            <div style={{ display: 'flex', gap: '24px', flexWrap: 'wrap' }}>
               <div>
                 <div style={{ fontSize: '12px', color: 'var(--text-dim)' }}>状态</div>
                 <div style={{ fontWeight: 600, color: result.status === 'completed' ? 'var(--success)' : 'var(--warning)' }}>
-                  {result.status}
+                  {statusLabels[result.status] ?? result.status}
                 </div>
               </div>
               <div>
@@ -99,10 +125,21 @@ export function MigratePage({ settings, update, rpcCall, addLog, busy }: Props) 
                 <div style={{ fontWeight: 600 }}>{result.scanCount}</div>
               </div>
               <div>
+                <div style={{ fontSize: '12px', color: 'var(--text-dim)' }}>对账</div>
+                <div style={{ fontWeight: 600, color: result.reconciliationOk ? 'var(--success)' : 'var(--error)' }}>
+                  {result.reconciliationOk ? '✅ 通过' : '❌ 失败'}
+                </div>
+              </div>
+              <div>
                 <div style={{ fontSize: '12px', color: 'var(--text-dim)' }}>Job ID</div>
                 <div style={{ fontFamily: 'monospace', fontSize: '12px' }}>{result.jobId}</div>
               </div>
             </div>
+            {!result.reconciliationOk && result.reconciliationReason && (
+              <div style={{ marginTop: '8px', fontSize: '12px', color: 'var(--warning)' }}>
+                {result.reconciliationReason}
+              </div>
+            )}
           </div>
         )}
       </div>

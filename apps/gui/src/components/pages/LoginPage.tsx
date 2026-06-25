@@ -136,7 +136,7 @@ export function LoginPage({ settings, update, rpcCall, addLog }: Props) {
           <button onClick={handleLogin} disabled={loading || !settings.stateDir}>
             {loading ? '处理中...' : loginState === 'success' ? '重新登录' : '打开浏览器登录'}
           </button>
-          <button onClick={handleClear} disabled={loading || !profilePath} style={{ background: 'var(--error)' }}>
+          <button onClick={handleClear} disabled={loading || !profilePath} className="btn-danger">
             清除登录
           </button>
         </div>
