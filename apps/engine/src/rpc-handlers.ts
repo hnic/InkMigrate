@@ -32,6 +32,19 @@ function expandHome(p: string): string {
   return p;
 }
 
+/** 确保实例记录存在（FK 约束要求）。只插入对应角色的表。 */
+function ensureInstance(db: DB, id: string, adapterKind: string, role: 'source' | 'target'): void {
+  const table = role === 'source' ? 'source_instances' : 'target_instances';
+  const existing = db.prepare(`SELECT id FROM ${table} WHERE id = ?`).get(id);
+  if (!existing) {
+    const nowTs = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO ${table}(id,adapter_kind,adapter_version,adapter_api_version,config_hash,created_at,updated_at)
+       VALUES(?,?,?,?,?,?,?)`,
+    ).run(id, adapterKind, '1.0.0', '1.0.0', 'h', nowTs, nowTs);
+  }
+}
+
 /** 对 params 对象中的路径字段做 ~ 展开。 */
 function expandPaths<T>(
   params: T,
@@ -232,6 +245,10 @@ async function runMigrateJob(
       sourceInstanceId = startParams.source;
       targetInstanceId = startParams.target;
     }
+
+    // 确保实例存在（FK 约束要求）
+    ensureInstance(db, sourceInstanceId, 'toutiao', 'source');
+    ensureInstance(db, targetInstanceId, 'obsidian', 'target');
 
     // 创建新 Job
     const jobId = `mig-${Date.now()}`;
