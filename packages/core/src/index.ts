@@ -71,7 +71,7 @@ export {
 export { installSignalHandlers } from './runtime/signals.js';
 export type { GracefulShutdownHandlers } from './runtime/signals.js';
 export { runMigrationJob } from './runtime/job-runner.js';
-export type { JobRunnerInput, JobRunnerResult } from './runtime/job-runner.js';
+export type { JobRunnerInput, JobRunnerResult, JobProgress } from './runtime/job-runner.js';
 export { withRetry, DEFAULT_RETRY_POLICY } from './runtime/retry.js';
 export type { RetryPolicy } from './runtime/retry.js';
 export {

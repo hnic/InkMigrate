@@ -35,6 +35,31 @@ export interface JobRunnerInput {
   targetContext: TargetContext;
   workspaceDir: string;
   reportsDir: string;
+  /**
+   * 进度回调（可选）。在扫描完成、每条提取完成时触发。
+   * 用于 GUI/CLI 实时显示进度。
+   */
+  onProgress?: (progress: JobProgress) => void;
+}
+
+/** 迁移进度信息，由 job-runner 在关键节点推送给调用方。 */
+export interface JobProgress {
+  phase: 'scanning' | 'migrating';
+  jobId: string;
+  /** 当前已处理条目数。 */
+  current: number;
+  /** 总条目数（scanning 阶段可能为 0）。 */
+  total: number;
+  /** 当前处理的条目标题（可选）。 */
+  currentItem?: string;
+  /** 累积状态计数。 */
+  counts?: {
+    verified?: number;
+    degraded?: number;
+    failed?: number;
+    conflict?: number;
+    skipped?: number;
+  };
 }
 
 export interface JobRunnerResult {
@@ -125,6 +150,15 @@ export async function runMigrationJob(
     })) {
       refs.push(ref);
       persistSourceItemRef(sourceItemsRepo, i.sourceInstanceId, ref);
+      // 扫描阶段实时推送进度
+      if (i.onProgress !== undefined) {
+        i.onProgress({
+          phase: 'scanning',
+          jobId: i.jobId,
+          current: refs.length,
+          total: 0,
+        });
+      }
     }
     jobs.updateCounts(i.jobId, { scanCount: refs.length });
 
@@ -166,6 +200,29 @@ export async function runMigrationJob(
         retryPolicy: DEFAULT_RETRY_POLICY,
       });
       itemStates.push(state);
+
+      // 迁移阶段实时推送进度 + 累积计数
+      if (i.onProgress !== undefined) {
+        const counts = { verified: 0, degraded: 0, failed: 0, conflict: 0, skipped: 0 };
+        for (const s of itemStates) {
+          if (s === 'verified') counts.verified!++;
+          else if (s === 'degraded') counts.degraded!++;
+          else if (s === 'permanent_failed' || s === 'unsupported' || s === 'blocked') counts.failed!++;
+          else if (s === 'conflict') counts.conflict!++;
+          else if (s === 'skipped') counts.skipped!++;
+        }
+        i.onProgress({
+          phase: 'migrating',
+          jobId: i.jobId,
+          current: idx + 1,
+          total: refs.length,
+          ...(() => {
+            const ref = refs[idx];
+            return ref?.title !== undefined ? { currentItem: ref.title.substring(0, 60) } : {};
+          })(),
+          counts,
+        });
+      }
 
       // §18.1 最后一条不需要等待
       if (idx < refs.length - 1 && intervalMs > 0) {

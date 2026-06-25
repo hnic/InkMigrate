@@ -230,12 +230,7 @@ async function runMigrateJob(
       } as Record<string, unknown>,
     };
 
-    sendNotification('progress', {
-      jobId,
-      phase: 'migrating',
-      current: 0,
-      total: 0,
-    });
+    // 进度通过 onProgress 回调实时推送（见下方 runMigrationJob 调用）
 
     const result = await runMigrationJob({
       db,
@@ -247,6 +242,17 @@ async function runMigrateJob(
       targetContext,
       workspaceDir: params.stateDir,
       reportsDir: join(params.stateDir, 'reports'),
+      onProgress: (progress) => {
+        // 把 job-runner 进度转发为 JSON-RPC notification
+        sendNotification('progress', {
+          jobId: progress.jobId,
+          phase: progress.phase,
+          current: progress.current,
+          total: progress.total,
+          ...(progress.currentItem !== undefined ? { currentItem: progress.currentItem } : {}),
+          ...(progress.counts !== undefined ? { counts: progress.counts } : {}),
+        });
+      },
     });
 
     return {
