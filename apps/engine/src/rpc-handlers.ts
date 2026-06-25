@@ -23,6 +23,29 @@ import {
 import { createObsidianTarget } from '@inkmigrate/target-obsidian';
 import { rmSync, existsSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { homedir } from 'node:os';
+
+/** 展开路径中的 ~ 为用户主目录。 */
+function expandHome(p: string): string {
+  if (p.startsWith('~/')) return join(homedir(), p.slice(2));
+  if (p === '~') return homedir();
+  return p;
+}
+
+/** 对 params 对象中的路径字段做 ~ 展开。 */
+function expandPaths<T>(
+  params: T,
+  fields: readonly string[],
+): T {
+  const result = { ...params } as Record<string, unknown>;
+  for (const f of fields) {
+    const v = result[f];
+    if (typeof v === 'string') {
+      result[f] = expandHome(v);
+    }
+  }
+  return result as T;
+}
 import {
   registerMethod,
   sendNotification,
@@ -46,14 +69,14 @@ import type {
 
 /** 注册所有 RPC 方法。 */
 export function registerAllHandlers(): void {
-  registerMethod('auth.login', (p) => handleAuthLogin(p as unknown as AuthLoginParams));
-  registerMethod('auth.status', (p) => handleAuthStatus(p as unknown as AuthStatusParams));
-  registerMethod('auth.clear', (p) => handleAuthClear(p as unknown as AuthStatusParams));
-  registerMethod('scan.start', (p) => handleScanStart(p as unknown as ScanStartParams));
-  registerMethod('migrate.start', (p) => handleMigrateStart(p as unknown as MigrateStartParams));
-  registerMethod('migrate.resume', (p) => handleMigrateResume(p as unknown as MigrateResumeParams));
-  registerMethod('cleanup.unfavorite', (p) => handleCleanupUnfavorite(p as unknown as CleanupUnfavoriteParams));
-  registerMethod('status.query', (p) => handleStatusQuery(p as unknown as StatusQueryParams));
+  registerMethod('auth.login', (p) => handleAuthLogin(expandPaths(p as unknown as AuthLoginParams, ['stateDir'])));
+  registerMethod('auth.status', (p) => handleAuthStatus(expandPaths(p as unknown as AuthStatusParams, ['stateDir'])));
+  registerMethod('auth.clear', (p) => handleAuthClear(expandPaths(p as unknown as AuthStatusParams, ['stateDir'])));
+  registerMethod('scan.start', (p) => handleScanStart(expandPaths(p as unknown as ScanStartParams, ['stateDir'])));
+  registerMethod('migrate.start', (p) => handleMigrateStart(expandPaths(p as unknown as MigrateStartParams, ['stateDir', 'vaultPath'])));
+  registerMethod('migrate.resume', (p) => handleMigrateResume(expandPaths(p as unknown as MigrateResumeParams, ['stateDir', 'vaultPath'])));
+  registerMethod('cleanup.unfavorite', (p) => handleCleanupUnfavorite(expandPaths(p as unknown as CleanupUnfavoriteParams, ['stateDir'])));
+  registerMethod('status.query', (p) => handleStatusQuery(expandPaths(p as unknown as StatusQueryParams, ['stateDir'])));
 }
 
 // ─── auth ───
