@@ -70,8 +70,8 @@ export interface AttemptRow {
 export class MigrationAttempts {
   constructor(private db: DB) {}
 
-  createItem(i: ItemAttemptInput): void {
-    this.db
+  createItem(i: ItemAttemptInput): number {
+    const result = this.db
       .prepare(
         `INSERT INTO migration_attempts(migration_job_id,attempt_scope,source_item_id,target_artifact_id,stage,action_code,attempt_no,candidate_quality,candidate_source_content_hash,started_at,created_at)
          VALUES(@migrationJobId,'item',@sourceItemId,@targetArtifactId,@stage,@actionCode,@attemptNo,@candidateQuality,@candidateSourceContentHash,@startedAt,@createdAt)`,
@@ -82,6 +82,7 @@ export class MigrationAttempts {
         candidateSourceContentHash: null,
         ...i,
       });
+    return Number(result.lastInsertRowid);
   }
 
   createJob(i: JobAttemptInput): void {

@@ -19,6 +19,7 @@ import { atomicWrite, readTargetIfExists } from './atomic-write.js';
 import { decideOverwrite } from './overwrite-policy.js';
 import type { ObsidianWriteResult } from './result.js';
 import { existsSync, readFileSync } from 'node:fs';
+import { stat } from 'node:fs/promises';
 
 export const OBSIDIAN_TARGET_KIND = 'obsidian' as const;
 export const OBSIDIAN_TARGET_VERSION = '1.0.0' as const;
@@ -91,13 +92,21 @@ async function planNote(
     stableShortId,
   });
 
-  // 文件名冲突解决：如果文件已存在且不是同一条目（fingerprint 不同），
-  // 追加 -2、-3 后缀直到不冲突。标题唯一时不加后缀。
-  if (existsSync(noteAbsolutePath(config.vaultPath, relativePath))) {
+  // 文件名冲突解决：使用异步 stat 检查文件是否存在（不阻塞事件循环）
+  async function fileExists(p: string): Promise<boolean> {
+    try {
+      await stat(p);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  if (await fileExists(noteAbsolutePath(config.vaultPath, relativePath))) {
     const baseName = relativePath.replace(/\.md$/, '');
     let suffix = 2;
     let candidate = relativePath;
-    while (existsSync(noteAbsolutePath(config.vaultPath, candidate))) {
+    while (await fileExists(noteAbsolutePath(config.vaultPath, candidate))) {
       candidate = `${baseName}-${suffix}.md`;
       suffix++;
     }

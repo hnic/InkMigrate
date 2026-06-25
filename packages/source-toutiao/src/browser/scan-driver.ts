@@ -57,58 +57,60 @@ export async function driveScanFavorites(
 
   /**
    * 增量提取：每轮只返回 DOM 中【新出现】的收藏条目 HTML。
-   * 通过 window.__inkmigrate_seen Set 记录已提取过的条目 key（href），
-   * 避免每轮返回全部累积条目（O(N×R) → O(N)）。
+   * Node 端维护 seen Set，每次 evaluate 传入已知的 key 列表，
+   * 浏览器端只返回未在 knownKeys 中的条目。
+   * 避免 window 全局变量在页面刷新时丢失的风险。
    */
+  const nodeSeen = new Set<string>();
   const extractItemsHtml = async (): Promise<string> => {
-    return opts.page.evaluate((selectorsJson: string) => {
-      const selectors = JSON.parse(selectorsJson) as string[];
+    const knownKeys = Array.from(nodeSeen);
+    const result = await opts.page.evaluate(
+      (params: { selectorsJson: string; knownJson: string }) => {
+        const selectors = JSON.parse(params.selectorsJson) as string[];
+        const known = new Set(JSON.parse(params.knownJson) as string[]);
 
-      // 页面级 Set，跨多轮 evaluate 保持状态
-      const w = window as unknown as { __inkmigrate_seen?: Set<string> };
-      if (w.__inkmigrate_seen === undefined) {
-        w.__inkmigrate_seen = new Set<string>();
-      }
-      const seen = w.__inkmigrate_seen;
-
-      // 找到第一个匹配的条目选择器
-      let allEls: Element[] = [];
-      for (const sel of selectors) {
-        const found = document.querySelectorAll(sel);
-        if (found.length > 0) {
-          allEls = Array.from(found);
-          break;
-        }
-      }
-
-      // 只收集本轮新出现的条目
-      const newEls: Element[] = [];
-      for (const el of allEls) {
-        // 提取条目的唯一 key（内容链接的 href）
-        const link = el.querySelector(
-          'a[href*="/article/"], a[href*="/video/"], a[href*="/wenda/"], a[href*="/group/"]',
-        );
-        const href = link?.getAttribute('href');
-        if (href !== null && href !== undefined) {
-          if (!seen.has(href)) {
-            seen.add(href);
-            newEls.push(el);
-          }
-        } else {
-          // 没有 href 的条目（fallback），用文本内容 hash 作为 key
-          const textKey = el.textContent?.trim().substring(0, 100) ?? '';
-          if (textKey && !seen.has(textKey)) {
-            seen.add(textKey);
-            newEls.push(el);
+        // 找到第一个匹配的条目选择器
+        let allEls: Element[] = [];
+        for (const sel of selectors) {
+          const found = document.querySelectorAll(sel);
+          if (found.length > 0) {
+            allEls = Array.from(found);
+            break;
           }
         }
-      }
 
-      // 包裹在一个 div 里
-      const wrapper = document.createElement('div');
-      for (const el of newEls) wrapper.appendChild(el.cloneNode(true));
-      return wrapper.innerHTML;
-    }, JSON.stringify(FAVORITES_SELECTORS.item));
+        // 收集本轮新出现的条目 + 它们的 key
+        const newEls: Element[] = [];
+        const newKeys: string[] = [];
+        for (const el of allEls) {
+          const link = el.querySelector(
+            'a[href*="/article/"], a[href*="/video/"], a[href*="/wenda/"], a[href*="/group/"]',
+          );
+          const href = link?.getAttribute('href');
+          let key: string | undefined;
+          if (href !== null && href !== undefined) {
+            key = href;
+          } else {
+            const textKey = el.textContent?.trim().substring(0, 100) ?? '';
+            if (textKey) key = textKey;
+          }
+          if (key !== undefined && !known.has(key)) {
+            newEls.push(el);
+            newKeys.push(key);
+          }
+        }
+
+        const wrapper = document.createElement('div');
+        for (const el of newEls) wrapper.appendChild(el.cloneNode(true));
+        return { html: wrapper.innerHTML, newKeys };
+      },
+      { selectorsJson: JSON.stringify(FAVORITES_SELECTORS.item), knownJson: JSON.stringify(knownKeys) },
+    );
+    // 在 Node 端更新 seen（页面刷新不会丢失）
+    for (const k of result.newKeys) {
+      nodeSeen.add(k);
+    }
+    return result.html;
   };
 
   const initialHtml = await extractItemsHtml();

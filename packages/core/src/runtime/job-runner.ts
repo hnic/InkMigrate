@@ -187,6 +187,7 @@ export async function runMigrationJob(
       });
       const state = await processOneItem({
         ref,
+        db: i.db,
         sourceAdapter: i.sourceAdapter,
         targetAdapter: i.targetAdapter,
         targetContext: targetContextWithJobId,
@@ -357,6 +358,7 @@ function persistSourceItemRef(
 
 interface ProcessOneItemInput {
   ref: SourceItemRef;
+  db: DB;
   sourceAdapter: SourceAdapter;
   targetAdapter: TargetAdapter;
   targetContext: TargetContext;
@@ -457,64 +459,61 @@ async function processOneItem(
       return 'conflict';
     }
 
-    // §16.7 记录成功的 migration_attempt
-    if (existingItem?.id !== undefined) {
-      const att = i.attempts.createItem({
-        migrationJobId: i.jobId,
-        sourceItemId: existingItem.id,
-        stage: 'verifying_target',
-        actionCode: isUpgrade ? 'quality_upgrade' : 'stage_attempt',
-        attemptNo: 1,
-        startedAt: now(),
-        createdAt: now(),
-      });
-      // finishAttempt 需要知道 attempt id；MigrationAttempts.createItem 不返回 id。
-      // 我们查询 listByItem 获取最后一条。这是 stage 4 的简化方案。
-      const atts = i.attempts.listByItem(i.jobId, existingItem.id);
-      const lastAtt = atts[atts.length - 1] as
-        | { id: number }
-        | undefined;
-      if (lastAtt !== undefined) {
-        i.attempts.finishAttempt(lastAtt.id, {
+    // §16.7 + §16.6 + §11.5 三步写入封装在事务中，确保幂等原子性
+    const finalState: ItemFinalState =
+      item.quality === 'full' ? 'verified' : 'degraded';
+
+    const commitTxn = i.db.transaction(() => {
+      // 1. 记录成功的 migration_attempt（createItem 返回 id）
+      if (existingItem?.id !== undefined) {
+        const attemptId = i.attempts.createItem({
+          migrationJobId: i.jobId,
+          sourceItemId: existingItem.id,
+          stage: 'verifying_target',
+          actionCode: isUpgrade ? 'quality_upgrade' : 'stage_attempt',
+          attemptNo: 1,
+          startedAt: now(),
+          createdAt: now(),
+        });
+        i.attempts.finishAttempt(attemptId, {
           success: true,
           finishedAt: now(),
         });
       }
-    }
 
-    // §16.6 target_artifacts lifecycle: 记录 verified artifact
-    const artifactInput: Parameters<TargetArtifacts['create']>[0] = {
-      migrationJobId: i.jobId,
-      artifactKind: plan.artifactKind,
-      targetInstanceId: i.targetInstanceId,
-      relativePath: writeResult.relativePath,
-      status: 'verified',
-      verifiedAt: now(),
-      createdAt: now(),
-      updatedAt: now(),
-    };
-    if (existingItem?.id !== undefined) {
-      artifactInput.sourceItemId = existingItem.id;
-    }
-    if ('targetContentHash' in writeResult) {
-      artifactInput.targetContentHash = (
-        writeResult as { targetContentHash: string }
-      ).targetContentHash;
-    }
-    artifactInput.writtenFileHash = writeResult.writtenFileHash;
-    i.targetArtifacts.create(artifactInput);
-
-    // §11.5 提交已验证质量到 source_items
-    const finalState: ItemFinalState =
-      item.quality === 'full' ? 'verified' : 'degraded';
-    if (existingItem !== undefined) {
-      i.sourceItemsRepo.updateCommittedResult(existingItem.id, {
-        status: finalState,
-        quality: item.quality,
-        degradationsJson: JSON.stringify(item.degradations),
+      // 2. 创建 target_artifacts
+      const artifactInput: Parameters<TargetArtifacts['create']>[0] = {
+        migrationJobId: i.jobId,
+        artifactKind: plan.artifactKind,
+        targetInstanceId: i.targetInstanceId,
+        relativePath: writeResult.relativePath,
+        status: 'verified',
+        verifiedAt: now(),
+        createdAt: now(),
         updatedAt: now(),
-      });
-    }
+      };
+      if (existingItem?.id !== undefined) {
+        artifactInput.sourceItemId = existingItem.id;
+      }
+      if ('targetContentHash' in writeResult) {
+        artifactInput.targetContentHash = (
+          writeResult as { targetContentHash: string }
+        ).targetContentHash;
+      }
+      artifactInput.writtenFileHash = writeResult.writtenFileHash;
+      i.targetArtifacts.create(artifactInput);
+
+      // 3. 更新 source_items 状态为 verified/degraded
+      if (existingItem !== undefined) {
+        i.sourceItemsRepo.updateCommittedResult(existingItem.id, {
+          status: finalState,
+          quality: item.quality,
+          degradationsJson: JSON.stringify(item.degradations),
+          updatedAt: now(),
+        });
+      }
+    });
+    commitTxn();
 
     return finalState;
   } catch (e) {
@@ -526,10 +525,36 @@ async function processOneItem(
       message?: string;
     };
 
-    // 诊断日志（不写入 DB，避免与正常路径的 migration_attempts 冲突）
+    const errMsg = err.message?.substring(0, 200) ?? 'unknown error';
+    const errCode = err.code ?? 'UNKNOWN';
+
+    // 诊断日志
     console.warn(
-      `[job ${i.jobId}] 条目处理失败: ${err.code ?? 'UNKNOWN'} - ${err.message?.substring(0, 200) ?? 'unknown error'}`,
+      `[job ${i.jobId}] 条目处理失败: ${errCode} - ${errMsg}`,
     );
+
+    // 持久化失败的 migration_attempt（完成生命周期闭环）
+    if (existingItem?.id !== undefined) {
+      try {
+        const attemptId = i.attempts.createItem({
+          migrationJobId: i.jobId,
+          sourceItemId: existingItem.id,
+          stage: 'extracting',
+          actionCode: 'stage_attempt',
+          attemptNo: 1,
+          startedAt: now(),
+          createdAt: now(),
+        });
+        i.attempts.finishAttempt(attemptId, {
+          success: false,
+          finishedAt: now(),
+          errorCode: errCode,
+          errorMessage: errMsg,
+        });
+      } catch {
+        // 持久化失败不应影响错误分类
+      }
+    }
 
     // 显式 itemDisposition 优先
     const disposition = err.itemDisposition;
