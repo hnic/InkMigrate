@@ -5,7 +5,7 @@ import type {
   TargetContext,
 } from '../adapters/adapter.js';
 import type { SourceItem, SourceItemRef } from '../domain/models.js';
-import type { ItemFinalState } from '../domain/states.js';
+import type { ItemFinalState, FinalStateCounts } from '../domain/states.js';
 import { MigrationJobs } from '../storage/repositories/migration-jobs.js';
 import { SourceItems } from '../storage/repositories/source-items.js';
 import { TargetArtifacts } from '../storage/repositories/target-artifacts.js';
@@ -175,6 +175,16 @@ export async function runMigrationJob(
     const configRecord = i.targetContext.config as Record<string, unknown>;
     const intervalMs = (configRecord['intervalMs'] as number | undefined) ?? 1500;
     const itemStates: ItemFinalState[] = [];
+    // 增量状态计数器（避免每条目全量重扫 itemStates）
+    const progressCounts: FinalStateCounts = {
+      verified: 0,
+      degraded: 0,
+      permanent_failed: 0,
+      unsupported: 0,
+      blocked: 0,
+      conflict: 0,
+      skipped: 0,
+    };
     for (let idx = 0; idx < refs.length; idx++) {
       const ref = refs[idx]!;
       // §18.3 检查中断标志——完成当前条目后停止
@@ -202,16 +212,12 @@ export async function runMigrationJob(
       });
       itemStates.push(state);
 
-      // 迁移阶段实时推送进度 + 累积计数
+      // 迁移阶段实时推送进度 + 增量计数器（O(1) 而非每条全量重扫）
       if (i.onProgress !== undefined) {
-        const counts = { verified: 0, degraded: 0, failed: 0, conflict: 0, skipped: 0 };
-        for (const s of itemStates) {
-          if (s === 'verified') counts.verified!++;
-          else if (s === 'degraded') counts.degraded!++;
-          else if (s === 'permanent_failed' || s === 'unsupported' || s === 'blocked') counts.failed!++;
-          else if (s === 'conflict') counts.conflict!++;
-          else if (s === 'skipped') counts.skipped!++;
+        if (state in progressCounts) {
+          progressCounts[state as keyof FinalStateCounts]++;
         }
+
         i.onProgress({
           phase: 'migrating',
           jobId: i.jobId,
@@ -221,7 +227,7 @@ export async function runMigrationJob(
             const ref = refs[idx];
             return ref?.title !== undefined ? { currentItem: ref.title.substring(0, 60) } : {};
           })(),
-          counts,
+          counts: { ...progressCounts },
         });
       }
 

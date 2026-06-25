@@ -144,7 +144,7 @@ export async function driveScanFavorites(
       }
     }
 
-    const html = extractItemsHtml();
+    const html = await extractItemsHtml();
 
     // 进度通知：本轮滚动完成
     if (opts.onProgress !== undefined) {

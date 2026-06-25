@@ -332,7 +332,7 @@ async function handleCleanupUnfavorite(
     const limit = params.maxItems;
     const rows = db
       .prepare(
-        `SELECT canonical_url, title, external_id, content_kind
+        `SELECT canonical_url, title, external_id, content_kind, fingerprint, discovered_at
          FROM source_items
          WHERE source_instance_id = ? AND status = 'verified'
          ORDER BY source_position ASC
@@ -343,6 +343,8 @@ async function handleCleanupUnfavorite(
         title: string;
         external_id: string | null;
         content_kind: string;
+        fingerprint: string;
+        discovered_at: string;
       }>;
 
     if (rows.length === 0) {
@@ -379,9 +381,9 @@ async function handleCleanupUnfavorite(
         canonicalUrl: row.canonical_url,
         originalUrl: row.canonical_url,
         title: row.title,
-        contentKind: row.content_kind as 'article',
-        discoveredAt: new Date().toISOString(),
-        fingerprint: '',
+        contentKind: row.content_kind as 'article' | 'short-post' | 'gallery' | 'question-answer' | 'video' | 'note' | 'external-link' | 'unknown',
+        discoveredAt: row.discovered_at || new Date().toISOString(),
+        fingerprint: row.fingerprint || '',
         sourceMetadata: {},
         ...(row.external_id ? { externalId: row.external_id } : {}),
       };
