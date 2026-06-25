@@ -61,7 +61,7 @@ export function noteRelativePath(i: NotePathInput): string {
   const body = sanitizeFilename(i.title, {
     maxLength: i.config.maxFilenameLength,
   });
-  const filename = `${body}-${i.stableShortId}.md`;
+  const filename = `${body}.md`;
   // importSubdir 为空时，笔记直接放 Vault 根目录（不加来源/类型子目录）
   if (!i.config.importSubdir) {
     return filename;

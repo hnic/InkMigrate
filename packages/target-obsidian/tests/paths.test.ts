@@ -48,7 +48,7 @@ describe('noteRelativePath (§13.3/§13.4)', () => {
       stableShortId: '0f7d1a2b3c',
     });
     expect(p).toBe(
-      'Imports/InkMigrate/toutiao-main/文章/人工智能如何改变软件开发-0f7d1a2b3c.md',
+      'Imports/InkMigrate/toutiao-main/文章/人工智能如何改变软件开发.md',
     );
   });
   it('routes short-post to 微头条/', () => {

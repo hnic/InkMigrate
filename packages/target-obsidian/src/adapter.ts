@@ -83,13 +83,28 @@ async function planNote(
     item.ref.fingerprint,
   );
   const stableShortId = deriveStableShortId(stableKey);
-  const relativePath = noteRelativePath({
+  let relativePath = noteRelativePath({
     config,
     sourceInstanceId: item.ref.sourceInstanceId,
     contentKind: item.ref.contentKind,
     title: item.title,
     stableShortId,
   });
+
+  // 文件名冲突解决：如果文件已存在且不是同一条目（fingerprint 不同），
+  // 追加 -2、-3 后缀直到不冲突。标题唯一时不加后缀。
+  if (existsSync(noteAbsolutePath(config.vaultPath, relativePath))) {
+    const baseName = relativePath.replace(/\.md$/, '');
+    let suffix = 2;
+    let candidate = relativePath;
+    while (existsSync(noteAbsolutePath(config.vaultPath, candidate))) {
+      candidate = `${baseName}-${suffix}.md`;
+      suffix++;
+    }
+    if (candidate !== relativePath) {
+      relativePath = candidate;
+    }
+  }
 
   const srcHash = sourceContentHash(
     JSON.stringify(canonicalContentForHash(item)),

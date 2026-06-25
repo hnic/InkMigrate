@@ -71,7 +71,9 @@ describe('createObsidianTarget (§8.4 + §13)', () => {
       );
       const plan = await adapter.plan(item, ctx(vault.vaultPath));
       expect(plan.relativePath).toContain('Imports/InkMigrate/toutiao-main/文章/');
-      expect(plan.relativePath).toContain(deriveStableShortId(stableKey));
+      expect(plan.relativePath).toBe(
+        'Imports/InkMigrate/toutiao-main/文章/人工智能如何改变软件开发.md',
+      );
       expect(plan.artifactKind).toBe('note');
 
       const result = await adapter.write(plan, ctx(vault.vaultPath));
