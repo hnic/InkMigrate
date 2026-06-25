@@ -52,11 +52,13 @@ export async function driveExtractDetail(
     const wrapped = new Error(`navigation failed for ${url}: ${msg}`) as Error & {
       retryable: false;
       code: string;
+      itemDisposition: string;
     };
     wrapped.retryable = false;
     wrapped.code = msg.includes('Timeout') || msg.includes('timeout')
       ? 'NAVIGATION_TIMEOUT'
       : 'NAVIGATION_FAILED';
+    wrapped.itemDisposition = 'permanent_failed';
     throw wrapped;
   }
 

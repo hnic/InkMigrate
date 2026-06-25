@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command, ChildStdin, ChildStdout};
@@ -40,6 +41,7 @@ pub struct SidecarManager {
     stdin: Option<ChildStdin>,
     next_id: u64,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<RpcResponse>>>>,
+    is_shutting_down: Arc<AtomicBool>,
 }
 
 impl SidecarManager {
@@ -49,6 +51,7 @@ impl SidecarManager {
             stdin: None,
             next_id: 1,
             pending: Arc::new(Mutex::new(HashMap::new())),
+            is_shutting_down: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -92,8 +95,9 @@ impl SidecarManager {
         // 启动 stdout 读取任务
         let pending = self.pending.clone();
         let app_clone = app.clone();
+        let shutdown_flag = self.is_shutting_down.clone();
         tokio::spawn(async move {
-            read_stdout(stdout, pending, app_clone).await;
+            read_stdout(stdout, pending, app_clone, shutdown_flag).await;
         });
 
         self.child = Some(child);
@@ -153,6 +157,7 @@ impl SidecarManager {
 
     /// 关闭 sidecar 进程。
     pub async fn shutdown(&mut self) {
+        self.is_shutting_down.store(true, Ordering::Relaxed);
         if let Some(mut child) = self.child.take() {
             let _ = child.kill().await;
         }
@@ -165,6 +170,7 @@ async fn read_stdout(
     stdout: ChildStdout,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<RpcResponse>>>>,
     app: AppHandle,
+    is_shutting_down: Arc<AtomicBool>,
 ) {
     let reader = BufReader::new(stdout);
     let mut lines = reader.lines();
@@ -204,8 +210,10 @@ async fn read_stdout(
 
     eprintln!("sidecar stdout 已关闭");
 
-    // sidecar 进程已退出（崩溃或正常关闭），通知前端
-    let _ = app.emit("sidecar://crashed", serde_json::json!({
-        "message": "sidecar 进程已退出，请重启应用"
-    }));
+    // 只有非正常关闭时才通知前端（shutdown 时不报崩溃）
+    if !is_shutting_down.load(Ordering::Relaxed) {
+        let _ = app.emit("sidecar://crashed", serde_json::json!({
+            "message": "sidecar 进程已退出，请重启应用"
+        }));
+    }
 }

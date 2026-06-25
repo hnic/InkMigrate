@@ -111,8 +111,8 @@ export class MigrationJobs {
         `UPDATE migration_jobs
          SET status=@status,
              current_stage=COALESCE(@currentStage, current_stage),
-             pause_reason_code=@pauseReasonCode,
-             paused_at=@pausedAt,
+             pause_reason_code=COALESCE(@pauseReasonCode, pause_reason_code),
+             paused_at=COALESCE(@pausedAt, paused_at),
              started_at=COALESCE(@startedAt, started_at),
              finished_at=COALESCE(@finishedAt, finished_at),
              updated_at=@updatedAt

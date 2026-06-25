@@ -222,6 +222,9 @@ async function runMigrateJob(
     if (isResume) {
       const resumeParams = params as MigrateResumeParams;
       const oldJob = new MigrationJobs(db).get(resumeParams.job);
+      if (!oldJob) {
+        throw new Error(`Job 不存在：${resumeParams.job}`);
+      }
       sourceInstanceId = oldJob.sourceInstanceId;
       targetInstanceId = oldJob.targetInstanceId;
     } else {
@@ -263,9 +266,14 @@ async function runMigrateJob(
     const sourceAdapter = createToutiaoSource(adapterConfig);
 
     // 构造 target
+    // intervalMs 放在 config（job-runner 从 config 读取），不能放 targetConfig（ObsidianTargetConfigSchema strict 会拒绝）
     const targetAdapter = createObsidianTarget();
     const targetContext: TargetContext = {
-      config: {},
+      config: {
+        ...(startParams.intervalMs !== undefined
+          ? { intervalMs: startParams.intervalMs }
+          : {}),
+      },
       workspaceDir: params.stateDir,
       vaultPath: params.vaultPath,
       targetConfig: {
@@ -276,9 +284,6 @@ async function runMigrateJob(
         overwritePolicy: 'preserve',
         collectionMapping: { toTags: false, toFolders: false },
         maxFilenameLength: 100,
-        ...(startParams.intervalMs !== undefined
-          ? { intervalMs: startParams.intervalMs }
-          : {}),
       } as Record<string, unknown>,
     };
 

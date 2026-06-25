@@ -227,7 +227,13 @@ export async function runMigrationJob(
             const ref = refs[idx];
             return ref?.title !== undefined ? { currentItem: ref.title.substring(0, 60) } : {};
           })(),
-          counts: { ...progressCounts },
+          counts: {
+            verified: progressCounts.verified,
+            degraded: progressCounts.degraded,
+            failed: progressCounts.permanent_failed + progressCounts.unsupported + progressCounts.blocked,
+            conflict: progressCounts.conflict,
+            skipped: progressCounts.skipped,
+          },
         });
       }
 

@@ -10,9 +10,10 @@ export function useSidecar() {
   const unlistenRefs = useRef<UnlistenFn[]>([]);
 
   useEffect(() => {
+    let cancelled = false;
     listen<ProgressEvent>('sidecar://progress', (e) => {
       setProgress(e.payload);
-    }).then((fn) => { unlistenRefs.current.push(fn); });
+    }).then((fn) => { if (cancelled) fn(); else unlistenRefs.current.push(fn); });
 
     listen<{ level: string; message: string }>('sidecar://log', (e) => {
       setLogs((prev) => [
@@ -23,7 +24,7 @@ export function useSidecar() {
           timestamp: Date.now(),
         },
       ]);
-    }).then((fn) => { unlistenRefs.current.push(fn); });
+    }).then((fn) => { if (cancelled) fn(); else unlistenRefs.current.push(fn); });
 
     listen<{ message: string }>('sidecar://crashed', (e) => {
       setLogs((prev) => [
@@ -31,9 +32,10 @@ export function useSidecar() {
         { level: 'error', message: `⚠️ ${e.payload.message}`, timestamp: Date.now() },
       ]);
       setBusy(false);
-    }).then((fn) => { unlistenRefs.current.push(fn); });
+    }).then((fn) => { if (cancelled) fn(); else unlistenRefs.current.push(fn); });
 
     return () => {
+      cancelled = true;
       for (const fn of unlistenRefs.current) {
         try { fn(); } catch { /* already unlistened */ }
       }
