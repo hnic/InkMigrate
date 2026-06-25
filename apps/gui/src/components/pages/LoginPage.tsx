@@ -34,11 +34,18 @@ export function LoginPage({ settings, update, rpcCall, addLog }: Props) {
         source: settings.source,
         stateDir: settings.stateDir,
         ...(settings.favoritesUrl ? { favoritesUrl: settings.favoritesUrl } : {}),
-      }) as { state: string };
+      }) as { state: string; favoritesUrl?: string };
       const ok = result.state === 'logged-in';
       setLoginState(ok ? 'success' : 'failed');
       addLog(ok ? 'info' : 'error', `登录结果：${result.state}`);
-      if (ok) await checkStatus();
+      if (ok) {
+        // 登录成功后自动填充收藏页 URL
+        if (result.favoritesUrl) {
+          update({ favoritesUrl: result.favoritesUrl });
+          addLog('info', `已自动获取收藏页 URL`);
+        }
+        await checkStatus();
+      }
     } catch (e) {
       setLoginState('failed');
       addLog('error', `登录失败：${(e as Error).message}`);
@@ -89,15 +96,8 @@ export function LoginPage({ settings, update, rpcCall, addLog }: Props) {
                 存放数据库、登录 Profile、报告的目录。例如 /Users/you/inkmigrate
               </div>
             </div>
-            <div>
-              <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>收藏页 URL（可选）</label>
-              <textarea
-                value={settings.favoritesUrl}
-                onChange={(e) => update({ favoritesUrl: e.target.value })}
-                placeholder="https://www.toutiao.com/c/user/token/...?tab=fav"
-                rows={2}
-                style={{ fontFamily: 'monospace', fontSize: '12px', resize: 'vertical' }}
-              />
+            <div style={{ fontSize: '12px', color: 'var(--text-dim)' }}>
+              💡 收藏页 URL 会在登录成功后自动获取，无需手动填写。
             </div>
           </div>
         </div>

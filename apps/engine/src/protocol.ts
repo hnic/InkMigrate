@@ -47,6 +47,8 @@ export interface AuthLoginParams {
 
 export interface AuthLoginResult {
   state: 'logged-in' | 'not-logged-in' | 'auth-state-unknown';
+  /** 登录成功后自动提取的收藏页 URL。 */
+  favoritesUrl?: string;
 }
 
 export interface AuthStatusParams {

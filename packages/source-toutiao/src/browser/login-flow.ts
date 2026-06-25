@@ -14,8 +14,8 @@ const TOUTIAO_HOME = 'https://www.toutiao.com/';
 
 export interface LoginFlowOptions {
   session: ToutiaoBrowserSession;
-  /** 收藏列表 URL。未登录时通常重定向到登录页。 */
-  favoritesUrl: string;
+  /** 收藏列表 URL。未传时导航到首页。 */
+  favoritesUrl?: string;
   /** 等待用户手动登录的超时毫秒数。默认 300000（5 分钟）。 */
   loginTimeoutMs?: number;
   /** 轮询登录状态的间隔毫秒。默认 2000。 */
@@ -30,6 +30,8 @@ export interface LoginFlowOptions {
 export interface LoginFlowResult {
   state: LoginState;
   signals: Partial<LoginSignals>;
+  /** 登录成功后从页面提取的收藏页 URL（绝对路径）。 */
+  favoritesUrl?: string;
 }
 
 /**
@@ -91,8 +93,10 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginFlowRes
 
       if (hasRealAvatar && hasUsername) {
         state = 'logged-in';
+        // 登录成功后从页面提取收藏页 URL
+        const favUrl = await extractFavoritesUrl(page);
         if (ownsPage) await page.close();
-        return { state, signals };
+        return { state, signals, ...(favUrl !== undefined ? { favoritesUrl: favUrl } : {}) };
       }
     }
   }
@@ -169,4 +173,28 @@ async function collectLoginSignals(
   }
 
   return signals;
+}
+
+/**
+ * 从头条页面提取收藏页 URL。
+ * 用户下拉菜单中有「我的收藏」链接，href 含 tab=fav。
+ */
+async function extractFavoritesUrl(page: Page): Promise<string | undefined> {
+  try {
+    const href = await page.evaluate(() => {
+      // 查找用户下拉菜单中的「我的收藏」链接
+      const links = Array.from(document.querySelectorAll('a[href]'));
+      const favLink = links.find((a) => {
+        const h = a.getAttribute('href') ?? '';
+        return h.includes('tab=fav') && a.textContent?.includes('收藏');
+      });
+      return favLink?.getAttribute('href') ?? null;
+    });
+    if (href === null) return undefined;
+    // 相对路径转绝对路径
+    if (href.startsWith('http')) return href;
+    return `https://www.toutiao.com${href}`;
+  } catch {
+    return undefined;
+  }
 }

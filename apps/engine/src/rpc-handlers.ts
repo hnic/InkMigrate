@@ -89,10 +89,13 @@ async function handleAuthLogin(params: AuthLoginParams | undefined): Promise<Aut
     await session.launch();
     const result = await runLoginFlow({
       session,
-      favoritesUrl: params.favoritesUrl ?? 'https://www.toutiao.com/favorites',
+      // 不传 favoritesUrl → 导航到首页，等用户手动登录
       loginTimeoutMs: params.timeoutMs ?? 300_000,
     });
-    return { state: result.state };
+    return {
+      state: result.state,
+      ...(result.favoritesUrl !== undefined ? { favoritesUrl: result.favoritesUrl } : {}),
+    };
   } finally {
     await session.close();
   }
