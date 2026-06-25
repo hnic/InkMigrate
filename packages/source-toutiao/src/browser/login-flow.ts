@@ -52,47 +52,47 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginFlowRes
   const ownsPage = opts.page === undefined;
   const page = opts.page ?? (await opts.session.newPage());
 
-  // 如果有收藏页 URL 就用它；否则用首页检测登录态
+  // 如果有收藏页 URL 就用它；否则用首页
   const targetUrl = opts.favoritesUrl ?? TOUTIAO_HOME;
   await page.goto(targetUrl, {
     waitUntil: 'networkidle',
     timeout: 45_000,
   });
 
-  // 第一轮检测——只在收藏页场景下自动检测；
-  // 首页场景（无 favoritesUrl）不做自动检测，因为首页 DOM 可能有误判信号。
-  // 直接进入等待用户登录的轮询循环。
+  // auth.login 的目的是让用户手动登录，不做首轮自动检测。
+  // 等待用户在浏览器中完成登录，轮询检测登录态。
   let signals: Partial<LoginSignals> = {};
   let state: LoginState = 'auth-state-unknown';
 
-  if (opts.favoritesUrl !== undefined) {
-    signals = await collectLoginSignals(page, targetUrl);
-    state = detectLoginState(signals);
-    if (state === 'logged-in') {
-      if (ownsPage) await page.close();
-      return { state, signals };
-    }
-  }
-
-  // 未登录或状态不确定 → 等待用户手动登录
+  // 等待用户手动登录
   const timeoutMs = opts.loginTimeoutMs ?? 300_000;
   const pollMs = opts.pollIntervalMs ?? 2000;
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, pollMs));
-    const currentUrl = page.url();
-    if (currentUrl !== 'about:blank') {
-      // 检查是否已离开登录页（用户完成登录后通常重定向回原页面）
-      const leftAuth = !AUTH_URL_PATTERNS.some((p) => currentUrl.toLowerCase().includes(p));
-      if (leftAuth) {
-        // 可能已登录，重新检测
-        signals = await collectLoginSignals(page, targetUrl);
-        state = detectLoginState(signals);
-        if (state === 'logged-in') {
-          if (ownsPage) await page.close();
-          return { state, signals };
-        }
+
+    // 检查是否有明确的登录入口元素（已登录的用户头像/用户名）
+    // 用严格的检测标准：必须有 .header-profile-wrapper 下的 img（真实用户头像）
+    const hasRealAvatar = await page.evaluate(() => {
+      // 头条登录后右上角有 .ttp-header-profile img
+      const profile = document.querySelector('.ttp-header-profile img, .header-profile-wrapper img');
+      return profile !== null;
+    }).catch(() => false);
+
+    if (hasRealAvatar) {
+      // 确认有真实头像，再做完整信号检测
+      signals = await collectLoginSignals(page, targetUrl);
+      // 必须同时满足：有头像 + 有用户名文本 + URL 不在登录页
+      const hasUsername = await page.evaluate(() => {
+        const el = document.querySelector('.ttp-header-profile .name, .header-profile-wrapper .name');
+        return el !== null && (el.textContent?.trim().length ?? 0) > 0;
+      }).catch(() => false);
+
+      if (hasRealAvatar && hasUsername) {
+        state = 'logged-in';
+        if (ownsPage) await page.close();
+        return { state, signals };
       }
     }
   }
