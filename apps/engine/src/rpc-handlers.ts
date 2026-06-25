@@ -87,10 +87,24 @@ async function handleAuthLogin(params: AuthLoginParams | undefined): Promise<Aut
   const session = new ToutiaoBrowserSession({ profileDir, headless: false });
   try {
     await session.launch();
+    // 通知 GUI：浏览器已打开
+    sendNotification('log', {
+      level: 'info',
+      message: '浏览器已打开，请在浏览器窗口中扫码登录',
+    });
+    sendNotification('progress', {
+      phase: 'login',
+      current: 0,
+      total: 0,
+    });
     const result = await runLoginFlow({
       session,
       // 不传 favoritesUrl → 导航到首页，等用户手动登录
       loginTimeoutMs: params.timeoutMs ?? 300_000,
+    });
+    sendNotification('log', {
+      level: result.state === 'logged-in' ? 'info' : 'warn',
+      message: `登录结果：${result.state}${result.favoritesUrl ? '，已获取收藏页 URL' : ''}`,
     });
     return {
       state: result.state,
