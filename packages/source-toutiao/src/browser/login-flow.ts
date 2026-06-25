@@ -56,8 +56,9 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginFlowRes
 
   // 如果有收藏页 URL 就用它；否则用首页
   const targetUrl = opts.favoritesUrl ?? TOUTIAO_HOME;
+  // 用 domcontentloaded 而非 networkidle——首页广告/追踪请求会让 networkidle 很慢
   await page.goto(targetUrl, {
-    waitUntil: 'networkidle',
+    waitUntil: 'domcontentloaded',
     timeout: 45_000,
   });
 
@@ -71,34 +72,32 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginFlowRes
   const pollMs = opts.pollIntervalMs ?? 2000;
   const deadline = Date.now() + timeoutMs;
 
+  // 首轮检测前等待页面渲染（不等完整 networkidle，只等 DOM 元素出现）
+  await page.waitForSelector('.ttp-header-profile, .header-profile-wrapper, .user-icon', {
+    timeout: 10_000,
+  }).catch(() => {});
+
+  // 合并头像+用户名检测为单次 evaluate，减少往返
   while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, pollMs));
+    const loginCheck = await page.evaluate(() => {
+      const profile = document.querySelector('.ttp-header-profile img, .header-profile-wrapper img, .user-icon img');
+      const nameEl = document.querySelector('.ttp-header-profile .name, .header-profile-wrapper .name');
+      const hasAvatar = profile !== null;
+      const hasName = nameEl !== null && (nameEl.textContent?.trim().length ?? 0) > 0;
+      return { hasAvatar, hasName };
+    }).catch(() => ({ hasAvatar: false, hasName: false }));
 
-    // 检查是否有明确的登录入口元素（已登录的用户头像/用户名）
-    // 用严格的检测标准：必须有 .header-profile-wrapper 下的 img（真实用户头像）
-    const hasRealAvatar = await page.evaluate(() => {
-      // 头条登录后右上角有 .ttp-header-profile img
-      const profile = document.querySelector('.ttp-header-profile img, .header-profile-wrapper img');
-      return profile !== null;
-    }).catch(() => false);
-
-    if (hasRealAvatar) {
-      // 确认有真实头像，再做完整信号检测
+    if (loginCheck.hasAvatar && loginCheck.hasName) {
       signals = await collectLoginSignals(page, targetUrl);
-      // 必须同时满足：有头像 + 有用户名文本 + URL 不在登录页
-      const hasUsername = await page.evaluate(() => {
-        const el = document.querySelector('.ttp-header-profile .name, .header-profile-wrapper .name');
-        return el !== null && (el.textContent?.trim().length ?? 0) > 0;
-      }).catch(() => false);
-
-      if (hasRealAvatar && hasUsername) {
-        state = 'logged-in';
-        // 登录成功后从页面提取收藏页 URL
-        const favUrl = await extractFavoritesUrl(page);
-        if (ownsPage) await page.close();
-        return { state, signals, ...(favUrl !== undefined ? { favoritesUrl: favUrl } : {}) };
-      }
+      state = 'logged-in';
+      // 登录成功后从页面提取收藏页 URL
+      const favUrl = await extractFavoritesUrl(page);
+      if (ownsPage) await page.close();
+      return { state, signals, ...(favUrl !== undefined ? { favoritesUrl: favUrl } : {}) };
     }
+
+    // 首轮不等 pollMs（已登录时立即检测），后续轮询等待
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
 
   // 超时：返回最终状态
@@ -182,8 +181,8 @@ async function collectLoginSignals(
  */
 async function extractFavoritesUrl(page: Page): Promise<string | undefined> {
   try {
-    // 轮询等待收藏链接出现（最多 5 秒）
-    for (let attempt = 0; attempt < 10; attempt++) {
+    // 轮询等待收藏链接出现（最多 3 秒）
+    for (let attempt = 0; attempt < 6; attempt++) {
       const href = await page.evaluate(() => {
         const links = Array.from(document.querySelectorAll('a[href]'));
         // 查找含 tab=fav 的链接（收藏页链接）
@@ -204,12 +203,12 @@ async function extractFavoritesUrl(page: Page): Promise<string | undefined> {
       if (attempt === 0) {
         try {
           await page.locator('.ttp-header-profile, .header-profile-wrapper').first().hover({ timeout: 2000 });
-          await page.waitForTimeout(500);
+          await page.waitForTimeout(300);
         } catch {
           // hover 失败不影响后续尝试
         }
       }
-      await page.waitForTimeout(500);
+      await page.waitForTimeout(300);
     }
     return undefined;
   } catch {
