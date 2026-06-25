@@ -141,7 +141,7 @@ impl SidecarManager {
 
         // 2. 锁外等待响应（长任务如全量扫描/迁移可能需要数小时）
         let response = tokio::time::timeout(
-            std::time::Duration::from_secs(6 * 3600), // 6 小时
+            std::time::Duration::from_secs(24 * 3600), // 24 小时
             rx,
         )
         .await
