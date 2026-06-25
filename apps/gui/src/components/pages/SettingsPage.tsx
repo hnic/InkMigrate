@@ -40,12 +40,14 @@ export function SettingsPage({ settings, update }: Props) {
           <textarea
             value={settings.favoritesUrl}
             onChange={(e) => update({ favoritesUrl: e.target.value })}
-            placeholder="https://www.toutiao.com/c/user/token/...?tab=fav"
+            placeholder="登录后自动获取"
             rows={3}
             style={{ fontFamily: 'monospace', fontSize: '12px', resize: 'vertical' }}
           />
           <div style={{ fontSize: '12px', color: 'var(--text-dim)', marginTop: '4px' }}>
-            登录后在浏览器打开你的收藏页，复制地址栏 URL
+            💡 登录时自动获取，通常无需手动修改。仅当 URL 过期失效时才需要更新。
+          </div>
+        </div>
           </div>
         </div>
 
