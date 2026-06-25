@@ -178,22 +178,40 @@ async function collectLoginSignals(
 /**
  * 从头条页面提取收藏页 URL。
  * 用户下拉菜单中有「我的收藏」链接，href 含 tab=fav。
+ * 链接可能需要等待页面完全渲染后才出现，最多等待 5 秒。
  */
 async function extractFavoritesUrl(page: Page): Promise<string | undefined> {
   try {
-    const href = await page.evaluate(() => {
-      // 查找用户下拉菜单中的「我的收藏」链接
-      const links = Array.from(document.querySelectorAll('a[href]'));
-      const favLink = links.find((a) => {
-        const h = a.getAttribute('href') ?? '';
-        return h.includes('tab=fav') && a.textContent?.includes('收藏');
+    // 轮询等待收藏链接出现（最多 5 秒）
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const href = await page.evaluate(() => {
+        const links = Array.from(document.querySelectorAll('a[href]'));
+        // 查找含 tab=fav 的链接（收藏页链接）
+        const favLink = links.find((a) => {
+          const h = a.getAttribute('href') ?? '';
+          return h.includes('tab=fav');
+        });
+        return favLink?.getAttribute('href') ?? null;
       });
-      return favLink?.getAttribute('href') ?? null;
-    });
-    if (href === null) return undefined;
-    // 相对路径转绝对路径
-    if (href.startsWith('http')) return href;
-    return `https://www.toutiao.com${href}`;
+
+      if (href !== null) {
+        // 相对路径转绝对路径
+        if (href.startsWith('http')) return href;
+        return `https://www.toutiao.com${href}`;
+      }
+
+      // 还没找到，hover 用户头像区域展开下拉菜单
+      if (attempt === 0) {
+        try {
+          await page.locator('.ttp-header-profile, .header-profile-wrapper').first().hover({ timeout: 2000 });
+          await page.waitForTimeout(500);
+        } catch {
+          // hover 失败不影响后续尝试
+        }
+      }
+      await page.waitForTimeout(500);
+    }
+    return undefined;
   } catch {
     return undefined;
   }
