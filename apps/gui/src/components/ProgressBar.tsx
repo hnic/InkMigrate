@@ -11,7 +11,14 @@ export function ProgressBar({ progress }: { progress: ProgressEvent | null }) {
     cleanup: '🗑️ 清理中',
     login: '🔑 登录中',
   };
+  const stageLabels: Record<string, string> = {
+    scanning: '扫描收藏列表',
+    extracting: '提取并写入笔记',
+    planning: '规划迁移',
+    reporting: '生成报告',
+  };
   const phaseLabel = phaseLabels[progress.phase] ?? progress.phase;
+  const stageLabel = progress.stage !== undefined ? (stageLabels[progress.stage] ?? progress.stage) : null;
 
   return (
     <div style={{
@@ -25,6 +32,11 @@ export function ProgressBar({ progress }: { progress: ProgressEvent | null }) {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
         <span style={{ fontWeight: 700, fontSize: '15px' }}>
           {phaseLabel}
+          {stageLabel !== null && (
+            <span style={{ color: 'var(--text-dim)', marginLeft: '6px', fontWeight: 400, fontSize: '13px' }}>
+              · {stageLabel}
+            </span>
+          )}
           {progress.total > 0 && (
             <span style={{ color: 'var(--text-dim)', marginLeft: '8px', fontWeight: 400 }}>
               {progress.current} / {progress.total}

@@ -16,6 +16,7 @@ export interface ProgressEvent {
   current: number;
   total: number;
   currentItem?: string;
+  stage?: string;
   counts?: {
     verified?: number;
     degraded?: number;

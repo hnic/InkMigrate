@@ -110,9 +110,21 @@ async function handleAuthLogin(params: AuthLoginParams | undefined): Promise<Aut
       current: 0,
       total: 0,
     });
+    // 心跳：每 10 秒推送"等待登录中"，让用户知道没卡死
+    let waitSeconds = 0;
+    const heartbeat = setInterval(() => {
+      waitSeconds += 10;
+      sendNotification('progress', {
+        phase: 'login',
+        current: waitSeconds,
+        total: (params.timeoutMs ?? 300_000) / 1000,
+        currentItem: '等待扫码登录...',
+      });
+    }, 10_000);
+
+    try {
     const result = await runLoginFlow({
       session,
-      // 不传 favoritesUrl → 导航到首页，等用户手动登录
       loginTimeoutMs: params.timeoutMs ?? 300_000,
     });
     sendNotification('log', {
@@ -123,6 +135,9 @@ async function handleAuthLogin(params: AuthLoginParams | undefined): Promise<Aut
       state: result.state,
       ...(result.favoritesUrl !== undefined ? { favoritesUrl: result.favoritesUrl } : {}),
     };
+    } finally {
+      clearInterval(heartbeat);
+    }
   } finally {
     await session.close();
   }
@@ -326,6 +341,7 @@ async function runMigrateJob(
           current: progress.current,
           total: progress.total,
           ...(progress.currentItem !== undefined ? { currentItem: progress.currentItem } : {}),
+          ...(progress.stage !== undefined ? { stage: progress.stage } : {}),
           ...(progress.counts !== undefined ? { counts: progress.counts } : {}),
         });
       },

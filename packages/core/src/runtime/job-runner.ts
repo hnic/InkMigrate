@@ -52,6 +52,8 @@ export interface JobProgress {
   total: number;
   /** 当前处理的条目标题（可选）。 */
   currentItem?: string;
+  /** 当前 Job 阶段（preflight/scanning/planning/extracting/reporting）。 */
+  stage?: string;
   /** 累积状态计数。 */
   counts?: {
     verified?: number;
@@ -137,6 +139,9 @@ export async function runMigrationJob(
     });
 
     // scanning
+    if (i.onProgress !== undefined) {
+      i.onProgress({ phase: 'scanning', jobId: i.jobId, current: 0, total: 0, stage: 'scanning' });
+    }
     jobs.updateStatus(i.jobId, {
       status: 'running',
       currentStage: 'scanning',
@@ -169,6 +174,11 @@ export async function runMigrationJob(
       updatedAt: now(),
     });
     jobs.updateCounts(i.jobId, { candidateCount: refs.length });
+
+    // 通知前端进入迁移阶段
+    if (i.onProgress !== undefined) {
+      i.onProgress({ phase: 'migrating', jobId: i.jobId, current: 0, total: refs.length, stage: 'extracting' });
+    }
 
     // 逐条 extract → write → verify
     // §18.1 条目间速率控制：默认每条之间等待 1500ms，避免触发风控
@@ -308,6 +318,9 @@ export async function runMigrationJob(
     });
 
     // reporting
+    if (i.onProgress !== undefined) {
+      i.onProgress({ phase: 'migrating', jobId: i.jobId, current: refs.length, total: refs.length, stage: 'reporting', currentItem: '生成报告中...' });
+    }
     jobs.updateStatus(i.jobId, {
       status: 'running',
       currentStage: 'reporting',

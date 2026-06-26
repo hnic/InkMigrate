@@ -48,10 +48,11 @@ export function useSidecar() {
     setProgress(null);
     try {
       const result = await invoke('send_rpc', { method, params });
+      // 延迟 2 秒清除进度条，让用户看到 100% 完成状态
+      setTimeout(() => setProgress(null), 2000);
       return result;
     } finally {
       setBusy(false);
-      setProgress(null);
     }
   }, []);
 
