@@ -45,6 +45,15 @@ inkmigrate resume --job <id> --state-dir .inkmigrate --vault-path <path>  # resu
 inkmigrate cleanup unfavorite --source <id> --state-dir .inkmigrate       # unfavorite
 ```
 
+## Desktop GUI (in development)
+
+A Tauri 2 + React desktop GUI is available with visual operation interface:
+
+```bash
+cd apps/gui
+INKMIGRATE_ENGINE_PATH=$(pwd)/../engine/dist/index.js pnpm exec tauri dev
+```
+
 ## Architecture
 
 pnpm monorepo:
@@ -54,6 +63,8 @@ pnpm monorepo:
 - `packages/source-toutiao` — Toutiao source adapter: Playwright browser login, incremental favorites scan, detail extraction, 9-stage HTML→Markdown safety pipeline, unfavorite.
 - `packages/testkit` — Adapter contract test suite.
 - `apps/cli` — CLI entry point.
+- `apps/engine` — Node sidecar process (JSON-RPC over stdio) for GUI.
+- `apps/gui` — Tauri 2 + React desktop GUI app.
 
 ## Testing
 

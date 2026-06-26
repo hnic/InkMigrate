@@ -138,6 +138,9 @@ inkmigrate auth clear --source toutiao-main --state-dir .inkmigrate
 | `inkmigrate cleanup unfavorite` | 取消头条收藏 |
 | `inkmigrate doctor` | 环境检查 |
 | `inkmigrate diagnostics` | 数据库诊断 |
+| `inkmigrate config validate` | 校验配置文件 |
+| `inkmigrate source list/add/validate` | 来源管理 |
+| `inkmigrate target list/add/validate` | 目标管理 |
 
 ## 笔记格式
 
@@ -155,6 +158,7 @@ source_url: https://www.toutiao.com/article/xxxxx/
 > - 来源：今日头条
 > - 作者：作者名
 > - 发布时间：2026-06-22 06:47
+> - 收藏时间：2026-06-24 10:30（如有）
 > - [打开原文](https://www.toutiao.com/article/xxxxx/)
 
 正文内容...
@@ -165,6 +169,23 @@ source_url: https://www.toutiao.com/article/xxxxx/
 - 标题相同时自动追加序号后缀（`标题-2.md`）
 - 已迁移的条目有幂等保护，重复运行不会重复写入
 
+## 桌面 GUI（开发中）
+
+除 CLI 外，项目还包含一个基于 Tauri 2 + React 的桌面 GUI 应用，提供可视化操作界面：
+
+```bash
+cd apps/gui
+INKMIGRATE_ENGINE_PATH=$(pwd)/../engine/dist/index.js pnpm exec tauri dev
+```
+
+GUI 特性：
+- 侧边栏步骤引导（① 登录 → ② 扫描 → ③ 迁移 → ④ 清理）
+- 登录后自动获取收藏页 URL，无需手动填写
+- 实时进度条（发现数量、verified/degraded/failed 计数）
+- 断点续跑（输入中断的 Job ID 继续）
+- 清理操作二次确认
+- 全局登录状态指示
+
 ## 架构
 
 Monorepo（pnpm workspace）：
@@ -174,6 +195,8 @@ Monorepo（pnpm workspace）：
 - `packages/source-toutiao` — 今日头条来源适配器：Playwright 浏览器 Profile 登录、收藏页增量扫描、详情提取、固定 9 阶段 HTML→Markdown 安全流水线、取消收藏。
 - `packages/testkit` — 适配器契约测试套件。
 - `apps/cli` — `inkmigrate` 命令行入口。
+- `apps/engine` — Node sidecar 进程，封装 JSON-RPC over stdio 协议，为 GUI 提供核心能力。
+- `apps/gui` — Tauri 2 + React 桌面 GUI 应用。
 
 ## 测试
 
