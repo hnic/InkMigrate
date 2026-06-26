@@ -75,7 +75,7 @@ export function createCleanupCommand(): Command {
         const adapterConfig: ToutiaoBrowserAdapterConfig = {
           sourceInstanceId: opts.source,
           profileDir: pPath,
-          headless: false,
+          headless: true,
         };
         const adapter = createToutiaoSource(adapterConfig);
 

@@ -158,7 +158,7 @@ async function handleScanStart(params: ScanStartParams | undefined): Promise<Sca
 
   const session = new ToutiaoBrowserSession({
     profileDir,
-    headless: params.headless ?? false,
+    headless: params.headless ?? true,
   });
   try {
     await session.launch();
@@ -271,7 +271,7 @@ async function runMigrateJob(
     const adapterConfig: ToutiaoBrowserAdapterConfig = {
       sourceInstanceId,
       profileDir,
-      headless: false,
+      headless: true,
     };
     const startParams = params as MigrateStartParams;
     if (startParams.favoritesUrl !== undefined) {
@@ -381,7 +381,7 @@ async function handleCleanupUnfavorite(
     const adapter = createToutiaoSource({
       sourceInstanceId: params.source,
       profileDir,
-      headless: false,
+      headless: true,
     });
     await adapter.prepare({ config: {}, workspaceDir: params.stateDir });
 

@@ -22,7 +22,7 @@ export function createScanCommand(): Command {
     .requiredOption('--source <id>', '来源实例 ID')
     .requiredOption('--state-dir <path>', 'workspace stateDir')
     .option('--fixture-dir <path>', 'fixture HTML 目录（测试模式，不启动浏览器）')
-    .option('--headless', '无头模式（默认 false，显示浏览器窗口）')
+    .option('--headless', '无头模式（默认 true，后台运行不弹窗）')
     .option(
       '--favorites-url <url>',
       '收藏列表 URL',
@@ -111,7 +111,7 @@ async function runBrowserScan(opts: {
 
   const session = new ToutiaoBrowserSession({
     profileDir,
-    headless: opts.headless ?? false,
+    headless: opts.headless ?? true,
   });
 
   try {

@@ -95,7 +95,7 @@ export function createMigrateCommand(): Command {
               return createToutiaoSource({
                 sourceInstanceId: opts.source,
                 profileDir,
-                headless: false,
+                headless: true,
                 ...(opts.favoritesUrl !== undefined
                   ? { favoritesUrl: opts.favoritesUrl }
                   : {}),
