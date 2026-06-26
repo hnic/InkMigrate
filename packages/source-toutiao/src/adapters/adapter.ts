@@ -79,7 +79,7 @@ export function createToutiaoSource(
         try {
           const url = ref.canonicalUrl;
           if (url === undefined) return { state: 'unknown' as const };
-          await page.goto(url, { waitUntil: 'networkidle', timeout: 45_000 });
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
           const collectBtn = page.locator('.detail-interaction-collect').first();
           const exists = await collectBtn.count().catch(() => 0);
           if (exists === 0) return { state: 'unknown' as const };
@@ -113,7 +113,7 @@ export function createToutiaoSource(
         try {
           const url = ref.canonicalUrl;
           if (url === undefined) return { verified: false };
-          await page.goto(url, { waitUntil: 'networkidle', timeout: 45_000 });
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
           const collectBtn = page.locator('.detail-interaction-collect').first();
           const exists = await collectBtn.count().catch(() => 0);
           if (exists === 0) return { verified: false };

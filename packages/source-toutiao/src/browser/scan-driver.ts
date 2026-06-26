@@ -53,8 +53,8 @@ export async function driveScanFavorites(
   opts: ScanDriverOptions,
 ): Promise<ScanDriverResult> {
   await opts.page.goto(opts.favoritesUrl, {
-    waitUntil: 'networkidle',
-    timeout: opts.navigationTimeoutMs ?? 45_000,
+    waitUntil: 'domcontentloaded',
+    timeout: opts.navigationTimeoutMs ?? 30_000,
   });
 
   /**

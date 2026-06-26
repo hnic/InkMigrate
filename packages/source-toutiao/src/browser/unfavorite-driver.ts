@@ -47,8 +47,8 @@ export async function driveUnfavorite(
   }
 
   await opts.page.goto(url, {
-    waitUntil: 'networkidle',
-    timeout: opts.navigationTimeoutMs ?? 45_000,
+    waitUntil: 'domcontentloaded',
+    timeout: opts.navigationTimeoutMs ?? 30_000,
   });
 
   // 等待收藏按钮出现
