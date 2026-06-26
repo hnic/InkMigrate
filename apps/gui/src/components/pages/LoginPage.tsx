@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import type { AppSettings, OperationState } from '../../lib/types.js';
 
 interface Props {
@@ -6,33 +7,32 @@ interface Props {
   update: (partial: Partial<AppSettings>) => void;
   rpcCall: (method: string, params: Record<string, unknown>) => Promise<unknown>;
   addLog: (level: 'info' | 'warn' | 'error', message: string) => void;
+  /** 应用级登录态刷新（由 useLoginStatus 提供）。静默，不触发 busy。 */
+  refreshLogin: () => Promise<void>;
 }
 
-export function LoginPage({ settings, update, rpcCall, addLog }: Props) {
+export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin }: Props) {
+  // loginState 现在只承载【过程态】：登录中 / 登录失败。
+  // 稳定态（已登录/未登录）由 settings.loggedIn 驱动，与顶栏保持单一真相源。
   const [loginState, setLoginState] = useState<OperationState>('idle');
   const [profilePath, setProfilePath] = useState('');
   const [loading, setLoading] = useState(false);
 
-  // 进入页面时自动检查 Profile 状态（如果 stateDir 已配置）
+  // 已登录时拉取 profile 路径用于展示（静默，不触发 busy）
   useEffect(() => {
-    if (settings.stateDir) {
-      checkStatus();
+    let cancelled = false;
+    if (settings.stateDir && settings.loggedIn) {
+      invoke<{ profileExists: boolean; profilePath: string }>('send_rpc', {
+        method: 'auth.status',
+        params: { source: settings.source, stateDir: settings.stateDir },
+      })
+        .then((r) => { if (!cancelled) setProfilePath(r.profileExists ? r.profilePath : ''); })
+        .catch(() => { if (!cancelled) setProfilePath(''); });
+    } else {
+      setProfilePath('');
     }
-  }, [settings.stateDir]);
-
-  async function checkStatus() {
-    try {
-      const result = await rpcCall('auth.status', {
-        source: settings.source,
-        stateDir: settings.stateDir,
-      }) as { profileExists: boolean; profilePath: string };
-      setProfilePath(result.profileExists ? result.profilePath : '');
-      setLoginState(result.profileExists ? 'success' : 'idle');
-      update({ loggedIn: result.profileExists });
-    } catch {
-      // ignore
-    }
-  }
+    return () => { cancelled = true; };
+  }, [settings.stateDir, settings.source, settings.loggedIn]);
 
   async function handleLogin() {
     setLoading(true);
@@ -44,8 +44,8 @@ export function LoginPage({ settings, update, rpcCall, addLog }: Props) {
         ...(settings.favoritesUrl ? { favoritesUrl: settings.favoritesUrl } : {}),
       }) as { state: string; favoritesUrl?: string };
       const ok = result.state === 'logged-in';
-      setLoginState(ok ? 'success' : 'failed');
-      update({ loggedIn: ok });
+      // 过程态归位：稳定显示交给 settings.loggedIn（由 refreshLogin 写入）
+      setLoginState(ok ? 'idle' : 'failed');
       addLog(ok ? 'info' : 'error', `登录结果：${result.state}`);
       if (ok) {
         // 登录成功后自动填充收藏页 URL
@@ -53,7 +53,7 @@ export function LoginPage({ settings, update, rpcCall, addLog }: Props) {
           update({ favoritesUrl: result.favoritesUrl });
           addLog('info', `已自动获取收藏页 URL`);
         }
-        await checkStatus();
+        await refreshLogin();
       }
     } catch (e) {
       setLoginState('failed');
@@ -72,15 +72,27 @@ export function LoginPage({ settings, update, rpcCall, addLog }: Props) {
         stateDir: settings.stateDir,
       }) as { cleared: boolean };
       addLog('info', result.cleared ? 'Profile 已删除' : 'Profile 不存在');
-      setProfilePath('');
       setLoginState('idle');
-      update({ loggedIn: false });
+      await refreshLogin();
     } catch (e) {
       addLog('error', `清除失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setLoading(false);
     }
   }
+
+  // 卡片显示判定：过程态（loading/failed）优先，否则对齐 settings.loggedIn
+  const displayState: OperationState =
+    loginState === 'loading' ? 'loading' :
+    loginState === 'failed' ? 'failed' :
+    settings.loggedIn ? 'success' : 'idle';
+
+  const statusColor = displayState === 'success' ? 'var(--success)' :
+                      displayState === 'failed' ? 'var(--error)' :
+                      displayState === 'loading' ? 'var(--warning)' : 'var(--text-dim)';
+  const statusText = displayState === 'success' ? '已登录' :
+                     displayState === 'failed' ? '登录失败' :
+                     displayState === 'loading' ? '登录中...' : '未登录';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
@@ -125,15 +137,9 @@ export function LoginPage({ settings, update, rpcCall, addLog }: Props) {
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           <span style={{
             width: '12px', height: '12px', borderRadius: '50%',
-            background: loginState === 'success' ? 'var(--success)' :
-                       loginState === 'failed' ? 'var(--error)' :
-                       loginState === 'loading' ? 'var(--warning)' : 'var(--text-dim)',
+            background: statusColor,
           }} />
-          <span>
-            {loginState === 'success' ? '已登录' :
-             loginState === 'failed' ? '登录失败' :
-             loginState === 'loading' ? '登录中...' : '未登录'}
-          </span>
+          <span>{statusText}</span>
         </div>
 
         {profilePath && (
@@ -144,9 +150,9 @@ export function LoginPage({ settings, update, rpcCall, addLog }: Props) {
 
         <div style={{ display: 'flex', gap: '8px' }}>
           <button onClick={handleLogin} disabled={loading || !settings.stateDir}>
-            {loading ? '处理中...' : loginState === 'success' ? '重新登录' : '打开浏览器登录'}
+            {loading ? '处理中...' : settings.loggedIn ? '重新登录' : '打开浏览器登录'}
           </button>
-          <button onClick={handleClear} disabled={loading || !profilePath} className="btn-danger">
+          <button onClick={handleClear} disabled={loading || !settings.loggedIn} className="btn-danger">
             清除登录
           </button>
         </div>
@@ -158,7 +164,7 @@ export function LoginPage({ settings, update, rpcCall, addLog }: Props) {
       </div>
 
       {settings.stateDir && (
-        <button onClick={checkStatus} disabled={loading} style={{ alignSelf: 'flex-start' }}>
+        <button onClick={() => void refreshLogin()} disabled={loading} style={{ alignSelf: 'flex-start' }}>
           检查登录状态
         </button>
       )}

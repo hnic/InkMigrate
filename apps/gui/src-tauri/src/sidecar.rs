@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command, ChildStdin, ChildStdout};
@@ -36,10 +36,14 @@ pub struct RpcError {
 }
 
 /// Sidecar 管理器：管理 Node 子进程的生命周期和 JSON-RPC 通信。
+///
+/// 并发设计：所有可变状态都内部化了（next_id 用原子、stdin/child 用内部 Mutex），
+/// 因此 `send_rpc` 是 `&self`，多个 RPC 可以并发等待响应而互不阻塞。
+/// 等待长任务（如全量清理）的响应期间，瞬时查询（如 auth.status）不会被阻塞。
 pub struct SidecarManager {
-    child: Option<Child>,
-    stdin: Option<ChildStdin>,
-    next_id: u64,
+    child: Mutex<Option<Child>>,
+    stdin: Mutex<Option<ChildStdin>>,
+    next_id: AtomicU64,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<RpcResponse>>>>,
     is_shutting_down: Arc<AtomicBool>,
 }
@@ -47,16 +51,16 @@ pub struct SidecarManager {
 impl SidecarManager {
     pub fn new() -> Self {
         Self {
-            child: None,
-            stdin: None,
-            next_id: 1,
+            child: Mutex::new(None),
+            stdin: Mutex::new(None),
+            next_id: AtomicU64::new(1),
             pending: Arc::new(Mutex::new(HashMap::new())),
             is_shutting_down: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// 启动 Node sidecar 进程。
-    pub async fn start(&mut self, app: AppHandle) -> Result<(), String> {
+    pub async fn start(&self, app: AppHandle) -> Result<(), String> {
         // 开发模式：直接用 node 运行 engine 的 dist/index.js
         // 生产模式：用打包后的 sidecar 二进制
         let engine_path = std::env::var("INKMIGRATE_ENGINE_PATH")
@@ -101,46 +105,50 @@ impl SidecarManager {
             read_stdout(stdout, pending, app_clone, shutdown_flag).await;
         });
 
-        self.child = Some(child);
-        self.stdin = Some(stdin);
+        *self.child.lock().await = Some(child);
+        *self.stdin.lock().await = Some(stdin);
         Ok(())
     }
 
     /// 发送 RPC 请求并等待响应。
-    /// 只在写 stdin 时持锁，等待响应时不持锁（允许并发查询）。
+    ///
+    /// 并发安全：`&self` 允许多个调用者同时进入。分配 id（原子）与写 stdin
+    /// 各自用短锁保护；等待响应在所有锁之外进行。因此长任务（数小时的
+    /// cleanup/migrate）在等响应期间，不会阻塞其他瞬时查询（如 auth.status）。
     pub async fn send_rpc(
-        &mut self,
+        &self,
         method: String,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        // 1. 短暂持锁：分配 id + 注册 pending + 写 stdin
-        let rx = {
-            let stdin = self.stdin.as_mut().ok_or("sidecar 未启动")?;
-            let id = self.next_id;
-            self.next_id += 1;
+        // 1. 原子分配 id（无锁）
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
-            let request = RpcRequest {
-                jsonrpc: "2.0".to_string(),
-                id,
-                method: method.clone(),
-                params: Some(params),
-            };
+        // 2. 序列化请求（CPU 工作，不持任何锁）
+        let request = RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id,
+            method,
+            params: Some(params),
+        };
+        let json = serde_json::to_string(&request)
+            .map_err(|e| format!("序列化请求失败: {}", e))?;
 
-            let (tx, rx) = oneshot::channel();
-            self.pending.lock().await.insert(id, tx);
+        // 3. 注册 pending 回调（短锁）
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(id, tx);
 
-            let json = serde_json::to_string(&request)
-                .map_err(|e| format!("序列化请求失败: {}", e))?;
+        // 4. 写 stdin（短锁：只保护 write_all，保证一行不被并发写交错）
+        {
+            let mut stdin_guard = self.stdin.lock().await;
+            let stdin = stdin_guard.as_mut().ok_or("sidecar 未启动")?;
             stdin
                 .write_all(format!("{}\n", json).as_bytes())
                 .await
                 .map_err(|e| format!("写入 stdin 失败: {}", e))?;
+        }
+        // stdin 锁已释放，等待响应不阻塞其他 RPC
 
-            rx
-        };
-        // 锁已释放，等待响应不阻塞其他 RPC
-
-        // 2. 锁外等待响应（长任务如全量扫描/迁移可能需要数小时）
+        // 5. 锁外等待响应（长任务如全量扫描/迁移可能需要数小时）
         let response = tokio::time::timeout(
             std::time::Duration::from_secs(24 * 3600), // 24 小时
             rx,
@@ -157,9 +165,9 @@ impl SidecarManager {
     }
 
     /// 关闭 sidecar 进程。
-    pub async fn shutdown(&mut self) {
+    pub async fn shutdown(&self) {
         self.is_shutting_down.store(true, Ordering::Relaxed);
-        if let Some(mut child) = self.child.take() {
+        if let Some(mut child) = self.child.lock().await.take() {
             let _ = child.kill().await;
         }
     }

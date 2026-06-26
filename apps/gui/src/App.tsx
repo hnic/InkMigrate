@@ -10,12 +10,14 @@ import { ReportPage } from './components/pages/ReportPage.js';
 import { SettingsPage } from './components/pages/SettingsPage.js';
 import { useSettings } from './hooks/useSettings.js';
 import { useSidecar } from './hooks/useSidecar.js';
+import { useLoginStatus } from './hooks/useLoginStatus.js';
 import type { PageId } from './lib/types.js';
 
 export default function App() {
   const [page, setPage] = useState<PageId>('login');
   const { settings, update } = useSettings();
   const { rpcCall, progress, logs, busy, addLog } = useSidecar();
+  const { refresh: refreshLogin } = useLoginStatus({ settings, update });
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
@@ -60,7 +62,7 @@ export default function App() {
 
           {/* 当前页面 */}
           <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
-            {page === 'login' && <LoginPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} />}
+            {page === 'login' && <LoginPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} refreshLogin={refreshLogin} />}
             {page === 'scan' && <ScanPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} busy={busy} />}
             {page === 'migrate' && <MigratePage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} busy={busy} />}
             {page === 'cleanup' && <CleanupPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} busy={busy} />}

@@ -4,22 +4,24 @@ use sidecar::SidecarManager;
 use tauri::Emitter;
 use std::sync::Arc;
 use tauri::State;
-use tokio::sync::Mutex;
 
 /// Tauri command: 发送 JSON-RPC 请求到 sidecar。
+///
+/// 并发设计：state 是 `Arc<SidecarManager>`，内部状态（next_id/stdin/child）
+/// 已各自用原子/短锁内部化，因此此处不加外层锁。多个 RPC 可并发等待响应，
+/// 长任务（cleanup/migrate）不会阻塞瞬时查询（auth.status）。
 #[tauri::command]
 async fn send_rpc(
     method: String,
     params: serde_json::Value,
-    state: State<'_, Arc<Mutex<SidecarManager>>>,
+    state: State<'_, Arc<SidecarManager>>,
 ) -> Result<serde_json::Value, String> {
-    let mut mgr = state.lock().await;
-    mgr.send_rpc(method, params).await
+    state.send_rpc(method, params).await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let sidecar = Arc::new(Mutex::new(SidecarManager::new()));
+    let sidecar = Arc::new(SidecarManager::new());
 
     let sidecar_for_exit = sidecar.clone();
     tauri::Builder::default()
@@ -30,8 +32,7 @@ pub fn run() {
             if let tauri::WindowEvent::Destroyed = event {
                 let sc = sidecar_for_exit.clone();
                 tauri::async_runtime::spawn(async move {
-                    let mut mgr = sc.lock().await;
-                    mgr.shutdown().await;
+                    sc.shutdown().await;
                 });
             }
         })
@@ -40,8 +41,7 @@ pub fn run() {
             let sidecar_clone = sidecar.clone();
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let mut mgr = sidecar_clone.lock().await;
-                if let Err(e) = mgr.start(app_handle.clone()).await {
+                if let Err(e) = sidecar_clone.start(app_handle.clone()).await {
                     eprintln!("启动 sidecar 失败: {}", e);
                     let _ = app_handle.emit("sidecar://crashed", serde_json::json!({
                         "message": format!("sidecar 启动失败: {}", e)
