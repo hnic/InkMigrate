@@ -15,6 +15,7 @@ import { ToutiaoBrowserSession } from '../browser/browser-session.js';
 import { driveScanFavorites } from '../browser/scan-driver.js';
 import { driveExtractDetail } from '../browser/extract-driver.js';
 import { driveUnfavorite } from '../browser/unfavorite-driver.js';
+import { SPECIAL_PAGE_SELECTORS, UNFAVORITE_SELECTORS } from '../selectors/index.js';
 
 export const SOURCE_TOUTIAO_KIND = 'toutiao' as const;
 export const SOURCE_TOUTIAO_VERSION = '1.0.0' as const;
@@ -84,11 +85,14 @@ export function createToutiaoSource(
           const url = ref.canonicalUrl;
           if (url === undefined) return { state: 'unknown' as const };
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-          const collectBtn = page.locator('.detail-interaction-collect').first();
+          const collectBtn = page
+            .locator(UNFAVORITE_SELECTORS.collectButton.join(', '))
+            .first();
           const exists = await collectBtn.count().catch(() => 0);
           if (exists === 0) return { state: 'unknown' as const };
-          const collected = await collectBtn.evaluate((el) =>
-            el.classList.contains('collected'),
+          const collected = await collectBtn.evaluate(
+            (el, cls) => el.classList.contains(cls),
+            UNFAVORITE_SELECTORS.collectedClass,
           );
           return { state: collected ? 'favorited' as const : 'not-favorited' as const };
         } finally {
@@ -118,11 +122,14 @@ export function createToutiaoSource(
           const url = ref.canonicalUrl;
           if (url === undefined) return { verified: false };
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-          const collectBtn = page.locator('.detail-interaction-collect').first();
+          const collectBtn = page
+            .locator(UNFAVORITE_SELECTORS.collectButton.join(', '))
+            .first();
           const exists = await collectBtn.count().catch(() => 0);
           if (exists === 0) return { verified: false };
-          const collected = await collectBtn.evaluate((el) =>
-            el.classList.contains('collected'),
+          const collected = await collectBtn.evaluate(
+            (el, cls) => el.classList.contains(cls),
+            UNFAVORITE_SELECTORS.collectedClass,
           );
           // 验证取消收藏成功 = 不再是已收藏状态
           return { verified: !collected };
@@ -219,7 +226,7 @@ export function createToutiaoSource(
         }
         // 检查删除标记
         const hasDeletedMarker = await page
-          .locator('[data-testid="content-deleted"]')
+          .locator(SPECIAL_PAGE_SELECTORS.contentDeleted[0])
           .count()
           .catch(() => 0);
         if (hasDeletedMarker > 0) {

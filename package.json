@@ -11,6 +11,7 @@
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm -r run test",
     "lint": "pnpm -r run lint",
+    "check:stdio": "node scripts/check-no-stdout-log.mjs",
     "inkmigrate": "node apps/cli/dist/index.js"
   }
 }

@@ -1,4 +1,5 @@
 import { JSDOM } from 'jsdom';
+import { SPECIAL_PAGE_SELECTORS, UNFAVORITE_SELECTORS } from '../selectors/index.js';
 
 export type FavoriteState =
   | 'favorited'
@@ -13,15 +14,15 @@ export function detectFavoriteState(html: string): FavoriteState {
   const dom = new JSDOM(html, { runScripts: 'outside-only', resources: undefined });
   const doc = dom.window.document;
 
-  if (doc.querySelector('[data-testid="login-required"]')) return 'login_required';
-  if (doc.querySelector('[data-testid="security-challenge"]')) return 'challenge_required';
-  if (doc.querySelector('[data-testid="content-deleted"]')) return 'content_unavailable';
+  if (doc.querySelector(SPECIAL_PAGE_SELECTORS.loginRequired[0])) return 'login_required';
+  if (doc.querySelector(SPECIAL_PAGE_SELECTORS.securityChallenge[0])) return 'challenge_required';
+  if (doc.querySelector(SPECIAL_PAGE_SELECTORS.contentDeleted[0])) return 'content_unavailable';
 
-  const btn = doc.querySelector('[data-testid="favorite-button"]');
+  const btn = doc.querySelector(UNFAVORITE_SELECTORS.collectButton[0]);
   if (!btn) return 'unknown';
 
   const pressed = btn.getAttribute('aria-pressed');
-  if (pressed === 'true') return 'favorited';
-  if (pressed === 'false') return 'not_favorited';
+  if (pressed === UNFAVORITE_SELECTORS.favoritedAriaPressed) return 'favorited';
+  if (pressed === UNFAVORITE_SELECTORS.notFavoritedAriaPressed) return 'not_favorited';
   return 'unknown';
 }

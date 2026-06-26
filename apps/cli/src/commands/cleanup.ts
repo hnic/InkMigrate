@@ -4,20 +4,26 @@ import {
   createToutiaoSource,
   profilePath,
   profileExists,
+  buildConfirmationPrompt,
+  validateConfirmation,
   type ToutiaoBrowserAdapterConfig,
 } from '@inkmigrate/source-toutiao';
 import { join } from 'node:path';
+import * as readline from 'node:readline/promises';
+import { stdin as input, stdout as output } from 'node:process';
 
 /**
  * §12.7 `inkmigrate cleanup unfavorite` 命令。
  *
  * 从数据库读取已迁移（verified）的条目，逐条打开文章详情页点击取消收藏。
+ * 默认要求终端逐字输入确认短语（§14.6）；传 --force 跳过。
  *
  * 用法：
  *   inkmigrate cleanup unfavorite \
  *     --source toutiao-main \
  *     --state-dir .inkmigrate \
- *     --max-items 3
+ *     --max-items 3 \
+ *     [--force]
  */
 export function createCleanupCommand(): Command {
   const cleanup = new Command('cleanup').description('源端清理：取消收藏');
@@ -65,10 +71,16 @@ export function createCleanupCommand(): Command {
     .requiredOption('--source <id>', '来源实例 ID')
     .requiredOption('--state-dir <path>', 'workspace stateDir')
     .option('--max-items <n>', '最多取消收藏的条目数（默认全部）')
+    .option(
+      '--force',
+      '跳过终端二次确认（默认必须逐字输入确认短语）',
+      false,
+    )
     .action(async (opts: {
       source: string;
       stateDir: string;
       maxItems?: string;
+      force?: boolean;
     }) => {
       const dbPath = join(opts.stateDir, 'inkmigrate.sqlite');
       const db: DB = openDatabase({ path: dbPath });
@@ -98,6 +110,25 @@ export function createCleanupCommand(): Command {
         console.log(`找到 ${rows.length} 条已迁移条目。`);
         console.log('即将逐条打开文章详情页并取消收藏。');
         console.log('');
+
+        // §14.6 危险操作二次确认：未传 --force 时必须逐字输入确认短语。
+        // 这是不可逆操作（取消后云端收藏即丢失），默认拒绝执行。
+        if (!opts.force) {
+          const prefix = 'UNFAVORITE';
+          const prompt = buildConfirmationPrompt(rows.length, prefix);
+          console.log(prompt);
+          const rl = readline.createInterface({ input, output });
+          try {
+            const answer = (await rl.question('确认 > ')).trim();
+            if (!validateConfirmation(answer, rows.length, prefix)) {
+              console.log('确认不匹配，已取消操作。未做任何更改。');
+              process.exit(1);
+            }
+          } finally {
+            rl.close();
+          }
+          console.log('');
+        }
 
         // 检查 Profile
         const pPath = profilePath(opts.stateDir, opts.source);

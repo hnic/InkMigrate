@@ -3,6 +3,7 @@ import { JSDOM } from 'jsdom';
 import { extractStructuredData } from './structured-data.js';
 import { readabilityFallback } from './readability-fallback.js';
 import { runSafetyPipeline } from '../pipeline/pipeline.js';
+import { SPECIAL_PAGE_SELECTORS } from '../selectors/index.js';
 
 export interface DetailInput {
   html: string;
@@ -89,21 +90,21 @@ export function extractDetail(i: DetailInput): DetailResult {
 }
 
 function detectSpecialPageFromDoc(doc: Document): SourceDegradation | undefined {
-  if (doc.querySelector('[data-testid="content-deleted"]')) {
+  if (doc.querySelector(SPECIAL_PAGE_SELECTORS.contentDeleted[0])) {
     return {
       code: 'content-unavailable',
       stage: 'extract',
       message: 'content deleted or not found',
     };
   }
-  if (doc.querySelector('[data-testid="login-required"]')) {
+  if (doc.querySelector(SPECIAL_PAGE_SELECTORS.loginRequired[0])) {
     return {
       code: 'partial-visibility',
       stage: 'extract',
       message: 'login required to view full content',
     };
   }
-  if (doc.querySelector('[data-testid="security-challenge"]')) {
+  if (doc.querySelector(SPECIAL_PAGE_SELECTORS.securityChallenge[0])) {
     return {
       code: 'partial-visibility',
       stage: 'extract',

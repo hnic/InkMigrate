@@ -1,0 +1,70 @@
+#!/usr/bin/env node
+/**
+ * 守护 JSON-RPC stdout 通道：禁止在 sidecar / core 路径里用
+ * console.log / console.info / console.debug 直接写 stdout。
+ *
+ * apps/engine 是 Tauri sidecar，stdout 是 JSON-RPC 协议通道；
+ * packages/core 被它 import，任何 stray console.log 都会污染协议流
+ * （stderr 安全，console.error 不在此限制内）。
+ *
+ * 这是一道 CI 防线，不替代结构化日志；新增日志请用 logToStderr / logger。
+ *
+ * 用法：node scripts/check-no-stdout-log.mjs
+ * 失败时非零退出。
+ */
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, relative } from 'node:path';
+
+const ROOT = new URL('../', import.meta.url).pathname;
+
+/** 受限目录：sidecar 入口及其依赖链。 */
+const SCOPES = ['apps/engine/src', 'packages/core/src'];
+/** 禁止的写 stdout 调用（console.error 走 stderr，放行）。 */
+const FORBIDDEN = /\bconsole\.(log|info|debug)\s*\(/;
+/** 允许的例外：注释里的说明、字符串字面量里的示例。 */
+const ALLOW = /^\s*(\/\/|\/\*|\*|\s)/;
+
+let violations = 0;
+
+function walk(dir) {
+  const out = [];
+  for (const entry of readdirSync(dir)) {
+    if (entry === 'node_modules' || entry === 'dist' || entry.startsWith('.')) continue;
+    const full = join(dir, entry);
+    const st = statSync(full);
+    if (st.isDirectory()) out.push(...walk(full));
+    else if (st.isFile() && /\.(ts|js|mjs|cjs)$/.test(entry)) out.push(full);
+  }
+  return out;
+}
+
+for (const scope of SCOPES) {
+  const base = join(ROOT, scope);
+  let files;
+  try {
+    files = walk(base);
+  } catch {
+    console.error(`scope not found, skipping: ${scope}`);
+    continue;
+  }
+  for (const file of files) {
+    const lines = readFileSync(file, 'utf8').split('\n');
+    lines.forEach((line, i) => {
+      if (!FORBIDDEN.test(line)) return;
+      // 跳过纯注释行里的说明
+      if (ALLOW.test(line) && !line.includes('console.')) return;
+      const rel = relative(ROOT, file);
+      console.error(
+        `${rel}:${i + 1}: 禁止 console.${/(log|info|debug)/.exec(line)[0]} ` +
+          `（stdout 是 sidecar JSON-RPC 通道，改用 logToStderr / logger 写 stderr）\n  ${line.trim()}`,
+      );
+      violations++;
+    });
+  }
+}
+
+if (violations > 0) {
+  console.error(`\n✗ 发现 ${violations} 处禁止的 stdout 日志调用。`);
+  process.exit(1);
+}
+console.log('✓ engine/core 路径无 stdout 日志污染。');

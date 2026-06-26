@@ -24,6 +24,10 @@ export {
 export { detectContentKind } from './normalize/content-kind.js';
 export { deriveFingerprintInput } from './normalize/fingerprint.js';
 export {
+  validateConfirmation,
+  buildConfirmationPrompt,
+} from './cleanup/confirmation.js';
+export {
   detectLoginState,
   type LoginState,
   type LoginSignals,
