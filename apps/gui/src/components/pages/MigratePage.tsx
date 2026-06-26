@@ -8,6 +8,8 @@ interface Props {
   rpcCall: (method: string, params: Record<string, unknown>) => Promise<unknown>;
   addLog: (level: 'info' | 'warn' | 'error', message: string) => void;
   busy: boolean;
+  /** 当前运行的 phase，用于判断按钮文字（是否本页任务在跑）。disabled 仍用 busy。 */
+  activePhase: string | null;
 }
 
 interface MigrateResult {
@@ -18,7 +20,8 @@ interface MigrateResult {
   jobId: string;
 }
 
-export function MigratePage({ settings, update, rpcCall, addLog, busy }: Props) {
+export function MigratePage({ settings, update, rpcCall, addLog, busy, activePhase }: Props) {
+  const migrating = activePhase === 'migrating';
   const [maxItems, setMaxItems] = useState('');
   const [interval, setIntervalMs] = useState('1500');
   const [result, setResult] = useState<MigrateResult | null>(null);
@@ -119,7 +122,7 @@ export function MigratePage({ settings, update, rpcCall, addLog, busy }: Props) 
           onClick={handleMigrate}
           disabled={busy || !settings.stateDir || !settings.vaultPath || !settings.favoritesUrl || !settings.loggedIn}
         >
-          {busy ? '迁移中...' : '开始迁移'}
+          {migrating ? '迁移中...' : busy ? '等待其他任务完成...' : '开始迁移'}
         </button>
 
         {/* 断点续跑 */}
@@ -142,7 +145,7 @@ export function MigratePage({ settings, update, rpcCall, addLog, busy }: Props) 
               onClick={handleResume}
               disabled={busy || !resumeJobId || !settings.stateDir || !settings.vaultPath}
             >
-              {busy ? '续跑中...' : '继续迁移'}
+              {migrating ? '续跑中...' : busy ? '等待...' : '继续迁移'}
             </button>
           </div>
         </div>

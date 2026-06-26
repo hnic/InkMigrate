@@ -8,9 +8,12 @@ interface Props {
   rpcCall: (method: string, params: Record<string, unknown>) => Promise<unknown>;
   addLog: (level: 'info' | 'warn' | 'error', message: string) => void;
   busy: boolean;
+  /** 当前运行的 phase，用于判断按钮文字（是否本页任务在跑）。disabled 仍用 busy。 */
+  activePhase: string | null;
 }
 
-export function CleanupPage({ settings, update, rpcCall, addLog, busy }: Props) {
+export function CleanupPage({ settings, update, rpcCall, addLog, busy, activePhase }: Props) {
+  const cleaning = activePhase === 'cleanup';
   const [maxItems, setMaxItems] = useState('');
   const [result, setResult] = useState<{ successCount: number; skipCount: number; failCount: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -94,7 +97,7 @@ export function CleanupPage({ settings, update, rpcCall, addLog, busy }: Props) 
             </div>
             <div style={{ display: 'flex', gap: '8px' }}>
               <button onClick={handleCleanup} disabled={busy} className="btn-danger">
-                {busy ? '清理中...' : '确认取消收藏'}
+                {cleaning ? '清理中...' : busy ? '等待其他任务完成...' : '确认取消收藏'}
               </button>
               <button onClick={() => setConfirming(false)} disabled={busy}>
                 取消

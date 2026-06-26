@@ -7,6 +7,9 @@ export function useSidecar() {
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [busy, setBusy] = useState(false);
+  /** 当前正在运行的 RPC 对应的 phase（由发起者声明），用于让每个页面判断
+   * "是不是我自己发起的任务在跑"，避免 A 任务跑时 B 页面误显示"运行中"。 */
+  const [activePhase, setActivePhase] = useState<string | null>(null);
   const unlistenRefs = useRef<UnlistenFn[]>([]);
 
   useEffect(() => {
@@ -43,9 +46,20 @@ export function useSidecar() {
     };
   }, []);
 
+  /** method → phase 映射。让发起任务时自动声明对应的 phase，
+   * 各页面据此判断"我自己是否在运行"，无需依赖进度事件的异步到达。 */
+  const METHOD_PHASE: Record<string, string> = {
+    'scan.start': 'scanning',
+    'migrate.start': 'migrating',
+    'migrate.resume': 'migrating',
+    'cleanup.unfavorite': 'cleanup',
+    'auth.login': 'login',
+  };
+
   const rpcCall = useCallback(async (method: string, params: Record<string, unknown>) => {
     setBusy(true);
     setProgress(null);
+    setActivePhase(METHOD_PHASE[method] ?? null);
     try {
       const result = await invoke('send_rpc', { method, params });
       // 延迟 2 秒清除进度条，让用户看到 100% 完成状态
@@ -53,6 +67,7 @@ export function useSidecar() {
       return result;
     } finally {
       setBusy(false);
+      setActivePhase(null);
     }
   }, []);
 
@@ -60,5 +75,5 @@ export function useSidecar() {
     setLogs((prev) => [...prev.slice(-199), { level, message, timestamp: Date.now() }]);
   }, []);
 
-  return { rpcCall, progress, logs, busy, addLog };
+  return { rpcCall, progress, logs, busy, activePhase, addLog };
 }

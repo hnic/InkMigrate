@@ -8,9 +8,12 @@ interface Props {
   rpcCall: (method: string, params: Record<string, unknown>) => Promise<unknown>;
   addLog: (level: 'info' | 'warn' | 'error', message: string) => void;
   busy: boolean;
+  /** 当前运行的 phase，用于判断按钮文字（是否本页任务在跑）。disabled 仍用 busy。 */
+  activePhase: string | null;
 }
 
-export function ScanPage({ settings, update, rpcCall, addLog, busy }: Props) {
+export function ScanPage({ settings, update, rpcCall, addLog, busy, activePhase }: Props) {
+  const scanning = activePhase === 'scanning';
   const [result, setResult] = useState<{ uniqueItems: number; terminationReason: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -54,7 +57,7 @@ export function ScanPage({ settings, update, rpcCall, addLog, busy }: Props) {
         </div>
 
         <button onClick={handleScan} disabled={busy || !settings.stateDir || !settings.favoritesUrl || !settings.loggedIn}>
-          {busy ? '扫描中...' : '开始扫描'}
+          {scanning ? '扫描中...' : busy ? '等待其他任务完成...' : '开始扫描'}
         </button>
 
         {settings.stateDir && settings.favoritesUrl && !settings.loggedIn && (
