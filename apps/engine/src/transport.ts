@@ -109,7 +109,12 @@ async function handleRequest(req: RpcRequest): Promise<void> {
     const result = await handler(req.params);
     sendResponse(req.id, result);
   } catch (e) {
-    const err = e as Error & { code?: string };
+    const err = e as Error & { code?: string; __rateLimited?: boolean };
+    // 统一失败通知：所有 RPC 失败都发一条 error log
+    sendNotification('log', {
+      level: 'error',
+      message: `${req.method} 失败：${err.message}`,
+    });
     sendErrorResponse(req.id, {
       code: -32000,
       message: err.message,

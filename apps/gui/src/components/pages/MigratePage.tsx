@@ -75,6 +75,7 @@ export function MigratePage({ settings, update, rpcCall, addLog, busy }: Props) 
     completed: '完成',
     failed: '失败',
     interrupted: '已中断',
+    paused: '已暂停（限流）',
   };
 
   return (

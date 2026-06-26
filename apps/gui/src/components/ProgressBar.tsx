@@ -84,6 +84,9 @@ export function ProgressBar({ progress }: { progress: ProgressEvent | null }) {
           {progress.counts.degraded !== undefined && progress.counts.degraded > 0 && (
             <span style={{ color: 'var(--warning)' }}>⚠️ {progress.counts.degraded}</span>
           )}
+          {progress.counts.conflict !== undefined && progress.counts.conflict > 0 && (
+            <span style={{ color: 'var(--warning)' }}>⚠️ 冲突 {progress.counts.conflict}</span>
+          )}
           {progress.counts.failed !== undefined && (
             <span style={{ color: 'var(--error)' }}>❌ {progress.counts.failed}</span>
           )}

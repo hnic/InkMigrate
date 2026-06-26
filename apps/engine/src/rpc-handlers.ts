@@ -250,6 +250,8 @@ async function runMigrateJob(
     ensureInstance(db, sourceInstanceId, 'toutiao', 'source');
     ensureInstance(db, targetInstanceId, 'obsidian', 'target');
 
+    sendNotification('log', { level: 'info', message: isResume ? `续跑 Job ${(params as MigrateResumeParams).job}...` : '正在创建迁移任务...' });
+
     // 创建新 Job
     const jobId = `mig-${Date.now()}`;
     const now = new Date().toISOString();
@@ -329,6 +331,18 @@ async function runMigrateJob(
       },
     });
 
+    // 完成时的状态日志
+    const statusMsgs: Record<string, string> = {
+      completed: `迁移完成：${result.scanCount} 条，对账${result.reconciliationOk ? '通过' : '失败'}`,
+      failed: `迁移失败：${result.reconciliationReason ?? '对账失败'}`,
+      interrupted: '迁移已中断，可用 resume 续跑',
+      paused: '已被限流暂停（429），请稍后用 resume 续跑',
+    };
+    sendNotification('log', {
+      level: result.status === 'completed' ? 'info' : 'warn',
+      message: statusMsgs[result.status] ?? result.status,
+    });
+
     return {
       status: result.status,
       scanCount: result.scanCount,
@@ -370,6 +384,7 @@ async function handleCleanupUnfavorite(
       }>;
 
     if (rows.length === 0) {
+      sendNotification('log', { level: 'info', message: '没有已迁移的条目可清理' });
       return { successCount: 0, skipCount: 0, failCount: 0 };
     }
 
@@ -377,6 +392,8 @@ async function handleCleanupUnfavorite(
     if (!profileExists(params.stateDir, params.source)) {
       throw new Error(`Profile 不存在：${profileDir}，请先 auth.login`);
     }
+
+    sendNotification('log', { level: 'info', message: `开始取消收藏，共 ${rows.length} 条...` });
 
     const adapter = createToutiaoSource({
       sourceInstanceId: params.source,
@@ -423,12 +440,17 @@ async function handleCleanupUnfavorite(
         } else {
           failCount++;
         }
-      } catch {
+      } catch (e) {
         failCount++;
+        sendNotification('log', { level: 'error', message: `取消收藏失败：${(e as Error).message}` });
       }
     }
 
     await adapter.close();
+    sendNotification('log', {
+      level: failCount > 0 ? 'warn' : 'info',
+      message: `清理完成：成功 ${successCount}，跳过 ${skipCount}，失败 ${failCount}`,
+    });
     return { successCount, skipCount, failCount };
   } finally {
     db.close();
