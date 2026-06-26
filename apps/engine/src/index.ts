@@ -12,8 +12,18 @@
  */
 import { registerAllHandlers } from './rpc-handlers.js';
 import { startStdinLoop, logToStderr } from './transport.js';
+import { getHeapStatistics } from 'node:v8';
 
 function main(): void {
+  // 检查堆大小是否足够（全量迁移数千条需要大量内存）
+  const heapStats = getHeapStatistics();
+  const limitMB = Math.round(heapStats.heap_size_limit / 1024 / 1024);
+  if (limitMB < 4096) {
+    logToStderr('warn', `堆限制 ${limitMB}MB 偏低，建议用 --max-old-space-size=8192 启动`);
+  } else {
+    logToStderr('info', `堆限制 ${limitMB}MB`);
+  }
+
   registerAllHandlers();
   startStdinLoop();
   logToStderr('info', 'InkMigrate engine started, waiting for RPC on stdin');

@@ -42,9 +42,13 @@ export async function driveExtractDetail(
 
   try {
     await opts.page.goto(url, {
-      waitUntil: 'networkidle',
-      timeout: opts.navigationTimeoutMs ?? 45_000,
+      waitUntil: 'domcontentloaded',
+      timeout: opts.navigationTimeoutMs ?? 30_000,
     });
+    // 等正文容器出现（不等所有网络请求完成）
+    await opts.page.waitForSelector('article, .article-content, .post-content, body', {
+      timeout: 10_000,
+    }).catch(() => {});
   } catch (e) {
     // 包装 Playwright 导航错误，附带 retryable 标志
     // 让 job-runner catch 块能正确分类为永久失败（不卡在同一条上反复超时）

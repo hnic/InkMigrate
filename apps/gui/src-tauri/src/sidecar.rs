@@ -66,6 +66,7 @@ impl SidecarManager {
             });
 
         let mut child = Command::new("node")
+            .arg("--max-old-space-size=8192")
             .arg(&engine_path)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())

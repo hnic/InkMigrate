@@ -61,6 +61,9 @@ export function createToutiaoSource(
         headless: browserConfig.headless ?? false,
       })
     : undefined;
+  // 防止 OOM：每处理 100 条重启浏览器上下文
+  let extractCount = 0;
+  const RECYCLE_THRESHOLD = 100;
 
   return {
     kind: SOURCE_TOUTIAO_KIND,
@@ -167,6 +170,13 @@ export function createToutiaoSource(
         throw new Error(
           'createToutiaoSource().extract requires a real browser session; use fixture-driven wrapper for tests',
         );
+      }
+      // 定期重启浏览器上下文释放内存（防止 Playwright 累积 OOM）
+      extractCount++;
+      if (extractCount > RECYCLE_THRESHOLD) {
+        extractCount = 0;
+        await session.close();
+        await session.launch();
       }
       const page = await session.newPage();
       try {
