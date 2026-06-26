@@ -28,6 +28,13 @@ export {
   buildConfirmationPrompt,
 } from './cleanup/confirmation.js';
 export {
+  runCleanupUnfavorite,
+  type CleanupOrchestratorOptions,
+  type CleanupOrchestratorResult,
+  type CleanupProgress,
+  type CleanupLogEntry,
+} from './cleanup/cleanup-orchestrator.js';
+export {
   detectLoginState,
   type LoginState,
   type LoginSignals,

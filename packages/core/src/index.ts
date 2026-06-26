@@ -30,6 +30,10 @@ export * from './storage/repositories/migration-jobs.js';
 export * from './storage/repositories/source-items.js';
 export * from './storage/repositories/target-artifacts.js';
 export * from './storage/repositories/migration-attempts.js';
+export * from './storage/repositories/cleanup-plans.js';
+export * from './storage/repositories/cleanup-jobs.js';
+export * from './storage/repositories/cleanup-items.js';
+export * from './storage/repositories/cleanup-attempts.js';
 
 // security
 export {

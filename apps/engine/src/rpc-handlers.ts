@@ -18,6 +18,7 @@ import {
   ToutiaoBrowserSession,
   runLoginFlow,
   driveScanFavorites,
+  runCleanupUnfavorite,
   type ToutiaoBrowserAdapterConfig,
 } from '@inkmigrate/source-toutiao';
 import { createObsidianTarget } from '@inkmigrate/target-obsidian';
@@ -381,35 +382,13 @@ async function handleCleanupUnfavorite(
   if (params === undefined) throw new Error('missing params');
   const db: DB = openDatabase({ path: join(params.stateDir, 'inkmigrate.sqlite') });
   try {
-    const limit = params.maxItems;
-    const rows = db
-      .prepare(
-        `SELECT canonical_url, title, external_id, content_kind, fingerprint, discovered_at
-         FROM source_items
-         WHERE source_instance_id = ? AND status = 'verified'
-         ORDER BY source_position ASC
-         ${limit ? 'LIMIT ?' : ''}`,
-      )
-      .all(params.source, ...(limit ? [limit] : [])) as Array<{
-        canonical_url: string;
-        title: string;
-        external_id: string | null;
-        content_kind: string;
-        fingerprint: string;
-        discovered_at: string;
-      }>;
-
-    if (rows.length === 0) {
-      sendNotification('log', { level: 'info', message: '没有已迁移的条目可清理' });
-      return { successCount: 0, skipCount: 0, failCount: 0 };
-    }
-
     const profileDir = profilePath(params.stateDir, params.source);
     if (!profileExists(params.stateDir, params.source)) {
       throw new Error(`Profile 不存在：${profileDir}，请先 auth.login`);
     }
 
-    sendNotification('log', { level: 'info', message: `开始取消收藏，共 ${rows.length} 条...` });
+    // cleanup_plans.migration_job_id 是 NOT NULL FK，需关联一次迁移任务
+    const migrationJobId = resolveLatestMigrationJobId(db, params.source);
 
     const adapter = createToutiaoSource({
       sourceInstanceId: params.source,
@@ -418,59 +397,47 @@ async function handleCleanupUnfavorite(
     });
     await adapter.prepare({ config: {}, workspaceDir: params.stateDir });
 
-    let successCount = 0;
-    let skipCount = 0;
-    let failCount = 0;
-
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i]!;
-      sendNotification('progress', {
-        phase: 'cleanup',
-        current: i + 1,
-        total: rows.length,
-        currentItem: row.title?.substring(0, 50),
-      });
-
-      const ref = {
+    try {
+      const result = await runCleanupUnfavorite({
+        db,
+        sourceAdapter: adapter,
         sourceInstanceId: params.source,
-        canonicalUrl: row.canonical_url,
-        originalUrl: row.canonical_url,
-        title: row.title,
-        contentKind: row.content_kind as 'article' | 'short-post' | 'gallery' | 'question-answer' | 'video' | 'note' | 'external-link' | 'unknown',
-        discoveredAt: row.discovered_at || new Date().toISOString(),
-        fingerprint: row.fingerprint || '',
-        sourceMetadata: {},
-        ...(row.external_id ? { externalId: row.external_id } : {}),
+        migrationJobId,
+        workspaceDir: params.stateDir,
+        ...(params.maxItems !== undefined ? { maxItems: params.maxItems } : {}),
+        onProgress: (p) => sendNotification('progress', {
+          phase: 'cleanup',
+          current: p.current,
+          total: p.total,
+          ...(p.currentItem !== undefined ? { currentItem: p.currentItem } : {}),
+        }),
+        onLog: (entry) => sendNotification('log', { level: entry.level, message: entry.message }),
+      });
+      return {
+        successCount: result.successCount,
+        skipCount: result.skippedCount,
+        failCount: result.failedCount,
+        ...(result.jobId ? { jobId: result.jobId } : {}),
       };
-
-      try {
-        const result = (await adapter.cleanup!.executeAction(
-          ref,
-          'unfavorite',
-          { config: {}, workspaceDir: params.stateDir },
-        )) as { success: boolean; wasCollected: boolean; reason?: string };
-
-        if (result.success) {
-          if (result.wasCollected) successCount++;
-          else skipCount++;
-        } else {
-          failCount++;
-        }
-      } catch (e) {
-        failCount++;
-        sendNotification('log', { level: 'error', message: `取消收藏失败：${(e as Error).message}` });
-      }
+    } finally {
+      await adapter.close();
     }
-
-    await adapter.close();
-    sendNotification('log', {
-      level: failCount > 0 ? 'warn' : 'info',
-      message: `清理完成：成功 ${successCount}，跳过 ${skipCount}，失败 ${failCount}`,
-    });
-    return { successCount, skipCount, failCount };
   } finally {
     db.close();
   }
+}
+
+/** 解析 source_instance 关联的最新迁移任务 ID（满足 cleanup_plans FK 约束）。 */
+function resolveLatestMigrationJobId(db: DB, sourceInstanceId: string): string {
+  const row = db
+    .prepare(
+      `SELECT id FROM migration_jobs WHERE source_instance_id=? ORDER BY created_at DESC LIMIT 1`,
+    )
+    .get(sourceInstanceId) as { id: string } | undefined;
+  if (row === undefined) {
+    throw new Error('没有可关联的迁移任务，请先完成迁移再清理');
+  }
+  return row.id;
 }
 
 // ─── status ───
