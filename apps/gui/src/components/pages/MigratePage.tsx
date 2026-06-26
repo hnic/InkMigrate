@@ -23,6 +23,7 @@ export function MigratePage({ settings, update, rpcCall, addLog, busy }: Props) 
   const [interval, setIntervalMs] = useState('1500');
   const [result, setResult] = useState<MigrateResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [resumeJobId, setResumeJobId] = useState('');
 
   async function handleMigrate() {
     setResult(null);
@@ -45,6 +46,28 @@ export function MigratePage({ settings, update, rpcCall, addLog, busy }: Props) 
       const msg = e instanceof Error ? e.message : String(e);
       setError(msg);
       addLog('error', `迁移失败：${msg}`);
+    }
+  }
+
+  async function handleResume() {
+    setResult(null);
+    setError(null);
+    try {
+      const params: Record<string, unknown> = {
+        job: resumeJobId,
+        stateDir: settings.stateDir,
+        vaultPath: settings.vaultPath,
+      };
+      if (settings.favoritesUrl) params.favoritesUrl = settings.favoritesUrl;
+      if (maxItems) params.maxItems = parseInt(maxItems, 10);
+
+      const res = await rpcCall('migrate.resume', params) as MigrateResult;
+      setResult(res);
+      addLog(res.reconciliationOk ? 'info' : 'warn', `续跑完成：${res.scanCount} 条`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg);
+      addLog('error', `续跑失败：${msg}`);
     }
   }
 
@@ -97,6 +120,31 @@ export function MigratePage({ settings, update, rpcCall, addLog, busy }: Props) 
         >
           {busy ? '迁移中...' : '开始迁移'}
         </button>
+
+        {/* 断点续跑 */}
+        <div style={{
+          marginTop: '8px',
+          paddingTop: '12px',
+          borderTop: '1px solid var(--border)',
+        }}>
+          <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>
+            断点续跑（中断后继续，自动跳过已完成的条目）
+          </label>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <input
+              value={resumeJobId}
+              onChange={(e) => setResumeJobId(e.target.value)}
+              placeholder="中断的 Job ID（如 mig-1782417170231）"
+              style={{ flex: 1, fontFamily: 'monospace', fontSize: '12px' }}
+            />
+            <button
+              onClick={handleResume}
+              disabled={busy || !resumeJobId || !settings.stateDir || !settings.vaultPath}
+            >
+              {busy ? '续跑中...' : '继续迁移'}
+            </button>
+          </div>
+        </div>
 
         {settings.stateDir && settings.vaultPath && settings.favoritesUrl && !settings.loggedIn && (
           <div style={{
