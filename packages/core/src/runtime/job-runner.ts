@@ -63,7 +63,7 @@ export interface JobProgress {
 }
 
 export interface JobRunnerResult {
-  status: 'completed' | 'failed' | 'interrupted';
+  status: 'completed' | 'failed' | 'interrupted' | 'paused';
   scanCount: number;
   finalStateCounts: Record<string, number>;
   reconciliationOk: boolean;
@@ -172,6 +172,7 @@ export async function runMigrationJob(
 
     // 逐条 extract → write → verify
     // §18.1 条目间速率控制：默认每条之间等待 1500ms，避免触发风控
+    // §18.2 限流（429/503）时 Job 进入 paused
     const configRecord = i.targetContext.config as Record<string, unknown>;
     const intervalMs = (configRecord['intervalMs'] as number | undefined) ?? 1500;
     const itemStates: ItemFinalState[] = [];
@@ -185,6 +186,8 @@ export async function runMigrationJob(
       conflict: 0,
       skipped: 0,
     };
+    let rateLimited = false;
+    try {
     for (let idx = 0; idx < refs.length; idx++) {
       const ref = refs[idx]!;
       // §18.3 检查中断标志——完成当前条目后停止
@@ -209,6 +212,16 @@ export async function runMigrationJob(
         targetInstanceId: i.targetInstanceId,
         workspaceDir: i.workspaceDir,
         retryPolicy: DEFAULT_RETRY_POLICY,
+      }).catch((e): ItemFinalState => {
+        // §18.2 限流检测：processOneItem 抛出 __rateLimited 时 Job 进入 paused
+        const rlErr = e as { __rateLimited?: boolean; httpStatus?: number };
+        if (rlErr.__rateLimited === true) {
+          console.warn(`[job ${i.jobId}] 限流检测 (${rlErr.httpStatus})，Job 进入 paused`);
+          throw e; // 向上传播到 runMigrationJob 的 try 块
+        }
+        // 其他错误：processOneItem 内部 catch 已返回 ItemFinalState，不会到这里
+        // 但防御性处理
+        return 'permanent_failed';
       });
       itemStates.push(state);
 
@@ -241,6 +254,38 @@ export async function runMigrationJob(
       if (idx < refs.length - 1 && intervalMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, intervalMs));
       }
+    }
+    } catch (e) {
+      // §18.2 捕获限流信号
+      const rlErr = e as { __rateLimited?: boolean };
+      if (rlErr.__rateLimited === true) {
+        rateLimited = true;
+      } else {
+        throw e; // 非限流错误继续向上传播
+      }
+    }
+
+    // §18.2 如果被限流，把 Job 标记为 paused 并返回
+    if (rateLimited) {
+      jobs.updateStatus(i.jobId, {
+        status: 'paused',
+        currentStage: 'extracting',
+        pauseReasonCode: 'rate_limited',
+        pausedAt: now(),
+        updatedAt: now(),
+      });
+      // 未处理条目标记为 skipped
+      const processed = itemStates.length;
+      for (let idx = processed; idx < refs.length; idx++) {
+        itemStates.push('skipped');
+      }
+      return {
+        status: 'paused',
+        scanCount: refs.length,
+        finalStateCounts: deriveFinalStateCounts(itemStates) as unknown as Record<string, number>,
+        reconciliationOk: false,
+        reconciliationReason: 'rate_limited',
+      };
     }
 
     // §18.3 如果被中断，把未处理条目标记为 interrupted
@@ -444,11 +489,19 @@ async function processOneItem(
     // plan
     const plan = await i.targetAdapter.plan(item, i.targetContext);
 
-    // write
-    const writeResult = await i.targetAdapter.write(
-      plan,
-      i.targetContext,
-    );
+    // §13.9 查询上次成功写入的 expectedWrittenFileHash（用于 conflict 检测）
+    let expectedWrittenFileHash: string | undefined;
+    if (existingItem?.id !== undefined) {
+      const prevArtifact = i.targetArtifacts.findBySourceItem(existingItem.id);
+      if (prevArtifact !== undefined && prevArtifact.status === 'verified') {
+        expectedWrittenFileHash = prevArtifact.writtenFileHash;
+      }
+    }
+
+    // write（支持 writeWithExpectedHash 的适配器用它做 conflict 检测）
+    const writeResult = i.targetAdapter.writeWithExpectedHash !== undefined
+      ? await i.targetAdapter.writeWithExpectedHash(plan, i.targetContext, expectedWrittenFileHash)
+      : await i.targetAdapter.write(plan, i.targetContext);
 
     // verify
     const verification = await i.targetAdapter.verify(
@@ -523,14 +576,19 @@ async function processOneItem(
       artifactInput.writtenFileHash = writeResult.writtenFileHash;
       i.targetArtifacts.create(artifactInput);
 
-      // 3. 更新 source_items 状态为 verified/degraded
+      // 3. 更新 source_items 状态为 verified/degraded + source_content_hash
       if (existingItem !== undefined) {
-        i.sourceItemsRepo.updateCommittedResult(existingItem.id, {
+        const updateInput: Parameters<SourceItems['updateCommittedResult']>[1] = {
           status: finalState,
           quality: item.quality,
           degradationsJson: JSON.stringify(item.degradations),
           updatedAt: now(),
-        });
+        };
+        // §16.4 持久化 source_content_hash（plan 计算的标准化正文哈希）
+        if (plan.sourceContentHash !== undefined) {
+          updateInput.sourceContentHash = plan.sourceContentHash;
+        }
+        i.sourceItemsRepo.updateCommittedResult(existingItem.id, updateInput);
       }
     });
     commitTxn();
@@ -580,6 +638,13 @@ async function processOneItem(
     const disposition = err.itemDisposition;
     if (disposition === 'unsupported') return 'unsupported';
     if (disposition === 'blocked') return 'blocked';
+
+    // §18.2 检测限流信号（429/503），向上抛出以触发 Job paused
+    const httpStatus = (e as { httpStatus?: number }).httpStatus;
+    if (httpStatus === 429 || httpStatus === 503) {
+      throw { __rateLimited: true, httpStatus, message: errMsg };
+    }
+
     // 导航超时、网络错误等临时性故障也标记为 permanent_failed，
     // 这样 resume 时会跳过（不会卡在同一条上反复超时）
     return 'permanent_failed';

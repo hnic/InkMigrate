@@ -4,6 +4,10 @@ import {
   type SourceAdapter,
   type SourceContentKind,
   type SourceItemRef,
+  type SourceRefState,
+  type CleanupActionState,
+  type CleanupActionReceipt,
+  type CleanupVerification,
 } from '@inkmigrate/core';
 import { TOUTIAO_CAPABILITIES } from '../capabilities.js';
 import { deriveFingerprintInput } from '../normalize/fingerprint.js';
@@ -188,6 +192,42 @@ export function createToutiaoSource(
           extractOpts.maxImageBytes = browserConfig.maxImageBytes;
         }
         return await driveExtractDetail(extractOpts);
+      } finally {
+        await page.close();
+      }
+    },
+    verifySourceRef: async (ref, _ctx) => {
+      void _ctx;
+      if (session === undefined || browserConfig === undefined) {
+        return { resolvable: false, availability: 'unknown' as const };
+      }
+      const url = ref.canonicalUrl;
+      if (url === undefined) {
+        return { resolvable: false, availability: 'unknown' as const };
+      }
+      const page = await session.newPage();
+      try {
+        const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+        const status = resp?.status() ?? 0;
+        if (status === 404 || status === 410) {
+          return { resolvable: false, availability: 'deleted' as const };
+        }
+        // 检查是否被重定向到登录页
+        const currentUrl = page.url().toLowerCase();
+        if (currentUrl.includes('login') || currentUrl.includes('passport')) {
+          return { resolvable: false, availability: 'login_required' as const };
+        }
+        // 检查删除标记
+        const hasDeletedMarker = await page
+          .locator('[data-testid="content-deleted"]')
+          .count()
+          .catch(() => 0);
+        if (hasDeletedMarker > 0) {
+          return { resolvable: false, availability: 'deleted' as const };
+        }
+        return { resolvable: true, availability: 'available' as const };
+      } catch {
+        return { resolvable: false, availability: 'unknown' as const };
       } finally {
         await page.close();
       }

@@ -22,6 +22,43 @@ import { join } from 'node:path';
 export function createCleanupCommand(): Command {
   const cleanup = new Command('cleanup').description('源端清理：取消收藏');
 
+  // cleanup status — 查看可清理的条目统计
+  cleanup
+    .command('status')
+    .description('查看可清理的条目统计')
+    .requiredOption('--source <id>', '来源实例 ID')
+    .requiredOption('--state-dir <path>', 'workspace stateDir')
+    .action((opts: { source: string; stateDir: string }) => {
+      const db: DB = openDatabase({ path: join(opts.stateDir, 'inkmigrate.sqlite') });
+      try {
+        const total = (
+          db
+            .prepare('SELECT COUNT(*) as c FROM source_items WHERE source_instance_id = ?')
+            .get(opts.source) as { c: number }
+        ).c;
+        const verified = (
+          db
+            .prepare("SELECT COUNT(*) as c FROM source_items WHERE source_instance_id = ? AND status = 'verified'")
+            .get(opts.source) as { c: number }
+        ).c;
+        const degraded = (
+          db
+            .prepare("SELECT COUNT(*) as c FROM source_items WHERE source_instance_id = ? AND status = 'degraded'")
+            .get(opts.source) as { c: number }
+        ).c;
+
+        console.log(`来源 ${opts.source} 清理状态：`);
+        console.log(`  总条目: ${total}`);
+        console.log(`  已验证（可清理）: ${verified}`);
+        console.log(`  降级: ${degraded}`);
+        console.log(`  可清理比例: ${total > 0 ? Math.round((verified / total) * 100) : 0}%`);
+        console.log('');
+        console.log('运行 `cleanup unfavorite` 开始取消收藏。');
+      } finally {
+        db.close();
+      }
+    });
+
   cleanup
     .command('unfavorite')
     .description('打开浏览器，逐条取消已迁移条目的收藏')

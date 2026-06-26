@@ -172,9 +172,9 @@ describe('adapter registry (§8.2-§8.6)', () => {
       // attach a cleanup adapter despite capability=false
       adapter.cleanup = {
         supportedActions: ['unfavorite'],
-        inspectActionState: async () => ({}),
-        executeAction: async () => ({}),
-        verifyAction: async () => ({}),
+        inspectActionState: async () => ({ state: 'unknown' }),
+        executeAction: async () => ({ success: false }),
+        verifyAction: async () => ({ verified: false }),
       };
       expect(() => reg.registerSource(adapter)).toThrow(
         /supportsSourceCleanup=false but provides a cleanup adapter/,
@@ -192,9 +192,9 @@ describe('adapter registry (§8.2-§8.6)', () => {
       });
       adapter.cleanup = {
         supportedActions: ['unfavorite'],
-        inspectActionState: async () => ({}),
-        executeAction: async () => ({}),
-        verifyAction: async () => ({}),
+        inspectActionState: async () => ({ state: 'unknown' }),
+        executeAction: async () => ({ success: false }),
+        verifyAction: async () => ({ verified: false }),
       };
       expect(() => reg.registerSource(adapter)).not.toThrow();
       expect(reg.getSource('proper').capabilities.supportsSourceCleanup).toBe(

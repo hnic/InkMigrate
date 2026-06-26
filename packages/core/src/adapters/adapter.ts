@@ -50,23 +50,42 @@ export type { SourceCapabilities };
  * §8.3 源端清理适配器接口。仅当 `SourceCapabilities.supportsSourceCleanup === true`
  * 时由来源适配器实例提供。
  */
+/** §8.3 cleanup 操作状态。 */
+export interface CleanupActionState {
+  state: 'favorited' | 'not-favorited' | 'unknown';
+}
+
+/** §8.3 cleanup 执行结果。 */
+export interface CleanupActionReceipt {
+  success: boolean;
+  wasCollected?: boolean;
+  isCollected?: boolean;
+  reason?: string;
+}
+
+/** §8.3 cleanup 验证结果。 */
+export interface CleanupVerification {
+  verified: boolean;
+  details?: string;
+}
+
 export interface SourceCleanupAdapter {
   readonly supportedActions: readonly string[];
   inspectActionState(
     ref: SourceItemRef,
     action: string,
     ctx: CleanupContext,
-  ): Promise<unknown>;
+  ): Promise<CleanupActionState>;
   executeAction(
     ref: SourceItemRef,
     action: string,
     ctx: CleanupContext,
-  ): Promise<unknown>;
+  ): Promise<CleanupActionReceipt>;
   verifyAction(
     ref: SourceItemRef,
     action: string,
     ctx: CleanupContext,
-  ): Promise<unknown>;
+  ): Promise<CleanupVerification>;
 }
 
 /** §8.2 来源适配器接口。 */
@@ -94,6 +113,8 @@ export interface TargetPlan {
   relativePath: string;
   /** §16.6 受控值，由 ARTIFACT_KINDS 枚举约束。 */
   artifactKind: ArtifactKind;
+  /** §16.4 source_content_hash（标准化正文哈希），由 target adapter 在 plan 时计算。 */
+  sourceContentHash?: string;
 }
 
 export interface TargetWriteResult {
@@ -115,6 +136,12 @@ export interface TargetAdapter {
   validateConfig(ctx: AdapterContext): Promise<ValidationResult>;
   plan(item: SourceItem, ctx: TargetContext): Promise<TargetPlan>;
   write(plan: TargetPlan, ctx: TargetContext): Promise<TargetWriteResult>;
+  /**
+   * §13.9 可选：传入上次成功写入的 expectedWrittenFileHash，
+   * 适配器据此检测目标文件是否被用户修改（用于 conflict 判定）。
+   * 如果适配器不支持，忽略此参数。
+   */
+  writeWithExpectedHash?(plan: TargetPlan, ctx: TargetContext, expectedWrittenFileHash?: string): Promise<TargetWriteResult>;
   verify(
     result: TargetWriteResult,
     ctx: VerifyContext,

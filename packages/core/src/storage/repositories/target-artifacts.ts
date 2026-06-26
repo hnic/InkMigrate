@@ -57,4 +57,19 @@ export class TargetArtifacts {
       )
       .all(migrationJobId) as TargetArtifactRow[];
   }
+
+  /** §13.9 查找 source_item 对应的最近一条 verified artifact（用于 conflict 检测）。 */
+  findBySourceItem(sourceItemId: number): TargetArtifactRow | undefined {
+    return this.db
+      .prepare(
+        `SELECT id, migration_job_id AS migrationJobId, source_item_id AS sourceItemId,
+                artifact_kind AS artifactKind, target_instance_id AS targetInstanceId,
+                relative_path AS relativePath, target_content_hash AS targetContentHash,
+                written_file_hash AS writtenFileHash, status, verified_at AS verifiedAt
+         FROM target_artifacts
+         WHERE source_item_id=? AND status='verified'
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(sourceItemId) as TargetArtifactRow | undefined;
+  }
 }

@@ -35,12 +35,19 @@ export function createObsidianTarget(): ObsidianTargetAdapter {
     validateConfig,
     plan: (item, ctx) => planNote(item, ctx, assignedPaths),
     write: writeNote,
+    writeWithExpectedHash: (plan, ctx, expectedWrittenFileHash) =>
+      writeNote(plan, ctx, expectedWrittenFileHash),
     verify: verifyNote,
   };
 }
 
 export interface ObsidianTargetAdapter extends Omit<TargetAdapter, 'write'> {
   write(
+    plan: TargetPlan,
+    ctx: TargetContext,
+    expectedWrittenFileHash?: string,
+  ): Promise<ObsidianWriteResult>;
+  writeWithExpectedHash?(
     plan: TargetPlan,
     ctx: TargetContext,
     expectedWrittenFileHash?: string,
