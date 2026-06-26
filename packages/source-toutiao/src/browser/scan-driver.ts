@@ -86,7 +86,7 @@ export async function driveScanFavorites(
         const newKeys: string[] = [];
         for (const el of allEls) {
           const link = el.querySelector(
-            'a[href*="/article/"], a[href*="/video/"], a[href*="/wenda/"], a[href*="/group/"]',
+            'a[href*="/article/"], a[href*="/video/"], a[href*="/wenda/"], a[href*="/group/"], a[href*="/w/"]',
           );
           const href = link?.getAttribute('href');
           let key: string | undefined;

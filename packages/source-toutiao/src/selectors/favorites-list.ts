@@ -34,8 +34,8 @@ export const FAVORITES_SELECTORS = {
   ],
   // 字段
   itemId: ['data-item-id'],
-  // 标题链接：真实页面 a.title；fixture .title
-  title: ['a.title', '.title', '[role="heading"]'],
+  // 标题链接：真实页面 a.title（文章）；微头条 .content a；fixture .title
+  title: ['a.title', '.content a[href]', '.title', '[role="heading"]'],
   author: ['.author', '.author-name', '.feed-card-source'],
   summary: ['.summary'],
   // 封面：真实页面 .feed-card-cover img；fixture .cover img

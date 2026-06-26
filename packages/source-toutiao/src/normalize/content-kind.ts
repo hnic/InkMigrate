@@ -27,6 +27,7 @@ export function detectContentKind(input: DetectInput): SourceContentKind {
       if (/\/article\//.test(u.pathname)) return 'article';
       if (/\/wenda\//.test(u.pathname)) return 'question-answer';
       if (/\/video\//.test(u.pathname)) return 'video';
+      if (/\/w\//.test(u.pathname)) return 'short-post'; // 微头条
     } catch {
       // ignore
     }

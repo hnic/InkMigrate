@@ -54,8 +54,8 @@ export function extractToutiaoContentId(url: string): string | undefined {
   try {
     const u = new URL(url);
     if (!u.hostname.endsWith('toutiao.com')) return undefined;
-    // /article/<id>/, /wenda/<id>/, /video/<id>/, /group/<id>/
-    const m = /\/(article|wenda|video|group)\/(\d+)/.exec(u.pathname);
+    // /article/<id>/, /wenda/<id>/, /video/<id>/, /group/<id>/, /w/<id>/（微头条）
+    const m = /\/(article|wenda|video|group|w)\/(\d+)/.exec(u.pathname);
     return m?.[2];
   } catch {
     return undefined;
