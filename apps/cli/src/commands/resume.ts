@@ -100,7 +100,7 @@ export function createResumeCommand(): Command {
         const sourceAdapter = createToutiaoSource({
           sourceInstanceId,
           profileDir,
-          headless: true,
+          headless: false, // 有头：头条反爬会拦截 headless
           ...(opts.favoritesUrl !== undefined ? { favoritesUrl: opts.favoritesUrl } : {}),
           ...(opts.maxItems !== undefined ? { maxScanItems: parseInt(opts.maxItems, 10) } : {}),
         });

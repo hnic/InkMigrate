@@ -174,7 +174,9 @@ async function handleScanStart(params: ScanStartParams | undefined): Promise<Sca
 
   const session = new ToutiaoBrowserSession({
     profileDir,
-    headless: params.headless ?? true,
+    // 默认有头：头条对 headless 浏览器做反爬检测，会返回空壳页面（实测 headless 扫出 0 条，
+    // 有头扫出全部）。仅当显式传 headless:true 时才用无头。
+    headless: params.headless ?? false,
   });
   try {
     await session.launch();
@@ -289,7 +291,8 @@ async function runMigrateJob(
     const adapterConfig: ToutiaoBrowserAdapterConfig = {
       sourceInstanceId,
       profileDir,
-      headless: true,
+      // 有头模式：头条反爬会拦截 headless（返回空壳），迁移必须用有头
+      headless: false,
     };
     const startParams = params as MigrateStartParams;
     if (startParams.favoritesUrl !== undefined) {
@@ -393,7 +396,8 @@ async function handleCleanupUnfavorite(
     const adapter = createToutiaoSource({
       sourceInstanceId: params.source,
       profileDir,
-      headless: true,
+      // 有头模式：头条反爬会拦截 headless（收藏按钮状态返回异常），清理必须用有头
+      headless: false,
     });
     await adapter.prepare({ config: {}, workspaceDir: params.stateDir });
 

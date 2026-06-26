@@ -143,7 +143,7 @@ export function createCleanupCommand(): Command {
         const adapterConfig: ToutiaoBrowserAdapterConfig = {
           sourceInstanceId: opts.source,
           profileDir: pPath,
-          headless: true,
+          headless: false, // 有头：头条反爬会拦截 headless
         };
         const adapter = createToutiaoSource(adapterConfig);
 
