@@ -71,7 +71,8 @@ export function createCleanupCommand(): Command {
     .description('打开浏览器，逐条取消已迁移条目的收藏')
     .requiredOption('--source <id>', '来源实例 ID')
     .requiredOption('--state-dir <path>', 'workspace stateDir')
-    .option('--max-items <n>', '最多取消收藏的条目数（默认全部）')
+    .option('--max-items <n>', '单次最多处理条目数（默认 200，防风控；可调高，自担风险）')
+    .option('--interval-ms <ms>', '条目间基准间隔毫秒（默认 2000，叠加 ±40% 抖动）')
     .option(
       '--force',
       '跳过终端二次确认（默认必须逐字输入确认短语）',
@@ -81,6 +82,7 @@ export function createCleanupCommand(): Command {
       source: string;
       stateDir: string;
       maxItems?: string;
+      intervalMs?: string;
       force?: boolean;
     }) => {
       const dbPath = join(opts.stateDir, 'inkmigrate.sqlite');
@@ -102,7 +104,11 @@ export function createCleanupCommand(): Command {
         }
 
         console.log(`找到 ${candidateCount} 条已迁移条目（已成功取消的会自动跳过）。`);
-        console.log('即将逐条打开文章详情页并取消收藏。');
+        const effectiveMax = opts.maxItems ? parseInt(opts.maxItems, 10) : 200;
+        if (candidateCount > effectiveMax) {
+          console.log(`⚠️ 防风控：本次将处理前 ${effectiveMax} 条，剩余可分多次运行（已成功项自动跳过）。`);
+        }
+        console.log('即将逐条打开文章详情页并取消收藏（条目间约 2 秒间隔）。');
         console.log('');
 
         // §14.6 危险操作二次确认：未传 --force 时必须逐字输入确认短语。
@@ -155,6 +161,7 @@ export function createCleanupCommand(): Command {
 
         try {
           const limit = opts.maxItems ? parseInt(opts.maxItems, 10) : undefined;
+          const intervalMs = opts.intervalMs ? parseInt(opts.intervalMs, 10) : undefined;
           const result = await runCleanupUnfavorite({
             db,
             sourceAdapter: adapter,
@@ -162,6 +169,7 @@ export function createCleanupCommand(): Command {
             migrationJobId,
             workspaceDir: opts.stateDir,
             ...(limit !== undefined ? { maxItems: limit } : {}),
+            ...(intervalMs !== undefined ? { intervalMs } : {}),
             isCancelled: () => cancelled,
             onProgress: (p) =>
               console.log(`[${p.current}/${p.total}] ${p.currentItem ?? ''}`),

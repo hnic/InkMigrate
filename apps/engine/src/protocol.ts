@@ -129,12 +129,16 @@ export interface CleanupUnfavoriteParams {
   source: string;
   stateDir: string;
   maxItems?: number;
+  /** 条目间基准间隔毫秒（叠加 ±40% 抖动，防风控）。留空=默认 2000。 */
+  intervalMs?: number;
 }
 
 export interface CleanupResult {
   successCount: number;
   skipCount: number;
   failCount: number;
+  /** 状态判定失败（按钮找不到等）的条目数。 */
+  unknownCount: number;
 }
 
 export interface StatusQueryParams {

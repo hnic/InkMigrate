@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { openDatabase, type DB, type SourceAdapter, type SourceItemRef, type CleanupActionReceipt } from '@inkmigrate/core';
 import { runCleanupUnfavorite } from '../../src/cleanup/cleanup-orchestrator.js';
 
@@ -182,6 +182,98 @@ describe('runCleanupUnfavorite', () => {
     });
 
     expect(callCount).toBe(2); // 第 2 条处理完后，下轮检测到取消，第 3 条不处理
+    db.close();
+  });
+
+  it('节奏控制：条目间按 intervalMs±抖动等待（注入 sleepFn 断言不真等）', async () => {
+    const db = seedDb(3);
+    const adapter = mockAdapter([
+      { success: true, wasCollected: true, isCollected: false },
+      { success: true, wasCollected: true, isCollected: false },
+      { success: true, wasCollected: true, isCollected: false },
+    ]);
+    const sleeps: number[] = [];
+    const sleepSpy = async (ms: number) => { sleeps.push(ms); };
+
+    await runCleanupUnfavorite({
+      db,
+      sourceAdapter: adapter,
+      sourceInstanceId: SOURCE_INSTANCE_ID,
+      migrationJobId: MIGRATION_JOB_ID,
+      workspaceDir: '/tmp/ws',
+      intervalMs: 2000,
+      sleepFn: sleepSpy,
+    });
+
+    // 3 条候选 → 条目间等待 2 次（最后一条后不等待）
+    expect(sleeps.length).toBe(2);
+    // 每次 sleep 落在 2000×[0.6, 1.4] = [1200, 2800] 区间
+    for (const s of sleeps) {
+      expect(s).toBeGreaterThanOrEqual(1200);
+      expect(s).toBeLessThanOrEqual(2800);
+    }
+
+    db.close();
+  });
+
+  it('默认上限：不传 maxItems 且候选 >200 时只处理 200 条', async () => {
+    const db = seedDb(205);
+    const adapter = mockAdapter(
+      Array.from({ length: 205 }, () => ({ success: true, wasCollected: true, isCollected: false })),
+    );
+    const sleepSpy = async () => {}; // 不真等
+
+    const result = await runCleanupUnfavorite({
+      db,
+      sourceAdapter: adapter,
+      sourceInstanceId: SOURCE_INSTANCE_ID,
+      migrationJobId: MIGRATION_JOB_ID,
+      workspaceDir: '/tmp/ws',
+      sleepFn: sleepSpy,
+      // 故意不传 maxItems，验证默认 200
+    });
+
+    expect(result.successCount).toBe(200); // 只处理 200，剩余 5 条留待下次
+
+    db.close();
+  });
+
+  it('取消时跳过条目间等待（不等满）', async () => {
+    const db = seedDb(3);
+    let callCount = 0;
+    const adapter = mockAdapter([
+      { success: true, wasCollected: true, isCollected: false },
+      { success: true, wasCollected: true, isCollected: false },
+      { success: true, wasCollected: true, isCollected: false },
+    ]);
+    const wrapped: SourceAdapter = {
+      ...adapter,
+      cleanup: {
+        supportedActions: ['unfavorite'],
+        executeAction: async (ref: SourceItemRef) => {
+          const r = await adapter.cleanup!.executeAction(ref);
+          callCount++;
+          return r;
+        },
+      },
+    } as unknown as SourceAdapter;
+    const sleepSpy = vi.fn(async () => {});
+
+    await runCleanupUnfavorite({
+      db,
+      sourceAdapter: wrapped,
+      sourceInstanceId: SOURCE_INSTANCE_ID,
+      migrationJobId: MIGRATION_JOB_ID,
+      workspaceDir: '/tmp/ws',
+      intervalMs: 60000, // 故意大，若取消未跳过等待会拖慢测试
+      sleepFn: sleepSpy,
+      isCancelled: () => callCount >= 2,
+    });
+
+    // 第 1 条处理完（callCount=1）→ isCancelled 仍 false → 第 1→2 条之间等待 1 次
+    // 第 2 条处理完（callCount=2）→ isCancelled 转 true → 第 2→3 条之间的等待被跳过
+    expect(sleepSpy).toHaveBeenCalledTimes(1);
+
     db.close();
   });
 });

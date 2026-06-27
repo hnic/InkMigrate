@@ -516,6 +516,7 @@ async function handleCleanupUnfavorite(
         workspaceDir: params.stateDir,
         isCancelled: isCancelledFlag,
         ...(params.maxItems !== undefined ? { maxItems: params.maxItems } : {}),
+        ...(params.intervalMs !== undefined ? { intervalMs: params.intervalMs } : {}),
         onProgress: (p) => sendNotification('progress', {
           phase: 'cleanup',
           current: p.current,
@@ -528,6 +529,7 @@ async function handleCleanupUnfavorite(
         successCount: result.successCount,
         skipCount: result.skippedCount,
         failCount: result.failedCount,
+        unknownCount: result.unknownCount,
         ...(result.jobId ? { jobId: result.jobId } : {}),
       };
     } finally {

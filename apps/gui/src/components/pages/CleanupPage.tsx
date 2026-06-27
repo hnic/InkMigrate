@@ -16,8 +16,9 @@ interface Props {
 
 export function CleanupPage({ settings, update, rpcCall, addLog, busy, activePhase, cancel }: Props) {
   const cleaning = activePhase === 'cleanup';
-  const [maxItems, setMaxItems] = useState('');
-  const [result, setResult] = useState<{ successCount: number; skipCount: number; failCount: number } | null>(null);
+  const [maxItems, setMaxItems] = useState('200');
+  const [intervalMs, setIntervalMs] = useState('2000');
+  const [result, setResult] = useState<{ successCount: number; skipCount: number; failCount: number; unknownCount?: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
 
@@ -31,12 +32,13 @@ export function CleanupPage({ settings, update, rpcCall, addLog, busy, activePha
         stateDir: settings.stateDir,
       };
       if (maxItems) params.maxItems = parseInt(maxItems, 10);
+      if (intervalMs) params.intervalMs = parseInt(intervalMs, 10);
 
       const res = await rpcCall('cleanup.unfavorite', params) as {
-        successCount: number; skipCount: number; failCount: number;
+        successCount: number; skipCount: number; failCount: number; unknownCount?: number;
       };
       setResult(res);
-      addLog('info', `清理完成：成功 ${res.successCount}, 跳过 ${res.skipCount}, 失败 ${res.failCount}`);
+      addLog('info', `清理完成：成功 ${res.successCount}, 跳过 ${res.skipCount}, 失败 ${res.failCount}${res.unknownCount ? `, 未知 ${res.unknownCount}` : ''}`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setError(msg);
@@ -71,18 +73,31 @@ export function CleanupPage({ settings, update, rpcCall, addLog, busy, activePha
           fontSize: '13px',
         }}>
           ⚠️ 此操作会逐条打开文章详情页并取消收藏。<br/>
-          已迁移到 Obsidian 的内容不会丢失，但头条上的收藏会被移除。
+          已迁移到 Obsidian 的内容不会丢失，但头条上的收藏会被移除。<br/>
+          为防触发风控，默认每次处理 200 条、条目间隔约 2 秒；可分多次运行（已成功项自动跳过）。
         </div>
 
-        <div>
-          <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>最多处理条目数（留空=全部已迁移）</label>
-          <input
-            type="number"
-            value={maxItems}
-            onChange={(e) => setMaxItems(e.target.value)}
-            placeholder="例：10"
-            style={{ width: '120px' }}
-          />
+        <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
+          <div>
+            <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>单次处理条目数（默认 200，防风控）</label>
+            <input
+              type="number"
+              value={maxItems}
+              onChange={(e) => setMaxItems(e.target.value)}
+              placeholder="200"
+              style={{ width: '120px' }}
+            />
+          </div>
+          <div>
+            <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>条目间隔毫秒（默认 2000，±40% 抖动）</label>
+            <input
+              type="number"
+              value={intervalMs}
+              onChange={(e) => setIntervalMs(e.target.value)}
+              placeholder="2000"
+              style={{ width: '120px' }}
+            />
+          </div>
         </div>
 
         {!confirming ? (
@@ -142,6 +157,12 @@ export function CleanupPage({ settings, update, rpcCall, addLog, busy, activePha
               <div style={{ fontSize: '12px', color: 'var(--text-dim)' }}>失败</div>
               <div style={{ fontWeight: 600, color: 'var(--error)' }}>{result.failCount}</div>
             </div>
+            {result.unknownCount !== undefined && result.unknownCount > 0 && (
+              <div>
+                <div style={{ fontSize: '12px', color: 'var(--text-dim)' }}>未知（状态判定失败）</div>
+                <div style={{ fontWeight: 600, color: 'var(--text-dim)' }}>{result.unknownCount}</div>
+              </div>
+            )}
           </div>
         )}
       </div>
