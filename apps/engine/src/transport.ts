@@ -51,8 +51,20 @@ export function logToStderr(level: string, message: string): void {
   process.stderr.write(`[${level}] ${message}\n`);
 }
 
+/** stdout 管道是否已断开（宿主关闭了读端）。断开后静默丢弃写入，避免 EPIPE 崩溃。 */
+let stdoutBroken = false;
+
 function writeLine(msg: unknown): void {
-  process.stdout.write(JSON.stringify(msg) + '\n');
+  if (stdoutBroken) return; // 管道已断，静默丢弃
+  try {
+    process.stdout.write(JSON.stringify(msg) + '\n');
+  } catch {
+    // 写入失败（EPIPE 等）——宿主已断开，标记并静默，后续写入全部丢弃
+    if (!stdoutBroken) {
+      stdoutBroken = true;
+      logToStderr('warn', 'stdout 管道已断开（宿主可能已关闭），后续通知将被丢弃');
+    }
+  }
 }
 
 /**
@@ -64,6 +76,17 @@ export function startStdinLoop(): void {
     input: process.stdin,
     output: undefined,
     terminal: false,
+  });
+
+  // 宿主关闭 stdout 读端时（如 Tauri 应用退出），避免 EPIPE 杀进程：
+  // 监听 'error' 事件而非让 Node 默认崩溃。writeLine 内的 try/catch 也会兜底。
+  process.stdout.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EPIPE') {
+      stdoutBroken = true;
+      logToStderr('warn', 'stdout EPIPE（宿主已断开），后续写入将被丢弃');
+    } else {
+      throw err; // 其他错误不应吞掉
+    }
   });
 
   rl.on('line', (line: string) => {
