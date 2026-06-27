@@ -98,6 +98,25 @@ export interface MigrateResumeParams {
   maxItems?: number;
 }
 
+/** 查询某 source 下最近一个可续跑的迁移 Job。 */
+export interface MigrateResumableParams {
+  source: string;
+  stateDir: string;
+}
+
+/** 可续跑 Job 的摘要。`job` 为 null 表示没有可续跑的 Job。 */
+export interface MigrateResumableResult {
+  job: string | null;
+  /** 该 Job 的终态状态（interrupted / paused）。 */
+  status?: string;
+  /** 该 source 实例下的 source_items 总条目数。 */
+  total?: number;
+  /** 已 verified 的条目数（续跑会跳过这些）。 */
+  verified?: number;
+  /** 原 Job 绑定的 target 实例 ID，便于前端回显。 */
+  targetInstanceId?: string;
+}
+
 export interface MigrateResult {
   status: string;
   scanCount: number;
@@ -164,6 +183,8 @@ export interface RpcMethodMap {
   'scan.start': { params: ScanStartParams; result: ScanStartResult };
   'migrate.start': { params: MigrateStartParams; result: MigrateResult };
   'migrate.resume': { params: MigrateResumeParams; result: MigrateResult };
+  /** 查询某 source 下最近一个可续跑 Job（不启动任务）。 */
+  'migrate.resumable': { params: MigrateResumableParams; result: MigrateResumableResult };
   'cleanup.unfavorite': { params: CleanupUnfavoriteParams; result: CleanupResult };
   'status.query': { params: StatusQueryParams; result: StatusQueryResult };
   /** 终止当前正在运行的长任务（scan/migrate/cleanup）。幂等。 */

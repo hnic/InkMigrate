@@ -32,6 +32,15 @@ export interface LogEntry {
   timestamp: number;
 }
 
+/** 可续跑 Job 摘要（migrate.resumable 返回）。job 为 null 表示没有可续跑的 Job。 */
+export interface ResumableJob {
+  job: string | null;
+  status?: string;
+  total?: number;
+  verified?: number;
+  targetInstanceId?: string;
+}
+
 export type PageId = 'login' | 'scan' | 'migrate' | 'cleanup' | 'report' | 'settings';
 
 export type OperationState = 'idle' | 'loading' | 'success' | 'failed';

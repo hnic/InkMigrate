@@ -1,5 +1,6 @@
-import { useState } from 'react';
-import type { AppSettings } from '../../lib/types.js';
+import { useState, useEffect, useCallback } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import type { AppSettings, ResumableJob } from '../../lib/types.js';
 import { ConfigPrompt } from '../ConfigPrompt.js';
 
 interface Props {
@@ -28,7 +29,31 @@ export function MigratePage({ settings, update, rpcCall, addLog, busy, activePha
   const [interval, setIntervalMs] = useState('1500');
   const [result, setResult] = useState<MigrateResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [resumeJobId, setResumeJobId] = useState('');
+  const [resumable, setResumable] = useState<ResumableJob>({ job: null });
+
+  /** 静默查询可续跑 Job：直接走 Tauri invoke，不翻 busy，避免误禁用"开始迁移"。
+   *  模式同 useLoginStatus——查询类 RPC 不应进入任务 busy 生命周期。 */
+  const refreshResumable = useCallback(async () => {
+    if (!settings.stateDir || !settings.source) {
+      setResumable({ job: null });
+      return;
+    }
+    try {
+      const res = (await invoke('send_rpc', {
+        method: 'migrate.resumable',
+        params: { source: settings.source, stateDir: settings.stateDir },
+      })) as ResumableJob;
+      setResumable(res);
+    } catch {
+      // 查询失败不报错打扰用户，静默置空
+      setResumable({ job: null });
+    }
+  }, [settings.stateDir, settings.source]);
+
+  // 进入页面 / 关键配置变化时自动查询可续跑 Job
+  useEffect(() => {
+    void refreshResumable();
+  }, [refreshResumable]);
 
   async function handleMigrate() {
     setResult(null);
@@ -47,6 +72,8 @@ export function MigratePage({ settings, update, rpcCall, addLog, busy, activePha
       const res = await rpcCall('migrate.start', params) as MigrateResult;
       setResult(res);
       addLog(res.reconciliationOk ? 'info' : 'warn', `迁移完成：${res.scanCount} 条`);
+      // 迁移结束（无论完成/中断/失败）后刷新可续跑状态
+      void refreshResumable();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setError(msg);
@@ -55,11 +82,12 @@ export function MigratePage({ settings, update, rpcCall, addLog, busy, activePha
   }
 
   async function handleResume() {
+    if (!resumable.job) return;
     setResult(null);
     setError(null);
     try {
       const params: Record<string, unknown> = {
-        job: resumeJobId,
+        job: resumable.job,
         stateDir: settings.stateDir,
         vaultPath: settings.vaultPath,
       };
@@ -69,6 +97,7 @@ export function MigratePage({ settings, update, rpcCall, addLog, busy, activePha
       const res = await rpcCall('migrate.resume', params) as MigrateResult;
       setResult(res);
       addLog(res.reconciliationOk ? 'info' : 'warn', `续跑完成：${res.scanCount} 条`);
+      void refreshResumable();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setError(msg);
@@ -132,7 +161,7 @@ export function MigratePage({ settings, update, rpcCall, addLog, busy, activePha
           </button>
         </div>
 
-        {/* 断点续跑 */}
+        {/* 断点续跑：自动查询可续跑 Job，无需手填 ID */}
         <div style={{
           marginTop: '8px',
           paddingTop: '12px',
@@ -141,20 +170,26 @@ export function MigratePage({ settings, update, rpcCall, addLog, busy, activePha
           <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>
             断点续跑（中断后继续，自动跳过已完成的条目）
           </label>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            <input
-              value={resumeJobId}
-              onChange={(e) => setResumeJobId(e.target.value)}
-              placeholder="中断的 Job ID（如 mig-1782417170231）"
-              style={{ flex: 1, fontFamily: 'monospace', fontSize: '12px' }}
-            />
-            <button
-              onClick={handleResume}
-              disabled={busy || !resumeJobId || !settings.stateDir || !settings.vaultPath}
-            >
-              {migrating ? '续跑中...' : busy ? '等待...' : '继续迁移'}
-            </button>
-          </div>
+          {resumable.job ? (
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+              <div style={{ fontSize: '12px', color: 'var(--text-dim)' }}>
+                {resumable.status === 'paused' ? '已暂停' : '上次中断'}
+                {resumable.total !== undefined && resumable.verified !== undefined && (
+                  <>，已完成 {resumable.verified}/{resumable.total}</>
+                )}
+              </div>
+              <button
+                onClick={handleResume}
+                disabled={busy || !settings.stateDir || !settings.vaultPath}
+              >
+                {migrating ? '续跑中...' : busy ? '等待...' : '继续迁移'}
+              </button>
+            </div>
+          ) : (
+            <div style={{ fontSize: '12px', color: 'var(--text-dim)' }}>
+              没有可续跑的 Job（首次迁移或上次已正常完成）
+            </div>
+          )}
         </div>
 
         {settings.stateDir && settings.vaultPath && settings.favoritesUrl && !settings.loggedIn && (
