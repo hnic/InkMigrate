@@ -46,6 +46,11 @@ export interface JobRunnerInput {
    * 用于 GUI 的"终止"按钮（cancel.cancel RPC 设置进程级 flag）。
    */
   isCancelled?: () => boolean;
+  /**
+   * 日志回调（可选）。用于把 job-runner 内部的诊断信息（限流、条目失败、降级等）
+   * 转发到 GUI 日志面板。不传时回退到 console.warn（CLI 场景）。
+   */
+  onLog?: (level: 'info' | 'warn' | 'error', message: string) => void;
 }
 
 /** 迁移进度信息，由 job-runner 在关键节点推送给调用方。 */
@@ -101,6 +106,16 @@ export async function runMigrationJob(
   const targetArtifacts = new TargetArtifacts(i.db);
   const attempts = new MigrationAttempts(i.db);
   const now = () => new Date().toISOString();
+
+  // 日志：优先走 onLog 回调（GUI 日志面板可见），无回调时回退 console.warn（CLI 场景）
+  const log = (level: 'info' | 'warn' | 'error', message: string): void => {
+    const prefixed = `[job ${i.jobId}] ${message}`;
+    if (i.onLog !== undefined) {
+      i.onLog(level, prefixed);
+    } else {
+      console.warn(prefixed);
+    }
+  };
 
   // §18.4 获取任务锁
   const lock = acquireLock({
@@ -229,11 +244,12 @@ export async function runMigrationJob(
         targetInstanceId: i.targetInstanceId,
         workspaceDir: i.workspaceDir,
         retryPolicy: DEFAULT_RETRY_POLICY,
+        ...(i.onLog !== undefined ? { onLog: i.onLog } : {}),
       }).catch((e): ItemFinalState => {
         // §18.2 限流检测：processOneItem 抛出 __rateLimited 时 Job 进入 paused
         const rlErr = e as { __rateLimited?: boolean; httpStatus?: number };
         if (rlErr.__rateLimited === true) {
-          console.warn(`[job ${i.jobId}] 限流检测 (${rlErr.httpStatus})，Job 进入 paused`);
+          log('warn', `限流检测 (${rlErr.httpStatus})，Job 进入 paused`);
           throw e; // 向上传播到 runMigrationJob 的 try 块
         }
         // 其他错误：processOneItem 内部 catch 已返回 ItemFinalState，不会到这里
@@ -449,12 +465,19 @@ interface ProcessOneItemInput {
   targetInstanceId: string;
   workspaceDir: string;
   retryPolicy: import('./retry.js').RetryPolicy;
+  /** 日志回调（可选），把条目级诊断（失败/降级/冲突）转发到调用方。 */
+  onLog?: (level: 'info' | 'warn' | 'error', message: string) => void;
 }
 
 async function processOneItem(
   i: ProcessOneItemInput,
 ): Promise<ItemFinalState> {
   const now = () => new Date().toISOString();
+  const log = (level: 'info' | 'warn' | 'error', message: string): void => {
+    const prefixed = `[job ${i.jobId}] ${message}`;
+    if (i.onLog !== undefined) i.onLog(level, prefixed);
+    else console.warn(prefixed);
+  };
   const existingItem = i.sourceItemsRepo.findByFingerprint(
     i.sourceInstanceId,
     i.ref.fingerprint,
@@ -555,6 +578,10 @@ async function processOneItem(
     // §16.7 + §16.6 + §11.5 三步写入封装在事务中，确保幂等原子性
     const finalState: ItemFinalState =
       item.quality === 'full' ? 'verified' : 'degraded';
+    if (finalState === 'degraded') {
+      // 内容质量降级：用户应知道部分内容不完整（如图片缺失、正文残缺）
+      log('warn', `内容质量降级（非完整提取）：${i.ref.title?.substring(0, 40) ?? '(无标题)'}`);
+    }
 
     const commitTxn = i.db.transaction(() => {
       // 1. 记录成功的 migration_attempt（createItem 返回 id）
@@ -626,10 +653,8 @@ async function processOneItem(
     const errMsg = err.message?.substring(0, 200) ?? 'unknown error';
     const errCode = err.code ?? 'UNKNOWN';
 
-    // 诊断日志
-    console.warn(
-      `[job ${i.jobId}] 条目处理失败: ${errCode} - ${errMsg}`,
-    );
+    // 诊断日志：条目失败（限流/降级/冲突等），转发到调用方日志面板
+    log('warn', `条目处理失败: ${errCode} - ${errMsg}`);
 
     // 持久化失败的 migration_attempt（完成生命周期闭环）
     if (existingItem?.id !== undefined) {

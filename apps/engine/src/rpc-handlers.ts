@@ -213,10 +213,21 @@ async function handleScanStart(params: ScanStartParams | undefined): Promise<Sca
 
     await page.close();
 
-    sendNotification('log', {
-      level: 'info',
-      message: `扫描完成：${scanResult.uniqueItems} 条`,
-    });
+    // 扫描完成日志：区分终止/空结果/正常三种情况（盲区二+四）
+    if (scanResult.terminationReason === 'cancelled') {
+      sendNotification('log', { level: 'warn', message: `扫描已终止，共扫到 ${scanResult.uniqueItems} 条` });
+    } else if (scanResult.uniqueItems === 0) {
+      // 0 条：提示可能原因（反爬/未登录/URL 失效），而非静默"完成 0 条"
+      sendNotification('log', {
+        level: 'warn',
+        message: `扫描完成：0 条。可能原因：①收藏夹确实为空 ②头条反爬(headless 会返回空壳，需有头模式) ③登录态失效 ④收藏页 URL(token)已过期。请检查浏览器窗口是否正常打开收藏页。`,
+      });
+    } else {
+      sendNotification('log', {
+        level: 'info',
+        message: `扫描完成：${scanResult.uniqueItems} 条`,
+      });
+    }
 
     return {
       uniqueItems: scanResult.uniqueItems,
@@ -360,6 +371,7 @@ async function runMigrateJob(
           ...(progress.counts !== undefined ? { counts: progress.counts } : {}),
         });
       },
+      onLog: (level, message) => sendNotification('log', { level, message }),
     });
 
     // 完成时的状态日志
