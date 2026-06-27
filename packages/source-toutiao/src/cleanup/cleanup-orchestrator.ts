@@ -65,6 +65,14 @@ const REASON_SAMPLE_LIMIT = 3;
 const DEFAULT_CLEANUP_MAX_ITEMS = 200;
 const DEFAULT_CLEANUP_INTERVAL_MS = 2000;
 
+/**
+ * 失败后原地等待的时长（毫秒）。出现取消收藏失败（如风控限流）时，
+ * 不连续处理后续条目，原地等待给风控冷却时间，再重试当前条。
+ * 等待期间分段（每 30s）检查 isCancelled，支持中途终止。
+ */
+const FAILURE_BACKOFF_MS = 10 * 60 * 1000;
+const BACKOFF_POLL_INTERVAL_MS = 30_000;
+
 /** 默认 sleep：真实定时器。测试可注入 spy 断言节奏而不真等。 */
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -94,7 +102,7 @@ export async function runCleanupUnfavorite(
     .prepare(
       `SELECT id, canonical_url, title, external_id, content_kind, fingerprint, discovered_at, source_position
        FROM source_items
-       WHERE source_instance_id = ? AND status = 'verified'
+       WHERE source_instance_id = ? AND status = 'verified' AND content_kind = 'article'
        ORDER BY source_position ASC`,
     )
     .all(sourceInstanceId) as Array<{
@@ -195,79 +203,124 @@ export async function runCleanupUnfavorite(
     let lastErrorCode: string | null = null;
     let lastErrorMessage: string | null = null;
 
-    try {
-      // executeAction 返回完整 receipt：wasCollected(操作前)/isCollected(操作后)/reason/success
-      const receipt = await cleanup.executeAction(ref, 'unfavorite', ctx);
-      // 由 receipt.wasCollected 反推操作前状态（替代原独立的 inspectActionState）
-      precheckStatus = receipt.wasCollected ? 'favorited' : 'not_favorited';
+    /** 单次执行 + 四类映射。返回是否为"真正失败"（需触发等待重试）。 */
+    const attemptOnce = async (): Promise<{ hardFailed: boolean }> => {
+      try {
+        const receipt = await cleanup.executeAction(ref, 'unfavorite', ctx);
+        precheckStatus = receipt.wasCollected ? 'favorited' : 'not_favorited';
 
-      if (receipt.success && receipt.isCollected === false) {
-        // 成功取消（含本来就未收藏：wasCollected=false 时 driveUnfavorite 返回 success）
-        if (receipt.wasCollected) {
-          actionStatus = ACTION_STATUS_UNFAVORITED;
-          successCount++;
+        if (receipt.success && receipt.isCollected === false) {
+          // 成功取消（含本来就未收藏）
+          if (receipt.wasCollected) {
+            actionStatus = ACTION_STATUS_UNFAVORITED;
+            successCount++;
+          } else {
+            actionStatus = 'already_unfavorited';
+            skippedCount++;
+          }
+          return { hardFailed: false };
+        } else if (receipt.reason === 'collect button not found' || receipt.reason === 'no canonicalUrl') {
+          // 状态判定失败（按钮未渲染/找不到）→ 未知。页面问题，重试无效，不触发等待。
+          actionStatus = 'state_unknown';
+          unknownCount++;
+          lastErrorCode = receipt.reason;
+          lastErrorMessage = receipt.reason;
+          return { hardFailed: false };
         } else {
-          // 本来就未收藏 → 跳过
-          actionStatus = 'already_unfavorited';
-          skippedCount++;
+          // 点击后仍收藏（含 still collected，风控信号）或其它失败 → 真正失败，触发等待重试
+          actionStatus = 'verification_failed';
+          failedCount++;
+          const reason = receipt.reason ?? 'still collected after click';
+          lastErrorCode = reason;
+          lastErrorMessage = reason;
+          recordFailure(failReasons, reason, row.title, opts.onLog);
+          return { hardFailed: true };
         }
-      } else if (receipt.reason === 'collect button not found' || receipt.reason === 'no canonicalUrl') {
-        // 状态判定失败（按钮未渲染/找不到）→ 未知
-        actionStatus = 'state_unknown';
-        unknownCount++;
-        lastErrorCode = receipt.reason;
-        lastErrorMessage = receipt.reason;
-      } else {
-        // 点击后仍收藏（含 still collected）或其它失败 → 失败
-        actionStatus = 'verification_failed';
+      } catch (e) {
+        actionStatus = 'permanent_failed';
         failedCount++;
-        const reason = receipt.reason ?? 'still collected after click';
+        const reason = `exception: ${e instanceof Error ? e.message : String(e)}`;
         lastErrorCode = reason;
         lastErrorMessage = reason;
         recordFailure(failReasons, reason, row.title, opts.onLog);
+        return { hardFailed: true };
       }
-    } catch (e) {
-      actionStatus = 'permanent_failed';
-      failedCount++;
-      const reason = `exception: ${e instanceof Error ? e.message : String(e)}`;
-      lastErrorCode = reason;
-      lastErrorMessage = reason;
-      recordFailure(failReasons, reason, row.title, opts.onLog);
+    };
+
+    // d. 落库（UPSERT 支持断点续跑）。抽成函数：重试终止分支也需先落库当前条再 break。
+    const persistItem = () => {
+      const actionFinishedAt = now();
+      itemsRepo.upsert({
+        jobId,
+        sourceItemId: row.id,
+        precheckStatus,
+        preActionState: precheckStatus,
+        actionStatus,
+        postActionState: actionStatus,
+        actionStartedAt,
+        actionFinishedAt,
+        verifiedAt: actionStatus === ACTION_STATUS_UNFAVORITED ? actionFinishedAt : null,
+        lastErrorCode,
+        lastErrorMessage,
+        createdAt: ts,
+        updatedAt: actionFinishedAt,
+      });
+      // 审计日志（cleanup_item_id 由 UPSERT 产生，回查）
+      const itemRow = itemsRepo.listByJob(jobId).find((it) => it.sourceItemId === row.id);
+      if (itemRow !== undefined) {
+        attemptsRepo.create({
+          cleanupItemId: itemRow.id,
+          attemptNo: 1,
+          preActionState: precheckStatus,
+          actionResult: actionStatus,
+          postActionState: actionStatus,
+          startedAt: actionStartedAt,
+          finishedAt: actionFinishedAt,
+          errorCode: lastErrorCode,
+          errorMessage: lastErrorMessage,
+          createdAt: actionFinishedAt,
+        });
+      }
+    };
+
+    let { hardFailed } = await attemptOnce();
+
+    // §18.1 失败原地等待 + 重试：出现真正失败（风控等）时，不连续处理后续，
+    // 原地等待冷却后再重试当前条；重试仍失败则终止任务（避免持续风控期卡死）。
+    if (hardFailed && !opts.isCancelled?.()) {
+      opts.onLog?.({
+        level: 'warn',
+        message: `取消收藏失败（${lastErrorMessage}），原地等待 ${Math.round(FAILURE_BACKOFF_MS / 60000)} 分钟后重试当前条...`,
+      });
+      // 分段等待，每段检查取消，支持中途终止。用固定段数（而非 Date.now 截止），
+      // 使注入 sleepFn 的测试不依赖真实时间流逝即可跑完等待。
+      const segments = Math.ceil(FAILURE_BACKOFF_MS / BACKOFF_POLL_INTERVAL_MS);
+      for (let s = 0; s < segments; s++) {
+        if (opts.isCancelled?.()) break;
+        await sleep(BACKOFF_POLL_INTERVAL_MS);
+      }
+      // 未被取消则重试当前条一次
+      if (!opts.isCancelled?.()) {
+        // 重试前重置本次计数的临时状态（failedCount 已在 attemptOnce 内 +1，重试成功需回退）
+        if (actionStatus === 'verification_failed' || actionStatus === 'permanent_failed') {
+          failedCount--;
+        }
+        const retry = await attemptOnce();
+        if (retry.hardFailed) {
+          // 重试仍失败 → 终止整个任务（落库已处理项，未处理的留到下次）
+          opts.onLog?.({
+            level: 'error',
+            message: `重试仍失败，终止任务：已处理 ${i + 1}/${rows.length} 条（未处理的留待下次运行）`,
+          });
+          // 先落库当前失败条目，再跳出
+          persistItem();
+          break;
+        }
+      }
     }
 
-    const actionFinishedAt = now();
-    // d. 落库（UPSERT 支持断点续跑）
-    itemsRepo.upsert({
-      jobId,
-      sourceItemId: row.id,
-      precheckStatus,
-      preActionState: precheckStatus,
-      actionStatus,
-      postActionState: actionStatus,
-      actionStartedAt,
-      actionFinishedAt,
-      verifiedAt: actionStatus === ACTION_STATUS_UNFAVORITED ? actionFinishedAt : null,
-      lastErrorCode,
-      lastErrorMessage,
-      createdAt: ts,
-      updatedAt: actionFinishedAt,
-    });
-    // 审计日志（cleanup_item_id 由 UPSERT 产生，回查）
-    const itemRow = itemsRepo.listByJob(jobId).find((it) => it.sourceItemId === row.id);
-    if (itemRow !== undefined) {
-      attemptsRepo.create({
-        cleanupItemId: itemRow.id,
-        attemptNo: 1,
-        preActionState: precheckStatus,
-        actionResult: actionStatus,
-        postActionState: actionStatus,
-        startedAt: actionStartedAt,
-        finishedAt: actionFinishedAt,
-        errorCode: lastErrorCode,
-        errorMessage: lastErrorMessage,
-        createdAt: actionFinishedAt,
-      });
-    }
+    // d. 落库（UPSERT 支持断点续跑）。
+    persistItem();
 
     // §18.1 条目间等待（防风控）：非最后一条、且未被取消时，按 intervalMs±40% 抖动等待。
     // 取消时跳过等待，让终止尽快生效。

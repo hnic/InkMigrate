@@ -108,8 +108,9 @@ export function createCleanupCommand(): Command {
         if (candidateCount > effectiveMax) {
           console.log(`⚠️ 防风控：本次将处理前 ${effectiveMax} 条，剩余可分多次运行（已成功项自动跳过）。`);
         }
-        console.log('即将逐条打开文章详情页并取消收藏。');
+        console.log('即将逐条打开文章详情页并取消收藏（仅普通文章）。');
         console.log('为防风控，每条会模拟人类阅读（滚动浏览、随机停留）后再取消，单条约 15-30 秒。');
+        console.log('出现取消失败（疑似风控）时，原地等待 10 分钟后重试当前条；重试仍失败则停止任务。');
         console.log('');
 
         // §14.6 危险操作二次确认：未传 --force 时必须逐字输入确认短语。

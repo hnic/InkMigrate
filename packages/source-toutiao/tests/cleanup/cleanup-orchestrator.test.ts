@@ -93,11 +93,13 @@ describe('runCleanupUnfavorite', () => {
       sourceInstanceId: SOURCE_INSTANCE_ID,
       migrationJobId: MIGRATION_JOB_ID,
       workspaceDir: '/tmp/ws',
+      sleepFn: async () => {}, // 失败会触发 backoff 等待，注入避免真等 10 分钟
     });
 
     expect(result.successCount).toBe(1);
     expect(result.skippedCount).toBe(1);
     expect(result.unknownCount).toBe(1);
+    // 失败那条：首次 failed+1 → backoff → 重试（receipt 耗尽仍失败）回退后 +1 = 1
     expect(result.failedCount).toBe(1);
 
     db.close();
@@ -273,6 +275,106 @@ describe('runCleanupUnfavorite', () => {
     // 第 1 条处理完（callCount=1）→ isCancelled 仍 false → 第 1→2 条之间等待 1 次
     // 第 2 条处理完（callCount=2）→ isCancelled 转 true → 第 2→3 条之间的等待被跳过
     expect(sleepSpy).toHaveBeenCalledTimes(1);
+
+    db.close();
+  });
+
+  it('只清理 article：video 等非文章类型不进入候选', async () => {
+    const db = seedDb(2); // 2 条 article
+    const ts = '2026-06-01T00:00:00Z';
+    // 额外插入 1 条 video（status=verified），验证它被候选过滤排除
+    db.prepare(
+      `INSERT INTO source_items(
+         source_instance_id, fingerprint, stable_key, item_key, stable_short_id,
+         canonical_url, title, content_kind, discovered_at, status, created_at, updated_at)
+       VALUES (?, 'fp-v', 'sk-v', 'ik-v', 'sid-v',
+         'https://www.toutiao.com/video/999/', '视频', 'video', ?, 'verified', ?, ?)`,
+    ).run(SOURCE_INSTANCE_ID, ts, ts, ts);
+
+    const executeCount = { n: 0 };
+    const adapter = mockAdapter([
+      { success: true, wasCollected: true, isCollected: false },
+      { success: true, wasCollected: true, isCollected: false },
+    ]);
+    const wrapped: SourceAdapter = {
+      ...adapter,
+      cleanup: {
+        supportedActions: ['unfavorite'],
+        executeAction: async (ref: SourceItemRef) => {
+          executeCount.n++;
+          // 若 video 被错误纳入候选，canonicalUrl 会含 /video/
+          expect(ref.canonicalUrl).not.toContain('/video/');
+          return adapter.cleanup!.executeAction(ref);
+        },
+      },
+    } as unknown as SourceAdapter;
+
+    const result = await runCleanupUnfavorite({
+      db, sourceAdapter: wrapped, sourceInstanceId: SOURCE_INSTANCE_ID,
+      migrationJobId: MIGRATION_JOB_ID, workspaceDir: '/tmp/ws', sleepFn: async () => {},
+    });
+
+    // 只处理 2 条 article，video 被排除
+    expect(executeCount.n).toBe(2);
+    expect(result.successCount).toBe(2);
+
+    db.close();
+  });
+
+  it('失败重试：首次失败→等待→重试成功，不计入失败终止', async () => {
+    const db = seedDb(2);
+    // 第 1 条：先失败（风控），重试时成功；第 2 条：成功
+    const adapter = mockAdapter([
+      { success: false, wasCollected: true, isCollected: true, reason: 'still collected after click' },
+      { success: true, wasCollected: true, isCollected: false },
+      { success: true, wasCollected: true, isCollected: false },
+    ]);
+    const sleeps: number[] = [];
+
+    const result = await runCleanupUnfavorite({
+      db, sourceAdapter: adapter, sourceInstanceId: SOURCE_INSTANCE_ID,
+      migrationJobId: MIGRATION_JOB_ID, workspaceDir: '/tmp/ws',
+      sleepFn: async (ms) => { sleeps.push(ms); }, // 不真等 10 分钟
+    });
+
+    // 第 1 条重试成功 + 第 2 条成功 → 2 条都成功
+    expect(result.successCount).toBe(2);
+    expect(result.failedCount).toBe(0);
+    // 失败后触发了等待（backoff），sleep 被调用
+    expect(sleeps.length).toBeGreaterThan(0);
+
+    db.close();
+  });
+
+  it('重试仍失败→终止任务：第 1 条重试还失败，第 2 条不处理', async () => {
+    const db = seedDb(2);
+    // 第 1 条：失败→重试仍失败（持续风控）；第 2 条本应成功但因终止不被处理
+    const adapter = mockAdapter([
+      { success: false, wasCollected: true, isCollected: true, reason: 'still collected after click' },
+      { success: false, wasCollected: true, isCollected: true, reason: 'still collected after click' },
+      { success: true, wasCollected: true, isCollected: false }, // 第 2 条（不应被消费）
+    ]);
+    let executeCount = 0;
+    const wrapped: SourceAdapter = {
+      ...adapter,
+      cleanup: {
+        supportedActions: ['unfavorite'],
+        executeAction: async (ref: SourceItemRef) => {
+          executeCount++;
+          return adapter.cleanup!.executeAction(ref);
+        },
+      },
+    } as unknown as SourceAdapter;
+
+    const result = await runCleanupUnfavorite({
+      db, sourceAdapter: wrapped, sourceInstanceId: SOURCE_INSTANCE_ID,
+      migrationJobId: MIGRATION_JOB_ID, workspaceDir: '/tmp/ws', sleepFn: async () => {},
+    });
+
+    // 第 1 条：2 次 execute（首次+重试）都失败 → 终止；第 2 条不处理
+    expect(executeCount).toBe(2);
+    expect(result.successCount).toBe(0);
+    expect(result.failedCount).toBe(1); // 终止前落库的第 1 条（重试回退后最终计 1 次失败）
 
     db.close();
   });
