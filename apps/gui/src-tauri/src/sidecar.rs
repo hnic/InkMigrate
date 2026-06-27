@@ -192,7 +192,11 @@ async fn read_stdout(
         let msg: RpcResponse = match serde_json::from_str(&line) {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("解析 sidecar 输出失败: {} (line={})", e, &line[..line.len().min(200)]);
+                // 截断用于日志：必须回退到 UTF-8 字符边界，否则切片会 panic
+                // （中文等占 3 字节，固定切 200 可能落在字符中间）
+                let mut end = line.len().min(200);
+                while !line.is_char_boundary(end) { end -= 1; }
+                eprintln!("解析 sidecar 输出失败: {} (line={})", e, &line[..end]);
                 continue;
             }
         };
