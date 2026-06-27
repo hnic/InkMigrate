@@ -16,7 +16,7 @@ import type { PageId } from './lib/types.js';
 export default function App() {
   const [page, setPage] = useState<PageId>('login');
   const { settings, update } = useSettings();
-  const { rpcCall, progress, logs, busy, activePhase, addLog } = useSidecar();
+  const { rpcCall, progress, logs, busy, activePhase, addLog, cancel } = useSidecar();
   const { refresh: refreshLogin } = useLoginStatus({ settings, update });
 
   return (
@@ -63,9 +63,9 @@ export default function App() {
           {/* 当前页面 */}
           <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
             {page === 'login' && <LoginPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} refreshLogin={refreshLogin} />}
-            {page === 'scan' && <ScanPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} busy={busy} activePhase={activePhase} />}
-            {page === 'migrate' && <MigratePage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} busy={busy} activePhase={activePhase} />}
-            {page === 'cleanup' && <CleanupPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} busy={busy} activePhase={activePhase} />}
+            {page === 'scan' && <ScanPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} busy={busy} activePhase={activePhase} cancel={cancel} />}
+            {page === 'migrate' && <MigratePage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} busy={busy} activePhase={activePhase} cancel={cancel} />}
+            {page === 'cleanup' && <CleanupPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} busy={busy} activePhase={activePhase} cancel={cancel} />}
             {page === 'report' && <ReportPage settings={settings} rpcCall={rpcCall} />}
             {page === 'settings' && <SettingsPage settings={settings} update={update} />}
           </div>

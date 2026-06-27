@@ -166,6 +166,8 @@ export interface RpcMethodMap {
   'migrate.resume': { params: MigrateResumeParams; result: MigrateResult };
   'cleanup.unfavorite': { params: CleanupUnfavoriteParams; result: CleanupResult };
   'status.query': { params: StatusQueryParams; result: StatusQueryResult };
+  /** 终止当前正在运行的长任务（scan/migrate/cleanup）。幂等。 */
+  'cancel.cancel': { params: Record<string, unknown>; result: { cancelling: boolean } };
 }
 
 export type RpcMethodName = keyof RpcMethodMap;

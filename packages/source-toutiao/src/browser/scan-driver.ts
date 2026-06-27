@@ -27,6 +27,8 @@ export interface ScanDriverOptions {
   maxItems?: number;
   /** 每轮滚动后的进度回调。 */
   onProgress?: (info: { found: number; scrollRound: number; phase: string }) => void;
+  /** 取消检查回调（可选）。返回 true 时停止滚动并终止扫描。 */
+  isCancelled?: () => boolean;
 }
 
 export interface ScanDriverResult {
@@ -159,6 +161,7 @@ export async function driveScanFavorites(
     baseUrl: opts.baseUrl,
     scrollForMore,
     maxEmptyCycles: opts.maxEmptyCycles ?? DEFAULT_MAX_EMPTY_CYCLES,
+    ...(opts.isCancelled !== undefined ? { isCancelled: opts.isCancelled } : {}),
   };
   if (opts.maxItems !== undefined) {
     scanInput.maxItems = opts.maxItems;

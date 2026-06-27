@@ -10,6 +10,8 @@ interface Props {
   busy: boolean;
   /** 当前运行的 phase，用于判断按钮文字（是否本页任务在跑）。disabled 仍用 busy。 */
   activePhase: string | null;
+  /** 终止当前正在运行的长任务。 */
+  cancel: () => Promise<void>;
 }
 
 interface MigrateResult {
@@ -20,7 +22,7 @@ interface MigrateResult {
   jobId: string;
 }
 
-export function MigratePage({ settings, update, rpcCall, addLog, busy, activePhase }: Props) {
+export function MigratePage({ settings, update, rpcCall, addLog, busy, activePhase, cancel }: Props) {
   const migrating = activePhase === 'migrating';
   const [maxItems, setMaxItems] = useState('');
   const [interval, setIntervalMs] = useState('1500');
@@ -118,12 +120,17 @@ export function MigratePage({ settings, update, rpcCall, addLog, busy, activePha
           Vault: {settings.vaultPath || '（未设置）'}
         </div>
 
-        <button
-          onClick={handleMigrate}
-          disabled={busy || !settings.stateDir || !settings.vaultPath || !settings.favoritesUrl || !settings.loggedIn}
-        >
-          {migrating ? '迁移中...' : busy ? '等待其他任务完成...' : '开始迁移'}
-        </button>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <button
+            onClick={handleMigrate}
+            disabled={busy || !settings.stateDir || !settings.vaultPath || !settings.favoritesUrl || !settings.loggedIn}
+          >
+            {migrating ? '迁移中...' : busy ? '等待其他任务完成...' : '开始迁移'}
+          </button>
+          <button onClick={() => void cancel()} disabled={!migrating} className="btn-danger">
+            终止
+          </button>
+        </div>
 
         {/* 断点续跑 */}
         <div style={{

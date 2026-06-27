@@ -75,5 +75,16 @@ export function useSidecar() {
     setLogs((prev) => [...prev.slice(-199), { level, message, timestamp: Date.now() }]);
   }, []);
 
-  return { rpcCall, progress, logs, busy, activePhase, addLog };
+  /** 终止当前正在运行的长任务。静默调用（不经 rpcCall，不翻转 busy），
+   *  否则会立即禁用终止按钮自身。调用 Tauri cancel_job command 转发给 sidecar。 */
+  const cancel = useCallback(async () => {
+    addLog('warn', '正在终止当前任务...');
+    try {
+      await invoke('cancel_job', {});
+    } catch (e) {
+      addLog('error', `终止失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [addLog]);
+
+  return { rpcCall, progress, logs, busy, activePhase, addLog, cancel };
 }

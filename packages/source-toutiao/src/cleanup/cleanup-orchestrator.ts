@@ -31,6 +31,8 @@ export interface CleanupOrchestratorOptions {
   maxItems?: number;
   onProgress?: (p: CleanupProgress) => void;
   onLog?: (entry: CleanupLogEntry) => void;
+  /** 取消检查回调（可选）。循环每轮检查，返回 true 时优雅终止并落库部分结果。 */
+  isCancelled?: () => boolean;
 }
 
 export interface CleanupOrchestratorResult {
@@ -142,6 +144,11 @@ export async function runCleanupUnfavorite(
   const attemptsRepo = new CleanupAttempts(db);
 
   for (let i = 0; i < rows.length; i++) {
+    // 取消检查（GUI 终止按钮）：在处理新条目前退出，已处理的落库不丢
+    if (opts.isCancelled?.()) {
+      opts.onLog?.({ level: 'warn', message: `任务已终止：已处理 ${i}/${rows.length} 条` });
+      break;
+    }
     const row = rows[i]!;
     const titleShort = row.title?.substring(0, 50);
     opts.onProgress?.({

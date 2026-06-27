@@ -40,6 +40,12 @@ export interface JobRunnerInput {
    * 用于 GUI/CLI 实时显示进度。
    */
   onProgress?: (progress: JobProgress) => void;
+  /**
+   * 取消检查回调（可选）。循环每轮迭代检查；返回 true 时优雅中断，
+   * 走与 SIGINT 相同的中断收尾路径（剩余条目标记 skipped，status='interrupted'）。
+   * 用于 GUI 的"终止"按钮（cancel.cancel RPC 设置进程级 flag）。
+   */
+  isCancelled?: () => boolean;
 }
 
 /** 迁移进度信息，由 job-runner 在关键节点推送给调用方。 */
@@ -201,7 +207,8 @@ export async function runMigrationJob(
     for (let idx = 0; idx < refs.length; idx++) {
       const ref = refs[idx]!;
       // §18.3 检查中断标志——完成当前条目后停止
-      if (interrupted) break;
+      // SIGINT（CLI Ctrl+C）或 cancel.cancel RPC（GUI 终止按钮）都会触发
+      if (interrupted || i.isCancelled?.()) break;
 
       jobs.updateStatus(i.jobId, {
         status: 'running',

@@ -10,9 +10,11 @@ interface Props {
   busy: boolean;
   /** 当前运行的 phase，用于判断按钮文字（是否本页任务在跑）。disabled 仍用 busy。 */
   activePhase: string | null;
+  /** 终止当前正在运行的长任务。 */
+  cancel: () => Promise<void>;
 }
 
-export function CleanupPage({ settings, update, rpcCall, addLog, busy, activePhase }: Props) {
+export function CleanupPage({ settings, update, rpcCall, addLog, busy, activePhase, cancel }: Props) {
   const cleaning = activePhase === 'cleanup';
   const [maxItems, setMaxItems] = useState('');
   const [result, setResult] = useState<{ successCount: number; skipCount: number; failCount: number } | null>(null);
@@ -104,6 +106,13 @@ export function CleanupPage({ settings, update, rpcCall, addLog, busy, activePha
               </button>
             </div>
           </div>
+        )}
+
+        {/* 清理进行中显示终止按钮 */}
+        {cleaning && (
+          <button onClick={() => void cancel()} className="btn-danger">
+            终止清理
+          </button>
         )}
 
         {error && (

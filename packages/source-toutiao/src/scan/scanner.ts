@@ -36,6 +36,8 @@ export interface ScanInput {
    * 不传则扫描到底。
    */
   maxItems?: number;
+  /** 取消检查回调（可选）。主循环每轮检查，返回 true 时终止扫描。 */
+  isCancelled?: () => boolean;
 }
 
 /** §12.5 默认终止阈值：连续 5 次没有新条目。 */
@@ -65,6 +67,11 @@ export async function scanFavoritesList(i: ScanInput): Promise<ScanResult> {
 
   let currentHtml: string | null | undefined = i.initialHtml;
   for (;;) {
+    // 取消检查（GUI 终止按钮）：在处理新一轮前退出
+    if (i.isCancelled?.()) {
+      terminationReason = 'cancelled';
+      break;
+    }
     if (currentHtml === null || currentHtml === undefined) {
       terminationReason = 'no_load_more';
       break;

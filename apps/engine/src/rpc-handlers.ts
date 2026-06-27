@@ -65,6 +65,7 @@ import {
   sendNotification,
   logToStderr,
 } from './transport.js';
+import { requestCancel, isCancelledFlag, resetCancel } from './cancellation.js';
 import type {
   AuthLoginParams,
   AuthLoginResult,
@@ -91,6 +92,12 @@ export function registerAllHandlers(): void {
   registerMethod('migrate.resume', (p) => handleMigrateResume(expandPaths(p as unknown as MigrateResumeParams, ['stateDir', 'vaultPath'])));
   registerMethod('cleanup.unfavorite', (p) => handleCleanupUnfavorite(expandPaths(p as unknown as CleanupUnfavoriteParams, ['stateDir'])));
   registerMethod('status.query', (p) => handleStatusQuery(expandPaths(p as unknown as StatusQueryParams, ['stateDir'])));
+  // 终止当前长任务：设置进程级 cancel flag，循环在下一次迭代边界退出
+  registerMethod('cancel.cancel', async () => {
+    requestCancel();
+    sendNotification('log', { level: 'warn', message: '收到终止请求，正在停止当前任务...' });
+    return { cancelling: true };
+  });
 }
 
 // ─── auth ───
@@ -167,6 +174,7 @@ async function handleAuthClear(params: AuthStatusParams | undefined): Promise<{ 
 
 async function handleScanStart(params: ScanStartParams | undefined): Promise<ScanStartResult> {
   if (params === undefined) throw new Error('missing params');
+  resetCancel(); // 新任务前清除旧的取消状态
   const profileDir = profilePath(params.stateDir, params.source);
   if (!profileExists(params.stateDir, params.source)) {
     throw new Error(`Profile 不存在：${profileDir}，请先 auth.login`);
@@ -191,6 +199,7 @@ async function handleScanStart(params: ScanStartParams | undefined): Promise<Sca
       favoritesUrl: params.favoritesUrl,
       baseUrl: 'https://www.toutiao.com/',
       sourceInstanceId: params.source,
+      isCancelled: isCancelledFlag,
       ...(params.maxItems !== undefined ? { maxItems: params.maxItems } : {}),
       onProgress: (info) => {
         sendNotification('progress', {
@@ -240,6 +249,7 @@ async function runMigrateJob(
   params: MigrateStartParams | MigrateResumeParams,
   isResume: boolean,
 ): Promise<MigrateResult> {
+  resetCancel(); // 新任务前清除旧的取消状态
   // 动态导入避免顶层依赖循环
   const { runMigrationJob } = await import('@inkmigrate/core');
 
@@ -337,6 +347,7 @@ async function runMigrateJob(
       targetContext,
       workspaceDir: params.stateDir,
       reportsDir: join(params.stateDir, 'reports'),
+      isCancelled: isCancelledFlag,
       onProgress: (progress) => {
         // 把 job-runner 进度转发为 JSON-RPC notification
         sendNotification('progress', {
@@ -383,6 +394,7 @@ async function handleCleanupUnfavorite(
   params: CleanupUnfavoriteParams | undefined,
 ): Promise<CleanupResult> {
   if (params === undefined) throw new Error('missing params');
+  resetCancel(); // 新任务前清除旧的取消状态
   const db: DB = openDatabase({ path: join(params.stateDir, 'inkmigrate.sqlite') });
   try {
     const profileDir = profilePath(params.stateDir, params.source);
@@ -408,6 +420,7 @@ async function handleCleanupUnfavorite(
         sourceInstanceId: params.source,
         migrationJobId,
         workspaceDir: params.stateDir,
+        isCancelled: isCancelledFlag,
         ...(params.maxItems !== undefined ? { maxItems: params.maxItems } : {}),
         onProgress: (p) => sendNotification('progress', {
           phase: 'cleanup',

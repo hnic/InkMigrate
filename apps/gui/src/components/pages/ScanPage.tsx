@@ -10,9 +10,11 @@ interface Props {
   busy: boolean;
   /** 当前运行的 phase，用于判断按钮文字（是否本页任务在跑）。disabled 仍用 busy。 */
   activePhase: string | null;
+  /** 终止当前正在运行的长任务。 */
+  cancel: () => Promise<void>;
 }
 
-export function ScanPage({ settings, update, rpcCall, addLog, busy, activePhase }: Props) {
+export function ScanPage({ settings, update, rpcCall, addLog, busy, activePhase, cancel }: Props) {
   const scanning = activePhase === 'scanning';
   const [result, setResult] = useState<{ uniqueItems: number; terminationReason: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -20,6 +22,7 @@ export function ScanPage({ settings, update, rpcCall, addLog, busy, activePhase 
   const reasonLabels: Record<string, string> = {
     no_new_items_after_5_cycles: '连续 5 轮无新内容',
     no_load_more: '没有更多内容',
+    cancelled: '已终止',
   };
 
   async function handleScan() {
@@ -56,9 +59,14 @@ export function ScanPage({ settings, update, rpcCall, addLog, busy, activePhase 
           将打开浏览器扫描你的头条收藏列表。扫描数据会保存到数据库，供后续迁移使用。
         </div>
 
-        <button onClick={handleScan} disabled={busy || !settings.stateDir || !settings.favoritesUrl || !settings.loggedIn}>
-          {scanning ? '扫描中...' : busy ? '等待其他任务完成...' : '开始扫描'}
-        </button>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <button onClick={handleScan} disabled={busy || !settings.stateDir || !settings.favoritesUrl || !settings.loggedIn}>
+            {scanning ? '扫描中...' : busy ? '等待其他任务完成...' : '开始扫描'}
+          </button>
+          <button onClick={() => void cancel()} disabled={!scanning} className="btn-danger">
+            终止
+          </button>
+        </div>
 
         {settings.stateDir && settings.favoritesUrl && !settings.loggedIn && (
           <div style={{
