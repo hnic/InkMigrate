@@ -6,7 +6,7 @@ import {
   type ScanResult,
 } from '../scan/scanner.js';
 import { deriveFingerprintInput } from '../normalize/fingerprint.js';
-import { computeFingerprint, type SourceItemRef } from '@inkmigrate/core';
+import { computeFingerprint, type SourceItemRef, type SourceContentKind } from '@inkmigrate/core';
 import { FAVORITES_SELECTORS } from '../selectors/favorites-list.js';
 
 export interface ScanDriverOptions {
@@ -167,10 +167,16 @@ export async function driveScanFavorites(
   }
   const scanResult = await scanFavoritesList(scanInput);
 
+  // 过滤无法转 markdown 笔记的内容类型。video 无正文文本（详情页是播放器），
+  // 迁移出来只会是空壳/降级笔记，故在成为候选前剔除。保留文本类
+  // （article/short-post/gallery/question-answer/note/unknown）。
+  // 仅过滤 refs（迁移候选）：scanResult.items/uniqueItems 保留原始扫描发现，
+  // 以便报告/日志反映"扫到 N 条，其中 video 已跳过"，不破坏并集抓取可观测性。
+  const EXCLUDED_KINDS = new Set<SourceContentKind>(['video']);
   const discoveredAt = new Date().toISOString();
-  const refs: SourceItemRef[] = scanResult.items.map((fav) =>
-    buildRefInline(opts.sourceInstanceId, fav, discoveredAt),
-  );
+  const refs: SourceItemRef[] = scanResult.items
+    .filter((fav) => !EXCLUDED_KINDS.has(fav.contentKind))
+    .map((fav) => buildRefInline(opts.sourceInstanceId, fav, discoveredAt));
 
   return { refs, scanResult };
 }
