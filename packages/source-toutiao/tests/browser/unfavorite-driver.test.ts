@@ -75,7 +75,7 @@ describe('driveUnfavorite', () => {
       route.fulfill({ contentType: 'text/html; charset=utf-8', body: detailHtml('true', 'unfavorite') }),
     );
 
-    const result = await driveUnfavorite({ page, ref: makeRef(), waitAfterClickMs: 2000 });
+    const result = await driveUnfavorite({ page, ref: makeRef(), waitAfterClickMs: 2000, readingSimulation: 'none' });
 
     expect(result.wasCollected).toBe(true);
     expect(result.success).toBe(true);
@@ -93,7 +93,7 @@ describe('driveUnfavorite', () => {
       route.fulfill({ contentType: 'text/html; charset=utf-8', body: detailHtml('true', 'noop') }),
     );
 
-    const result = await driveUnfavorite({ page, ref: makeRef(), waitAfterClickMs: 1500 });
+    const result = await driveUnfavorite({ page, ref: makeRef(), waitAfterClickMs: 1500, readingSimulation: 'none' });
 
     expect(result.wasCollected).toBe(true);
     expect(result.success).toBe(false);
@@ -112,7 +112,7 @@ describe('driveUnfavorite', () => {
       route.fulfill({ contentType: 'text/html; charset=utf-8', body: detailHtml('false', 'noop') }),
     );
 
-    const result = await driveUnfavorite({ page, ref: makeRef() });
+    const result = await driveUnfavorite({ page, ref: makeRef(), readingSimulation: 'none' });
 
     expect(result.wasCollected).toBe(false);
     expect(result.success).toBe(true);
@@ -131,7 +131,7 @@ describe('driveUnfavorite', () => {
       route.fulfill({ contentType: 'text/html; charset=utf-8', body: EMPTY_HTML }),
     );
 
-    const result = await driveUnfavorite({ page, ref: makeRef(), navigationTimeoutMs: 1500 });
+    const result = await driveUnfavorite({ page, ref: makeRef(), navigationTimeoutMs: 1500, readingSimulation: 'none' });
 
     expect(result.success).toBe(false);
     expect(result.wasCollected).toBe(false);
@@ -151,7 +151,7 @@ describe('driveUnfavorite', () => {
       route.fulfill({ contentType: 'text/html; charset=utf-8', body: SPA_DELAYED_HTML }),
     );
 
-    const result = await driveUnfavorite({ page, ref: makeRef(), navigationTimeoutMs: 3000 });
+    const result = await driveUnfavorite({ page, ref: makeRef(), navigationTimeoutMs: 3000, readingSimulation: 'none' });
 
     // 按钮虽延迟 300ms 渲染，但应被等到 → 不再是 not found
     expect(result.reason).not.toBe('collect button not found');
@@ -159,4 +159,47 @@ describe('driveUnfavorite', () => {
 
     await session.close();
   });
+
+  it('阅读模拟（heavy）：已收藏条目会真实滚动浏览后再点击', async () => {
+    // 防风控核心：模拟人类"打开→浏览→读完才取消"。验证页面确实发生滚动（阅读行为指纹）。
+    // 用一段足够长的正文撑高页面，让 simulateReading 有内容可滚动。
+    const longContent = Array.from({ length: 40 }, (_, i) => `<p>第${i + 1}段正文内容，用于撑高页面让滚动生效。</p>`).join('');
+    const html = `<!doctype html><html><body>
+<div data-testid="article-detail">
+  <h1>长文章</h1>
+  ${longContent}
+  <button class="favorite-btn" data-testid="favorite-button" aria-pressed="true" aria-label="取消收藏">已收藏</button>
+</div>
+<script>
+  // 记录最大滚动位置，用于断言阅读模拟确实滚动了页面（而非静止）
+  window.__maxScrollY = 0;
+  window.addEventListener('scroll', () => {
+    if (window.scrollY > window.__maxScrollY) window.__maxScrollY = window.scrollY;
+  }, { passive: true });
+  document.querySelector('[data-testid="favorite-button"]').addEventListener('click', function () {
+    this.setAttribute('aria-pressed', 'false');
+  });
+</script>
+</body></html>`;
+
+    const profileDir = createTempProfileDir();
+    const session = new ToutiaoBrowserSession({ profileDir, headless: true });
+    await session.launch();
+    const page = await session.newPage();
+    await page.route(DETAIL_URL, (route) =>
+      route.fulfill({ contentType: 'text/html; charset=utf-8', body: html }),
+    );
+
+    const result = await driveUnfavorite({ page, ref: makeRef(), waitAfterClickMs: 2000 });
+    // 默认 readingSimulation='heavy'，应触发阅读模拟
+
+    // heavy 模式应让页面滚动到正文深处（__maxScrollY 显著 > 0），证明发生了浏览行为
+    const maxScrollY = await page.evaluate(() => (window as unknown as { __maxScrollY: number }).__maxScrollY);
+    expect(maxScrollY).toBeGreaterThan(100);
+    // 模拟阅读后点击取消成功
+    expect(result.wasCollected).toBe(true);
+    expect(result.success).toBe(true);
+
+    await session.close();
+  }, 60000); // heavy 阅读有多次随机停留，给足超时
 });
