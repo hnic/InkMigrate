@@ -28,20 +28,26 @@ describe('driveScanFavorites', () => {
       waitAfterScrollMs: 50,
     });
 
-    expect(refs.length).toBe(3);
+    // fixture 含 2 article + 1 video；video 被过滤，候选剩 2 条 article
+    expect(refs.length).toBe(2);
     expect(refs[0]!.externalId).toBe('7428193012345678901');
     expect(refs[0]!.fingerprint).toMatch(/^sha256:/);
     expect(refs[0]!.contentKind).toBe('article');
+    expect(refs.every((r) => r.contentKind === 'article')).toBe(true);
+    // scanResult 保留原始扫描发现（含 video），不被过滤影响
     expect(scanResult.uniqueItems).toBe(3);
     expect(scanResult.terminationReason).toContain('no_new_items');
 
     await session.close();
   });
 
-  it('scans mixed-type favorites (video + micro-post) via selector union', async () => {
-    // 验证多类型并集抓取：同一页面混合视频(.profile-normal-video-card-wrapper)
-    // 和微头条(.feed-card-wrapper)，两种外层 class 不同。
-    // 若 scan-driver 仍"取第一个选择器就 break"，会只抓到一种类型。
+  it('scans mixed-type favorites (video + micro-post) via selector union, filters video from candidates', async () => {
+    // 验证两点：
+    //  1. 多类型并集抓取仍有效——同一页面混合视频(.profile-normal-video-card-wrapper)
+    //     和微头条(.feed-card-wrapper)，两种外层 class 不同，取第一个选择器会漏掉另一种。
+    //     scanResult 应反映页面真实发现（3 条全到）。
+    //  2. video 在成为迁移候选前被过滤——video 无正文，迁移只会产出空壳笔记。
+    //     refs 不应含 video，只保留文本类。
     const profileDir = createTempProfileDir();
     const session = new ToutiaoBrowserSession({ profileDir, headless: true });
     await session.launch();
@@ -64,13 +70,16 @@ describe('driveScanFavorites', () => {
       waitAfterScrollMs: 50,
     });
 
-    // 必须 3 条全抓到：2 个视频 + 1 个微头条
-    expect(refs.length).toBe(3);
-    // 两种类型都出现（按 href 前缀区分）
-    const hrefs = refs.map((r) => r.canonicalUrl);
-    expect(hrefs.some((u) => u.includes('/video/'))).toBe(true);
-    expect(hrefs.some((u) => u.includes('/w/'))).toBe(true);
+    // 扫描发现：2 个视频 + 1 个微头条（并集抓取不漏类型）
     expect(scanResult.uniqueItems).toBe(3);
+    const discoveredHrefs = scanResult.items.map((i) => i.canonicalUrl);
+    expect(discoveredHrefs.some((u) => u.includes('/video/'))).toBe(true);
+    expect(discoveredHrefs.some((u) => u.includes('/w/'))).toBe(true);
+
+    // 候选 refs：video 被过滤，只剩微头条
+    expect(refs.length).toBe(1);
+    expect(refs.every((r) => r.contentKind !== 'video')).toBe(true);
+    expect(refs[0]!.canonicalUrl).toContain('/w/');
 
     await session.close();
   });

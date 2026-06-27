@@ -67,7 +67,8 @@ describe('E2E: adapter lifecycle and scan/extract data flow', () => {
       waitAfterScrollMs: 50,
     });
 
-    expect(refs.length).toBe(3);
+    // fixture 含 2 article + 1 video；video 在成为候选前被过滤，候选剩 2 条
+    expect(refs.length).toBe(2);
 
     // extract 第一条（article 类型）
     const articleRef = refs.find((r) => r.contentKind === 'article')!;
