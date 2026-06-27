@@ -73,15 +73,14 @@ export async function driveScanFavorites(
         const selectors = JSON.parse(params.selectorsJson) as string[];
         const known = new Set(JSON.parse(params.knownJson) as string[]);
 
-        // 找到第一个匹配的条目选择器
-        let allEls: Element[] = [];
+        // 合并【所有】条目选择器的并集去重。
+        // 同一收藏页混合出现视频/文章/微头条，外层容器 class 不同，
+        // 取第一个非空选择器会漏掉其它类型（曾因此只抓到微头条、漏掉视频）。
+        const seen = new Set<Element>();
         for (const sel of selectors) {
-          const found = document.querySelectorAll(sel);
-          if (found.length > 0) {
-            allEls = Array.from(found);
-            break;
-          }
+          for (const el of document.querySelectorAll(sel)) seen.add(el);
         }
+        const allEls = Array.from(seen);
 
         // 收集本轮新出现的条目 + 它们的 key
         const newEls: Element[] = [];

@@ -125,13 +125,27 @@ function parseItemsFromHtml(html: string, baseUrl: string): FavoriteItem[] {
   const doc = dom.window.document;
   const out: FavoriteItem[] = [];
 
-  const itemEls = queryFirst(doc, FAVORITES_SELECTORS.item);
+  // 合并所有条目选择器的并集去重——同页混合视频/文章/微头条，外层 class 不同，
+  // 取第一个非空选择器会漏掉其它类型（与 scan-driver extractItemsHtml 同理）
+  const itemEls = queryAll(doc, FAVORITES_SELECTORS.item);
   for (const el of itemEls) {
     const externalId =
       el.getAttribute(FAVORITES_SELECTORS.itemId[0]!) ?? undefined;
     const titleEls = queryFirst(el as Element, [...FAVORITES_SELECTORS.title]);
-    const titleEl = titleEls[0];
-    const title = titleEl?.textContent?.trim() ?? '';
+    let titleEl = titleEls[0];
+    // 视频条目的内容链接在 .feed-card-cover > a，无 .title class，title 选择器组命中不到。
+    // 兜底：直接找条目内的内容链接（与 scan-driver extractItemsHtml 同口径）。
+    if (titleEl === undefined) {
+      titleEl =
+        (el as Element).querySelector(
+          'a[href*="/article/"], a[href*="/video/"], a[href*="/wenda/"], a[href*="/group/"], a[href*="/w/"]',
+        ) ?? undefined;
+    }
+    // 标题：优先文本节点；视频条目标题在 a 的 title 属性里（非文本节点）
+    const title =
+      titleEl?.textContent?.trim() ||
+      titleEl?.getAttribute('title')?.trim() ||
+      '';
     const href = titleEl?.getAttribute('href') ?? '';
     const originalUrl = resolveUrl(href, baseUrl);
     const canonicalUrl = canonicalizeToutiaoUrl(originalUrl);
@@ -180,6 +194,22 @@ function queryFirst(
     if (els.length > 0) return [...els];
   }
   return [];
+}
+
+/**
+ * 合并【所有】选择器的并集去重。用于条目容器——同一页面混合多种类型
+ * （视频/文章/微头条），每种外层 class 不同，必须全部抓取。
+ * 对比 queryFirst（取第一个非空）只适用于单元素内的字段查找。
+ */
+function queryAll(
+  root: Element | Document,
+  selectors: readonly string[],
+): Element[] {
+  const seen = new Set<Element>();
+  for (const sel of selectors) {
+    for (const el of root.querySelectorAll(sel)) seen.add(el);
+  }
+  return [...seen];
 }
 
 function textOfFirst(

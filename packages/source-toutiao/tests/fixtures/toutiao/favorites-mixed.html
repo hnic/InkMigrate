@@ -1,0 +1,52 @@
+<!doctype html>
+<!--
+  模拟头条收藏页【混合类型】真实结构（2026-06 实测）。
+  用于验证 scan-driver 的多类型并集抓取：
+    - 视频条目外层 .profile-normal-video-card-wrapper（实测占多数）
+    - 微头条条目外层 .feed-card-wrapper（实测）
+  两种外层 class 不同，取第一个选择器会漏掉另一种 → 必须合并并集。
+  注意：按实测，列表容器是 .profile-feed（而非 .favorites-list）。
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>分秒必争山丘D的头条主页 - 今日头条</title>
+</head>
+<body>
+  <div class="ttp-header-profile">
+    <div class="user-icon">
+      <a aria-label="分秒必争山丘D" href="/c/user/token/MOCK/?source=mine_profile"><img src="https://example.com/avatar.png" alt=""></a>
+    </div>
+  </div>
+  <div class="profile-feed profile-tab-feed">
+    <!-- 视频条目（实测主类型）-->
+    <div class="profile-normal-video-card-wrapper">
+      <div class="profile-normal-video-card">
+        <div class="r-content">
+          <div class="feed-video-item">
+            <div class="feed-card-cover">
+              <a href="/video/7653671064760746011/" title="上海人出了上海发现哪里都是旅游圣地"><img src="https://example.com/v1.jpeg" alt=""></a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- 微头条条目 -->
+    <div class="feed-card-wrapper">
+      <a class="content" href="/w/1862758606084163/">这条微头条很有意思</a>
+    </div>
+    <!-- 第二个视频条目 -->
+    <div class="profile-normal-video-card-wrapper">
+      <div class="profile-normal-video-card">
+        <div class="r-content">
+          <div class="feed-video-item">
+            <div class="feed-card-cover">
+              <a href="/video/7653671064760746022/" title="另一个视频"><img src="https://example.com/v2.jpeg" alt=""></a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
