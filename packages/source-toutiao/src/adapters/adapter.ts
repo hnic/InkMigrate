@@ -14,7 +14,7 @@ import { deriveFingerprintInput } from '../normalize/fingerprint.js';
 import { ToutiaoBrowserSession } from '../browser/browser-session.js';
 import { driveScanFavorites } from '../browser/scan-driver.js';
 import { driveExtractDetail } from '../browser/extract-driver.js';
-import { driveUnfavorite } from '../browser/unfavorite-driver.js';
+import { driveUnfavorite, inspectCollectedState } from '../browser/unfavorite-driver.js';
 import { SPECIAL_PAGE_SELECTORS, UNFAVORITE_SELECTORS } from '../selectors/index.js';
 
 export const SOURCE_TOUTIAO_KIND = 'toutiao' as const;
@@ -78,6 +78,9 @@ export function createToutiaoSource(
     // §12.1 v1.1 supportsSourceCleanup=true → cleanup 必须存在（§8.2 不变量）
     cleanup: {
       supportedActions: ['unfavorite'],
+      // inspect / execute / verify 三者通过 driveUnfavorite 的共享判定逻辑（aria-pressed
+      // 主信号 + collected class 回退）保持状态读法一致；历史上 inspect/verify 用
+      // collected class、execute 用 aria-pressed 的不一致已消除。
       inspectActionState: async (ref) => {
         if (session === undefined) return { state: 'unknown' as const };
         const page = await session.newPage();
@@ -88,12 +91,15 @@ export function createToutiaoSource(
           const collectBtn = page
             .locator(UNFAVORITE_SELECTORS.collectButton.join(', '))
             .first();
-          const exists = await collectBtn.count().catch(() => 0);
-          if (exists === 0) return { state: 'unknown' as const };
-          const collected = await collectBtn.evaluate(
-            (el, cls) => el.classList.contains(cls),
-            UNFAVORITE_SELECTORS.collectedClass,
-          );
+          // 等待渲染：domcontentloaded 时 SPA 详情页可能尚未渲染按钮（旧逻辑瞬时
+          // count()=0 → 误判 unknown，是生产"未知"大量产生的根因）
+          try {
+            await collectBtn.waitFor({ state: 'attached', timeout: 10_000 });
+          } catch {
+            // 超时则保留 not found → unknown 语义
+          }
+          const collected = await inspectCollectedState(collectBtn);
+          if (collected === null) return { state: 'unknown' as const };
           return { state: collected ? 'favorited' as const : 'not-favorited' as const };
         } finally {
           await page.close();
@@ -105,6 +111,8 @@ export function createToutiaoSource(
         }
         const page = await session.newPage();
         try {
+          // driveUnfavorite 一次导航内完成：等待渲染 → 读状态 → 点击 → 轮询复核。
+          // 编排器据此 receipt 区分 成功/跳过(wasCollected=false)/未知(not found)/失败(still collected)。
           const unfavOpts: Parameters<typeof driveUnfavorite>[0] = { page, ref };
           if (browserConfig.navigationTimeoutMs !== undefined) {
             unfavOpts.navigationTimeoutMs = browserConfig.navigationTimeoutMs;
@@ -125,14 +133,14 @@ export function createToutiaoSource(
           const collectBtn = page
             .locator(UNFAVORITE_SELECTORS.collectButton.join(', '))
             .first();
-          const exists = await collectBtn.count().catch(() => 0);
-          if (exists === 0) return { verified: false };
-          const collected = await collectBtn.evaluate(
-            (el, cls) => el.classList.contains(cls),
-            UNFAVORITE_SELECTORS.collectedClass,
-          );
-          // 验证取消收藏成功 = 不再是已收藏状态
-          return { verified: !collected };
+          try {
+            await collectBtn.waitFor({ state: 'attached', timeout: 10_000 });
+          } catch {
+            return { verified: false };
+          }
+          // 弃用过时的 collected class，改用与 execute 一致的判定
+          const collected = await inspectCollectedState(collectBtn);
+          return { verified: collected === false };
         } finally {
           await page.close();
         }

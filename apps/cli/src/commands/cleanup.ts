@@ -6,6 +6,7 @@ import {
   profileExists,
   buildConfirmationPrompt,
   validateConfirmation,
+  runCleanupUnfavorite,
   type ToutiaoBrowserAdapterConfig,
 } from '@inkmigrate/source-toutiao';
 import { join } from 'node:path';
@@ -85,29 +86,22 @@ export function createCleanupCommand(): Command {
       const dbPath = join(opts.stateDir, 'inkmigrate.sqlite');
       const db: DB = openDatabase({ path: dbPath });
       try {
-        // 读取已迁移的条目
-        const limit = opts.maxItems ? parseInt(opts.maxItems, 10) : undefined;
-        const rows = db
-          .prepare(
-            `SELECT canonical_url, title, external_id, content_kind
-             FROM source_items
-             WHERE source_instance_id = ? AND status = 'verified'
-             ORDER BY source_position ASC
-             ${limit ? 'LIMIT ?' : ''}`,
-          )
-          .all(opts.source, ...(limit ? [limit] : [])) as Array<{
-            canonical_url: string;
-            title: string;
-            external_id: string | null;
-            content_kind: string;
-          }>;
+        // 候选计数（用于二次确认的展示；实际候选过滤在编排器内完成，含已成功项排除）
+        const candidateCount = (
+          db
+            .prepare(
+              `SELECT COUNT(*) as c FROM source_items
+               WHERE source_instance_id = ? AND status = 'verified'`,
+            )
+            .get(opts.source) as { c: number }
+        ).c;
 
-        if (rows.length === 0) {
+        if (candidateCount === 0) {
           console.log('没有已迁移的条目可清理。');
           return;
         }
 
-        console.log(`找到 ${rows.length} 条已迁移条目。`);
+        console.log(`找到 ${candidateCount} 条已迁移条目（已成功取消的会自动跳过）。`);
         console.log('即将逐条打开文章详情页并取消收藏。');
         console.log('');
 
@@ -115,12 +109,12 @@ export function createCleanupCommand(): Command {
         // 这是不可逆操作（取消后云端收藏即丢失），默认拒绝执行。
         if (!opts.force) {
           const prefix = 'UNFAVORITE';
-          const prompt = buildConfirmationPrompt(rows.length, prefix);
+          const prompt = buildConfirmationPrompt(candidateCount, prefix);
           console.log(prompt);
           const rl = readline.createInterface({ input, output });
           try {
             const answer = (await rl.question('确认 > ')).trim();
-            if (!validateConfirmation(answer, rows.length, prefix)) {
+            if (!validateConfirmation(answer, candidateCount, prefix)) {
               console.log('确认不匹配，已取消操作。未做任何更改。');
               process.exit(1);
             }
@@ -129,6 +123,9 @@ export function createCleanupCommand(): Command {
           }
           console.log('');
         }
+
+        // 关联迁移任务（满足 cleanup_plans.migration_job_id FK）
+        const migrationJobId = resolveLatestMigrationJobId(db, opts.source);
 
         // 检查 Profile
         const pPath = profilePath(opts.stateDir, opts.source);
@@ -146,66 +143,59 @@ export function createCleanupCommand(): Command {
           headless: false, // 有头：头条反爬会拦截 headless
         };
         const adapter = createToutiaoSource(adapterConfig);
-
         await adapter.prepare({ config: {}, workspaceDir: opts.stateDir });
 
-        let successCount = 0;
-        let skipCount = 0;
-        let failCount = 0;
+        // SIGINT → 置取消标志（编排器每轮检查，优雅终止并落库部分结果）
+        let cancelled = false;
+        const onSigInt = () => {
+          cancelled = true;
+          console.log('\n收到终止信号，正在停止当前任务（已处理项已落库）...');
+        };
+        process.on('SIGINT', onSigInt);
 
-        for (let i = 0; i < rows.length; i++) {
-          const row = rows[i]!;
-          const title = row.title?.substring(0, 50) ?? '(无标题)';
-          console.log(`[${i + 1}/${rows.length}] ${title}`);
-          console.log(`  URL: ${row.canonical_url}`);
-
-          const ref = {
+        try {
+          const limit = opts.maxItems ? parseInt(opts.maxItems, 10) : undefined;
+          const result = await runCleanupUnfavorite({
+            db,
+            sourceAdapter: adapter,
             sourceInstanceId: opts.source,
-            canonicalUrl: row.canonical_url,
-            originalUrl: row.canonical_url,
-            title: row.title,
-            contentKind: row.content_kind as 'article',
-            discoveredAt: new Date().toISOString(),
-            fingerprint: '',
-            sourceMetadata: {},
-            ...(row.external_id ? { externalId: row.external_id } : {}),
-          };
+            migrationJobId,
+            workspaceDir: opts.stateDir,
+            ...(limit !== undefined ? { maxItems: limit } : {}),
+            isCancelled: () => cancelled,
+            onProgress: (p) =>
+              console.log(`[${p.current}/${p.total}] ${p.currentItem ?? ''}`),
+            onLog: (e) => console.log(e.message),
+          });
 
-          try {
-            const result = await adapter.cleanup!.executeAction(
-              ref,
-              'unfavorite',
-              { config: {}, workspaceDir: opts.stateDir },
-            ) as { success: boolean; wasCollected: boolean; isCollected: boolean; reason?: string };
-
-            if (result.success) {
-              if (result.wasCollected) {
-                console.log('  ✅ 已取消收藏');
-                successCount++;
-              } else {
-                console.log('  ⏭️  本来就未收藏，跳过');
-                skipCount++;
-              }
-            } else {
-              console.log(`  ❌ 失败：${result.reason ?? '未知原因'}`);
-              failCount++;
-            }
-          } catch (e) {
-            console.log(`  ❌ 异常：${(e as Error).message}`);
-            failCount++;
+          console.log('\n========== 清理完成 ==========');
+          console.log(`  成功取消收藏: ${result.successCount}`);
+          console.log(`  跳过（未收藏）: ${result.skippedCount}`);
+          console.log(`  失败: ${result.failedCount}`);
+          if (result.unknownCount > 0) {
+            console.log(`  未知（状态判定失败）: ${result.unknownCount}`);
           }
+        } finally {
+          process.off('SIGINT', onSigInt);
+          await adapter.close();
         }
-
-        await adapter.close();
-
-        console.log('\n========== 清理完成 ==========');
-        console.log(`  成功取消收藏: ${successCount}`);
-        console.log(`  跳过（未收藏）: ${skipCount}`);
-        console.log(`  失败: ${failCount}`);
       } finally {
         db.close();
       }
     });
+
+/** 查该 source 下最近一个迁移任务（满足 cleanup_plans.migration_job_id FK）。 */
+function resolveLatestMigrationJobId(db: DB, sourceInstanceId: string): string {
+  const row = db
+    .prepare(
+      `SELECT id FROM migration_jobs WHERE source_instance_id = ? ORDER BY created_at DESC LIMIT 1`,
+    )
+    .get(sourceInstanceId) as { id: string } | undefined;
+  if (row === undefined) {
+    throw new Error('没有可关联的迁移任务，请先完成迁移再清理');
+  }
+  return row.id;
+}
 
   return cleanup;
 }

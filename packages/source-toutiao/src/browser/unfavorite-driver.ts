@@ -7,7 +7,7 @@ export interface UnfavoriteDriverOptions {
   ref: SourceItemRef;
   /** 页面导航超时毫秒。 */
   navigationTimeoutMs?: number;
-  /** 点击取消收藏后等待状态变化的毫秒数。 */
+  /** 点击取消收藏后，轮询确认状态变化的总窗口毫秒数。 */
   waitAfterClickMs?: number;
 }
 
@@ -21,15 +21,28 @@ export interface UnfavoriteDriverResult {
   reason?: string;
 }
 
+/** 选择器参数包：aria-pressed 主信号 + collected class 回退。 */
+interface StateReadParams {
+  favorited: string;
+  notFavorited: string;
+  collectedClass: string;
+}
+
+const STATE_READ_PARAMS: StateReadParams = {
+  favorited: UNFAVORITE_SELECTORS.favoritedAriaPressed,
+  notFavorited: UNFAVORITE_SELECTORS.notFavoritedAriaPressed,
+  collectedClass: UNFAVORITE_SELECTORS.collectedClass,
+};
+
 /**
- * §12.7 浏览器驱动的取消收藏操作。
+ * §12.7 浏览器驱动的取消收藏操作（一次导航内完成全流程）。
  *
  * 流程：
- * 1. 导航到 ref.canonicalUrl（文章详情页），等待 domcontentloaded。
- * 2. 查找收藏按钮（选择器见 UNFAVORITE_SELECTORS.collectButton）。
- * 3. 检查是否已收藏（aria-pressed="true" 为主信号，collected class 作回退）。
- * 4. 如果已收藏，点击按钮取消收藏。
- * 5. 等待 aria-pressed 变为 "false"，确认取消成功。
+ * 1. 导航到 ref.canonicalUrl，等待 domcontentloaded。
+ * 2. 等待收藏按钮渲染（waitFor attached，根治 SPA 未渲染误判 not found）。
+ * 3. 读 aria-pressed 判定收藏状态（主信号，根治 collected class 在真实页面不存在的误判）。
+ * 4. 若已收藏：点击 → 在窗口内轮询确认 aria-pressed 转 false（根治固定等待导致的 still collected 误判）。
+ * 5. 若本来就未收藏：直接返回 wasCollected=false（编排器据此计入"跳过"）。
  *
  * §12.7 安全要求：
  * - 只操作用户自己收藏的内容，不操作他人内容。
@@ -49,60 +62,45 @@ export async function driveUnfavorite(
     timeout: opts.navigationTimeoutMs ?? 30_000,
   });
 
-  // 等待收藏按钮渲染（domcontentloaded 时 SPA 可能未渲染完，瞬时 count 会误判 not found）
+  // 等待收藏按钮渲染：domcontentloaded 时 SPA 详情页可能尚未渲染按钮，
+  // 瞬时 count() 会误判 not found（这是"未知"大量产生的根因）。
   const collectBtn = opts.page
     .locator(UNFAVORITE_SELECTORS.collectButton.join(', '))
     .first();
   try {
-    await collectBtn.waitFor({ state: 'attached', timeout: opts.navigationTimeoutMs ?? 10_000 });
+    await collectBtn.waitFor({
+      state: 'attached',
+      timeout: opts.navigationTimeoutMs ?? 10_000,
+    });
   } catch {
-    // 超时则用 count 复核，保持原有 not found 语义
+    // 超时仍未渲染：用 count 复核，保留 not found 语义（编排器据此计入"未知"）
   }
   const exists = await collectBtn.count().catch(() => 0);
   if (exists === 0) {
     return { success: false, wasCollected: false, isCollected: false, reason: 'collect button not found' };
   }
 
-  // 检查当前收藏状态：aria-pressed="true" 为主信号（真实页面），collected class 作回退
-  const wasCollected = await collectBtn.evaluate(
-    (el, sel) => {
-      const pressed = el.getAttribute('aria-pressed');
-      if (pressed === sel.favorited) return true;
-      if (pressed === sel.notFavorited) return false;
-      return el.classList.contains(sel.collectedClass);
-    },
-    {
-      favorited: UNFAVORITE_SELECTORS.favoritedAriaPressed,
-      notFavorited: UNFAVORITE_SELECTORS.notFavoritedAriaPressed,
-      collectedClass: UNFAVORITE_SELECTORS.collectedClass,
-    },
-  );
+  // 读操作前状态：aria-pressed 主信号，collected class 作回退
+  const wasCollected = await readCollectedState(collectBtn);
 
+  // 本来就未收藏，无需操作（编排器据此计入"跳过"）
   if (!wasCollected) {
-    // 本来就没收藏，无需操作
     return { success: true, wasCollected: false, isCollected: false };
   }
 
   // 点击取消收藏
-  await collectBtn.click({ timeout: 5000 });
+  await collectBtn.click({ timeout: 5_000 });
 
-  // 等待 collected class 消失
-  const waitMs = opts.waitAfterClickMs ?? 2000;
-  await opts.page.waitForTimeout(waitMs);
-
-  const isCollected = await collectBtn.evaluate(
-    (el, sel) => {
-      const pressed = el.getAttribute('aria-pressed');
-      if (pressed === sel.favorited) return true;
-      if (pressed === sel.notFavorited) return false;
-      return el.classList.contains(sel.collectedClass);
-    },
-    {
-      favorited: UNFAVORITE_SELECTORS.favoritedAriaPressed,
-      notFavorited: UNFAVORITE_SELECTORS.notFavoritedAriaPressed,
-      collectedClass: UNFAVORITE_SELECTORS.collectedClass,
-    },
-  );
+  // 在窗口内轮询确认 aria-pressed 转 false：避免固定等待在状态更新延迟/风控时误判"仍收藏"
+  const windowMs = opts.waitAfterClickMs ?? 3_000;
+  const pollIntervalMs = 500;
+  const deadline = Date.now() + windowMs;
+  let isCollected = true;
+  while (Date.now() < deadline) {
+    await opts.page.waitForTimeout(Math.min(pollIntervalMs, deadline - Date.now()));
+    isCollected = await readCollectedState(collectBtn);
+    if (!isCollected) break; // 一旦转未收藏立即确认，不必等满窗口
+  }
 
   return {
     success: !isCollected,
@@ -110,4 +108,31 @@ export async function driveUnfavorite(
     isCollected,
     ...(isCollected ? { reason: 'still collected after click' } : {}),
   };
+}
+
+/**
+ * 只读检测收藏状态（不导航、不点击）。供 inspectActionState 复用，确保 inspect 与
+ * execute 走同一套判定逻辑，消除二者历史上"inspect 用 collected class、execute 用
+ * aria-pressed"的不一致。
+ *
+ * 调用方负责导航 + 等待渲染后传入按钮 locator。返回 null 表示按钮不存在。
+ */
+export async function inspectCollectedState(
+  collectBtn: ReturnType<Page['locator']>,
+): Promise<boolean | null> {
+  const exists = await collectBtn.count().catch(() => 0);
+  if (exists === 0) return null;
+  return readCollectedState(collectBtn);
+}
+
+/** 读单个收藏按钮的收藏状态：aria-pressed 主信号（true=已收藏），collected class 回退。 */
+async function readCollectedState(
+  collectBtn: ReturnType<Page['locator']>,
+): Promise<boolean> {
+  return collectBtn.evaluate((el, params: StateReadParams) => {
+    const pressed = el.getAttribute('aria-pressed');
+    if (pressed === params.favorited) return true;
+    if (pressed === params.notFavorited) return false;
+    return el.classList.contains(params.collectedClass);
+  }, STATE_READ_PARAMS);
 }

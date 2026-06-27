@@ -6,7 +6,7 @@ import {
   CleanupAttempts,
   ACTION_STATUS_UNFAVORITED,
 } from '@inkmigrate/core';
-import { decideCleanupAction, type PreActionState } from './cleanup-state-machine.js';
+import { type PreActionState } from './cleanup-state-machine.js';
 
 export interface CleanupProgress {
   phase: 'cleanup';
@@ -47,21 +47,14 @@ export interface CleanupOrchestratorResult {
 /** 每种失败原因只打印前几条样例，避免日志刷屏。 */
 const REASON_SAMPLE_LIMIT = 3;
 
-/** adapter inspectActionState 返回的连字符状态 → state-machine 的下划线状态。 */
-function toPreActionState(state: 'favorited' | 'not-favorited' | 'unknown'): PreActionState {
-  switch (state) {
-    case 'favorited': return 'favorited';
-    case 'not-favorited': return 'not_favorited';
-    case 'unknown': return 'unknown';
-  }
-}
-
-/** §14.5–§14.15 清理编排器：串联 inspect → decide(state-machine) → execute → 落库。
+/**
+ * §14.5–§14.15 清理编排器：execute(一次导航) → 按 receipt 映射四类 → 落库。
  *
- * 这是此前缺失的"编排者"——cleanup-state-machine / verifier 等纯函数已实现但从未被
- * 串联进运行时。本函数首次将它们接入，并把结果持久化到 cleanup_plans/jobs/items/
- * action_attempts 四张表（此前 GUI 路径只在内存计数，导致清理后无法区分已清理/待清理，
- * 反复重选同一批条目）。
+ * 历史上是 inspect → decide → execute → 落库（每条开两次详情页）。现合并为单次
+ * executeAction：驱动器内部一次导航完成等待渲染 → 读状态 → 点击 → 轮询复核，
+ * 编排器据 receipt 区分 成功/跳过(wasCollected=false)/未知(not found)/失败(still collected)。
+ * 结果持久化到 cleanup_plans/jobs/items/action_attempts 四张表，支持断点续跑
+ *（findUnfavoritedSourceItemIds 认 actionStatus='unfavorited_verified'）。
  */
 export async function runCleanupUnfavorite(
   opts: CleanupOrchestratorOptions,
@@ -171,48 +164,43 @@ export async function runCleanupUnfavorite(
     };
 
     const actionStartedAt = now();
+    // executeAction 内部一次导航完成：等待渲染 → 读状态 → 点击 → 轮询复核。
+    // precheckStatus 由 receipt.wasCollected 反推，落库语义与原 inspect 路径一致。
     let precheckStatus: PreActionState = 'unknown';
     let actionStatus = 'unknown';
     let lastErrorCode: string | null = null;
     let lastErrorMessage: string | null = null;
 
     try {
-      // a. inspect（pre-check）
-      const stateResult = await cleanup.inspectActionState(ref, 'unfavorite', ctx);
-      precheckStatus = toPreActionState(stateResult.state);
+      // executeAction 返回完整 receipt：wasCollected(操作前)/isCollected(操作后)/reason/success
+      const receipt = await cleanup.executeAction(ref, 'unfavorite', ctx);
+      // 由 receipt.wasCollected 反推操作前状态（替代原独立的 inspectActionState）
+      precheckStatus = receipt.wasCollected ? 'favorited' : 'not_favorited';
 
-      // b. decide（接入 state-machine）
-      const decision = decideCleanupAction({ preActionState: precheckStatus });
-
-      if (decision.action === 'execute') {
-        // c. execute
-        const receipt = await cleanup.executeAction(ref, 'unfavorite', ctx);
-        if (receipt.success && receipt.isCollected === false) {
-          actionStatus = ACTION_STATUS_UNFAVORITED;
-          successCount++;
-        } else if (receipt.success && receipt.isCollected === undefined && receipt.wasCollected === true) {
-          // 适配器未回报 isCollected 但操作成功，视为已取消
+      if (receipt.success && receipt.isCollected === false) {
+        // 成功取消（含本来就未收藏：wasCollected=false 时 driveUnfavorite 返回 success）
+        if (receipt.wasCollected) {
           actionStatus = ACTION_STATUS_UNFAVORITED;
           successCount++;
         } else {
-          actionStatus = 'verification_failed';
-          failedCount++;
-          const reason = receipt.reason ?? 'still collected after click';
-          lastErrorCode = reason;
-          lastErrorMessage = reason;
-          recordFailure(failReasons, reason, row.title, opts.onLog);
+          // 本来就未收藏 → 跳过
+          actionStatus = 'already_unfavorited';
+          skippedCount++;
         }
-      } else if (decision.action === 'skip') {
-        actionStatus = decision.finalState ?? 'skipped';
-        if (precheckStatus === 'not_favorited') skippedCount++;
-        else unknownCount++;
+      } else if (receipt.reason === 'collect button not found' || receipt.reason === 'no canonicalUrl') {
+        // 状态判定失败（按钮未渲染/找不到）→ 未知
+        actionStatus = 'state_unknown';
+        unknownCount++;
+        lastErrorCode = receipt.reason;
+        lastErrorMessage = receipt.reason;
       } else {
-        // pause：登录/验证码挑战，记为失败需人工介入
-        actionStatus = 'paused';
+        // 点击后仍收藏（含 still collected）或其它失败 → 失败
+        actionStatus = 'verification_failed';
         failedCount++;
-        lastErrorCode = decision.pauseReason ?? 'paused';
-        lastErrorMessage = `需要人工介入：${decision.pauseReason}`;
-        recordFailure(failReasons, decision.pauseReason ?? 'paused', row.title, opts.onLog);
+        const reason = receipt.reason ?? 'still collected after click';
+        lastErrorCode = reason;
+        lastErrorMessage = reason;
+        recordFailure(failReasons, reason, row.title, opts.onLog);
       }
     } catch (e) {
       actionStatus = 'permanent_failed';
