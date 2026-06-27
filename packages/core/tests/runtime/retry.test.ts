@@ -4,6 +4,7 @@ import {
   shouldPauseForRateLimit,
   type RetryPolicy,
 } from '../../src/runtime/retry.js';
+import { RETRY_BACKOFF_JITTER } from '../../src/runtime/jitter.js';
 
 const fastPolicy: RetryPolicy = {
   maxRetries: 3,
@@ -39,6 +40,53 @@ describe('withRetry (§18.1/§18.2)', () => {
     const fn = vi.fn().mockRejectedValue(err);
     await expect(withRetry(fn, fastPolicy)).rejects.toThrow('not found');
     expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it('§18.1 退避叠加抖动：random 固定时退避时长可预测', async () => {
+    // 固定 Math.random=0.5 → factor=1（不抖动）→ 退避等于 base
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const delays: number[] = [];
+    const setTimeoutSpy = vi
+      .spyOn(globalThis, 'setTimeout')
+      .mockImplementation(((cb: () => void, ms?: number) => {
+        if (typeof ms === 'number') delays.push(ms);
+        // 立即触发，不真等
+        cb();
+        return {} as NodeJS.Timeout;
+      }) as typeof setTimeout);
+    try {
+      const fn = vi.fn().mockRejectedValue(new Error('always fail'));
+      await expect(withRetry(fn, fastPolicy)).rejects.toThrow('always fail');
+      // 两次退避（第 1、2 次失败后），random=0.5 → factor=1 → base 原值
+      expect(delays).toEqual([10, 30]);
+    } finally {
+      randomSpy.mockRestore();
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
+  it('§18.1 退避叠加抖动：random=1 时取上界 base×(1+jitter)', async () => {
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(1);
+    const delays: number[] = [];
+    const setTimeoutSpy = vi
+      .spyOn(globalThis, 'setTimeout')
+      .mockImplementation(((cb: () => void, ms?: number) => {
+        if (typeof ms === 'number') delays.push(ms);
+        cb();
+        return {} as NodeJS.Timeout;
+      }) as typeof setTimeout);
+    try {
+      const fn = vi.fn().mockRejectedValue(new Error('always fail'));
+      await expect(withRetry(fn, fastPolicy)).rejects.toThrow('always fail');
+      // base=10 → 10*1.5=15；base=30 → 30*1.5=45
+      expect(delays).toEqual([
+        Math.round(10 * (1 + RETRY_BACKOFF_JITTER)),
+        Math.round(30 * (1 + RETRY_BACKOFF_JITTER)),
+      ]);
+    } finally {
+      randomSpy.mockRestore();
+      setTimeoutSpy.mockRestore();
+    }
   });
 });
 

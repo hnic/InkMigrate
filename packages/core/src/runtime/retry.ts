@@ -1,9 +1,12 @@
+import { withJitter, RETRY_BACKOFF_JITTER } from './jitter.js';
+
 /**
  * §18.1/§18.2 重试策略。
  *
  * - HTTP 429：先按退避重试；冷却要求超出窗口时 Job 进入 paused。
  * - 404、内容删除等永久错误不重试。
  * - 重试次数独立于条目状态。
+ * - §18.1 退避时长叠加抖动（±50%），避免固定退避被风控识别为自动化。
  */
 export interface RetryPolicy {
   maxRetries: number;
@@ -48,8 +51,9 @@ export async function withRetry<T>(
         throw e;
       }
       if (attempt < policy.maxRetries - 1) {
-        const delay = policy.backoffMs[attempt] ?? 1000;
-        await sleep(delay);
+        const base = policy.backoffMs[attempt] ?? 1000;
+        // §18.1 退避叠加抖动：base×(0.5~1.5) 均匀采样
+        await sleep(withJitter(base, RETRY_BACKOFF_JITTER));
       }
     }
   }

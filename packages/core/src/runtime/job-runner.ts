@@ -23,6 +23,7 @@ import {
 } from '../reports/migration-report.js';
 import { isQualityUpgradeCandidate } from './quality-upgrade.js';
 import { withRetry, DEFAULT_RETRY_POLICY } from './retry.js';
+import { withJitter, ITEM_INTERVAL_JITTER } from './jitter.js';
 import { installSignalHandlers } from './signals.js';
 
 export interface JobRunnerInput {
@@ -283,9 +284,10 @@ export async function runMigrationJob(
         });
       }
 
-      // §18.1 最后一条不需要等待
+      // §18.1 最后一条不需要等待；条目间等待叠加抖动（±40%，落在 [0.6×, 1.4×]），
+      // 避免固定间隔被风控识别为自动化
       if (idx < refs.length - 1 && intervalMs > 0) {
-        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+        await new Promise((resolve) => setTimeout(resolve, withJitter(intervalMs, ITEM_INTERVAL_JITTER)));
       }
     }
     } catch (e) {
