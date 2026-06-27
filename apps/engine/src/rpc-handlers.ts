@@ -8,6 +8,8 @@ import {
   openDatabase,
   type DB,
   type TargetContext,
+  type JobStatus,
+  canResumeFrom,
 } from '@inkmigrate/core';
 import { MigrationJobs } from '@inkmigrate/core';
 import {
@@ -75,6 +77,8 @@ import type {
   ScanStartResult,
   MigrateStartParams,
   MigrateResumeParams,
+  MigrateResumableParams,
+  MigrateResumableResult,
   MigrateResult,
   CleanupUnfavoriteParams,
   CleanupResult,
@@ -90,6 +94,7 @@ export function registerAllHandlers(): void {
   registerMethod('scan.start', (p) => handleScanStart(expandPaths(p as unknown as ScanStartParams, ['stateDir'])));
   registerMethod('migrate.start', (p) => handleMigrateStart(expandPaths(p as unknown as MigrateStartParams, ['stateDir', 'vaultPath'])));
   registerMethod('migrate.resume', (p) => handleMigrateResume(expandPaths(p as unknown as MigrateResumeParams, ['stateDir', 'vaultPath'])));
+  registerMethod('migrate.resumable', (p) => handleMigrateResumable(expandPaths(p as unknown as MigrateResumableParams, ['stateDir'])));
   registerMethod('cleanup.unfavorite', (p) => handleCleanupUnfavorite(expandPaths(p as unknown as CleanupUnfavoriteParams, ['stateDir'])));
   registerMethod('status.query', (p) => handleStatusQuery(expandPaths(p as unknown as StatusQueryParams, ['stateDir'])));
   // 终止当前长任务：设置进程级 cancel flag，循环在下一次迭代边界退出
@@ -254,6 +259,83 @@ async function handleMigrateStart(params: MigrateStartParams | undefined): Promi
 async function handleMigrateResume(params: MigrateResumeParams | undefined): Promise<MigrateResult> {
   if (params === undefined) throw new Error('missing params');
   return runMigrateJob(params, true);
+}
+
+/**
+ * 查询某 source 下最近一个可续跑的迁移 Job，供前端一键续跑，免去手填 Job ID。
+ *
+ * 判定可续跑：
+ *  - 显式终态 interrupted / paused（§11.1 resume 来源）；
+ *  - 兜底：status='running' 但 updated_at 距今超过 STALE_RUNNING_MS，
+ *    视为进程崩溃后未清理的悬挂 Job（kill -9 / 断电不会写 interrupted）。
+ * 只看该 source 的最近 Job：续跑场景下用户关心的就是"上一次没跑完的那个"。
+ */
+async function handleMigrateResumable(
+  params: MigrateResumableParams | undefined,
+): Promise<MigrateResumableResult> {
+  if (params === undefined) throw new Error('missing params');
+  const db: DB = openDatabase({ path: join(params.stateDir, 'inkmigrate.sqlite') });
+  try {
+    const job = resolveResumableJob(db, params.source);
+    if (job === undefined) return { job: null };
+
+    // 已完成 / 已 verified 的条目计数：续跑会跳过这些
+    const total = (
+      db
+        .prepare('SELECT COUNT(*) AS c FROM source_items WHERE source_instance_id = ?')
+        .get(params.source) as { c: number }
+    ).c;
+    const verified = (
+      db
+        .prepare(
+          "SELECT COUNT(*) AS c FROM source_items WHERE source_instance_id = ? AND status = 'verified'",
+        )
+        .get(params.source) as { c: number }
+    ).c;
+
+    return {
+      job: job.id,
+      status: job.status,
+      total,
+      verified,
+      targetInstanceId: job.targetInstanceId,
+    };
+  } finally {
+    db.close();
+  }
+}
+
+/** 进程崩溃后未写 interrupted 的 running Job 视为可续跑的时长阈值（毫秒）。 */
+const STALE_RUNNING_MS = 5 * 60 * 1000;
+
+/** 找该 source 下最近一个可续跑 Job，没有则 undefined。 */
+function resolveResumableJob(
+  db: DB,
+  sourceInstanceId: string,
+): { id: string; status: string; targetInstanceId: string } | undefined {
+  const rows = db
+    .prepare(
+      `SELECT id, status, target_instance_id AS targetInstanceId, updated_at AS updatedAt
+       FROM migration_jobs
+       WHERE source_instance_id = ?
+       ORDER BY created_at DESC
+       LIMIT 1`,
+    )
+    .all(sourceInstanceId) as Array<{
+      id: string;
+      status: string;
+      targetInstanceId: string;
+      updatedAt: string;
+    }>;
+  if (rows.length === 0) return undefined;
+  const job = rows[0]!;
+  if (canResumeFrom(job.status as JobStatus)) return job;
+  // 兜底：running 但卡住（进程已死），仍允许续跑
+  if (job.status === 'running') {
+    const age = Date.now() - new Date(job.updatedAt).getTime();
+    if (age > STALE_RUNNING_MS) return job;
+  }
+  return undefined;
 }
 
 async function runMigrateJob(
