@@ -74,7 +74,7 @@ export function CleanupPage({ settings, update, rpcCall, addLog, busy, activePha
         }}>
           ⚠️ 此操作会逐条打开文章详情页并取消收藏。<br/>
           已迁移到 Obsidian 的内容不会丢失，但头条上的收藏会被移除。<br/>
-          为防触发风控，默认每次处理 200 条、条目间隔约 2 秒；可分多次运行（已成功项自动跳过）。
+          为防触发风控，默认每次处理 200 条，且每条会模拟人类阅读（滚动浏览、随机停留）后再取消——单条约 15-30 秒，200 条约需 1-2 小时。可分多次运行（已成功项自动跳过）。
         </div>
 
         <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
