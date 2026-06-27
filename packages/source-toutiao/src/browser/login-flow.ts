@@ -73,22 +73,47 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginFlowRes
   const deadline = Date.now() + timeoutMs;
 
   // 首轮检测前等待页面渲染（不等完整 networkidle，只等 DOM 元素出现）
-  await page.waitForSelector('.ttp-header-profile, .header-profile-wrapper, .user-icon', {
+  // 等登录按钮（未登录）或用户头像（已登录）之一出现——两者都标志 header 已渲染
+  await page.waitForSelector('.login-button, .ttp-header-profile .user-icon', {
     timeout: 10_000,
   }).catch(() => {});
 
   // 合并头像+用户名检测为单次 evaluate，减少往返
   let isFirstRound = true;
+  // 记录首轮是否见到登录按钮——用于判断"按钮消失"是登录成功还是页面根本没渲染
+  let firstRoundHadLoginButton: boolean | null = null;
   while (Date.now() < deadline) {
     const loginCheck = await page.evaluate(() => {
-      const profile = document.querySelector('.ttp-header-profile img, .header-profile-wrapper img, .user-icon img');
-      const nameEl = document.querySelector('.ttp-header-profile .name, .header-profile-wrapper .name');
+      // 未登录时 header 是 <a class="login-button">；登录后头像在 .user-icon > a > img
+      const hasLoginButton = document.querySelector('.login-button') !== null;
+      const profile = document.querySelector(
+        '.ttp-header-profile img, .header-profile-wrapper img, .user-icon img',
+      );
       const hasAvatar = profile !== null;
-      const hasName = nameEl !== null && (nameEl.textContent?.trim().length ?? 0) > 0;
-      return { hasAvatar, hasName };
-    }).catch(() => ({ hasAvatar: false, hasName: false }));
+      // 头条改版后用户名不在 .name 元素里，而在头像链接的 aria-label 属性
+      const userIcon = document.querySelector(
+        '.ttp-header-profile .user-icon, .header-profile-wrapper .user-icon',
+      );
+      const nameFromLabel = userIcon?.querySelector('a')?.getAttribute('aria-label')?.trim();
+      const hasName = (nameFromLabel?.length ?? 0) > 0;
+      // header 区是否已渲染（避免对空白页误判）
+      const headerRendered =
+        document.querySelector('.ttp-header-profile, .ttp-site-header, header') !== null;
+      return { hasAvatar, hasName, hasLoginButton, headerRendered };
+    }).catch(() => ({ hasAvatar: false, hasName: false, hasLoginButton: true, headerRendered: false }));
 
-    if (loginCheck.hasAvatar && loginCheck.hasName) {
+    if (firstRoundHadLoginButton === null && loginCheck.headerRendered) {
+      firstRoundHadLoginButton = loginCheck.hasLoginButton;
+    }
+
+    // 登录判定（两个独立条件，任一满足）：
+    //   A. 正向：头像 + 用户名都存在（aria-label 命中）
+    //   B. 负向：首轮见过登录按钮、之后消失（真·登录态翻转）
+    // 注意 B 必须确认首轮有按钮，否则空白页/未渲染页会被误判登录
+    const positive = loginCheck.hasAvatar && loginCheck.hasName;
+    const loginButtonGone =
+      firstRoundHadLoginButton === true && !loginCheck.hasLoginButton;
+    if (positive || loginButtonGone) {
       signals = await collectLoginSignals(page, targetUrl);
       state = 'logged-in';
       // 登录成功后从页面提取收藏页 URL
@@ -203,10 +228,14 @@ async function extractFavoritesUrl(page: Page): Promise<string | undefined> {
         return `https://www.toutiao.com${href}`;
       }
 
-      // 还没找到，hover 用户头像区域展开下拉菜单
+      // 还没找到，hover 用户头像区域展开下拉菜单（收藏链接在 .user-list 下拉里）
+      // 改版后下拉挂在 .user-icon 下，hover 它才能展开
       if (attempt === 0) {
         try {
-          await page.locator('.ttp-header-profile, .header-profile-wrapper').first().hover({ timeout: 2000 });
+          await page
+            .locator('.ttp-header-profile .user-icon, .ttp-header-profile, .header-profile-wrapper')
+            .first()
+            .hover({ timeout: 2000 });
           await page.waitForTimeout(300);
         } catch {
           // hover 失败不影响后续尝试

@@ -1,0 +1,35 @@
+<!doctype html>
+<!--
+  模拟头条【已登录】header 结构（2026-06 改版后真实形态）。
+  用于验证 login-flow 主检测路径（轮询内 hasAvatar && hasName）：
+    - 头像在 .ttp-header-profile .user-icon a img
+    - 用户名在 <a aria-label="...">（不在 .name）
+    - 无 .login-button（登录按钮已消失）
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>分秒必争山丘D的头条主页 - 今日头条</title>
+</head>
+<body>
+  <div class="ttp-sticky-container">
+    <div role="banner" class="ttp-site-header-wrapper profile-header">
+      <div class="ttp-site-header">
+        <div class="ttp-header-profile">
+          <div class="user-icon">
+            <a aria-label="分秒必争山丘D" href="/c/user/token/MOCK_TOKEN/?source=mine_profile" target="_blank" rel="noopener">
+              <img src="https://example.com/avatar.png" alt="">
+            </a>
+            <div class="user-list ttp-popup-container">
+              <div class="user-list-content">
+                <a href="/c/user/token/MOCK_TOKEN/?tab=fav&source=mine_profile">我的收藏</a>
+                <a href="#">退出登录</a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

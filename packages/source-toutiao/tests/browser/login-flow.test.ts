@@ -63,4 +63,34 @@ describe('runLoginFlow', () => {
 
     await session.close();
   });
+
+  it('detects logged-in via aria-label header (2026 改版后真实结构)', async () => {
+    const profileDir = createTempProfileDir();
+    const session = new ToutiaoBrowserSession({ profileDir, headless: true });
+    await session.launch();
+    const page = await session.newPage();
+
+    // header-logged-in.html 是头条改版后的真实 header：
+    //   .ttp-header-profile .user-icon a[aria-label="用户名"] img
+    // 没有 .name 元素，没有 .login-button
+    const headerHtml = loadFixture('header-logged-in');
+    await page.route('**/favorites', (route) =>
+      route.fulfill({ contentType: 'text/html; charset=utf-8', body: headerHtml }),
+    );
+
+    const start = Date.now();
+    const result = await runLoginFlow({
+      session,
+      favoritesUrl: 'https://www.toutiao.com/favorites',
+      loginTimeoutMs: 30_000,
+      page,
+    });
+
+    expect(result.state).toBe('logged-in');
+    // 关键：必须走主检测路径（即时命中），而非等到超时兜底
+    // 若走了超时，这里会耗时 ~30s；主检测命中应在数秒内
+    expect(Date.now() - start).toBeLessThan(20_000);
+
+    await session.close();
+  });
 });
