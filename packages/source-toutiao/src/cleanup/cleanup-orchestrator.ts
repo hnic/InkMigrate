@@ -70,7 +70,7 @@ const DEFAULT_CLEANUP_INTERVAL_MS = 2000;
  * 不连续处理后续条目，原地等待给风控冷却时间，再重试当前条。
  * 等待期间分段（每 30s）检查 isCancelled，支持中途终止。
  */
-const FAILURE_BACKOFF_MS = 10 * 60 * 1000;
+const FAILURE_BACKOFF_MS = 15 * 60 * 1000;
 const BACKOFF_POLL_INTERVAL_MS = 30_000;
 
 /** 默认 sleep：真实定时器。测试可注入 spy 断言节奏而不真等。 */
