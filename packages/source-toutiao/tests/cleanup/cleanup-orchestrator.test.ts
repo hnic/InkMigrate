@@ -240,6 +240,79 @@ describe('runCleanupUnfavorite', () => {
     db.close();
   });
 
+  it('取消时 processed_count 反映实际处理数且 status=interrupted（非 completed）', async () => {
+    // §缺陷2：取消时应如实记录已处理条目数，并把 Job 标为 interrupted，
+    // 不能把 processedCount 写成 candidateCount、状态写死 completed。
+    const db = seedDb(3);
+    let callCount = 0;
+    const adapter = mockAdapter([
+      { success: true, wasCollected: true, isCollected: false },
+      { success: true, wasCollected: true, isCollected: false },
+      { success: true, wasCollected: true, isCollected: false }, // 不应被处理
+    ]);
+    const wrapped: SourceAdapter = {
+      ...adapter,
+      cleanup: {
+        supportedActions: ['unfavorite'],
+        executeAction: async (ref: SourceItemRef) => {
+          const r = await adapter.cleanup!.executeAction(ref);
+          callCount++;
+          return r;
+        },
+      },
+    } as unknown as SourceAdapter;
+
+    await runCleanupUnfavorite({
+      db,
+      sourceAdapter: wrapped,
+      sourceInstanceId: SOURCE_INSTANCE_ID,
+      migrationJobId: MIGRATION_JOB_ID,
+      workspaceDir: '/tmp/ws',
+      isCancelled: () => callCount >= 2,
+    });
+
+    expect(callCount).toBe(2);
+    const job = db
+      .prepare(`SELECT status, candidate_count AS candidateCount, processed_count AS processedCount FROM cleanup_jobs ORDER BY created_at DESC LIMIT 1`)
+      .get() as { status: string; candidateCount: number; processedCount: number };
+    expect(job.candidateCount).toBe(3);
+    expect(job.processedCount).toBe(2); // 实际处理数，而非 candidateCount
+    expect(job.status).toBe('interrupted'); // 不是 'completed'
+
+    db.close();
+  });
+
+  it('重试仍失败终止任务时 processed_count 反映实际处理数且 status=interrupted', async () => {
+    // §缺陷2：失败终止路径同样应如实记录。第 1 条重试仍失败→终止，只处理 1 条。
+    const db = seedDb(2);
+    const adapter = mockAdapter([
+      { success: false, wasCollected: true, isCollected: true, reason: 'still collected after click' },
+      { success: false, wasCollected: true, isCollected: true, reason: 'still collected after click' },
+      { success: true, wasCollected: true, isCollected: false }, // 不应被消费
+    ]);
+    const wrapped: SourceAdapter = {
+      ...adapter,
+      cleanup: {
+        supportedActions: ['unfavorite'],
+        executeAction: async (ref: SourceItemRef) => adapter.cleanup!.executeAction(ref),
+      },
+    } as unknown as SourceAdapter;
+
+    await runCleanupUnfavorite({
+      db, sourceAdapter: wrapped, sourceInstanceId: SOURCE_INSTANCE_ID,
+      migrationJobId: MIGRATION_JOB_ID, workspaceDir: '/tmp/ws', sleepFn: async () => {},
+    });
+
+    const job = db
+      .prepare(`SELECT status, candidate_count AS candidateCount, processed_count AS processedCount FROM cleanup_jobs ORDER BY created_at DESC LIMIT 1`)
+      .get() as { status: string; candidateCount: number; processedCount: number };
+    expect(job.candidateCount).toBe(2);
+    expect(job.processedCount).toBe(1); // 只处理了第 1 条（重试仍失败）就终止
+    expect(job.status).toBe('interrupted');
+
+    db.close();
+  });
+
   it('取消时跳过条目间等待（不等满）', async () => {
     const db = seedDb(3);
     let callCount = 0;

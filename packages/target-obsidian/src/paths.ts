@@ -55,13 +55,20 @@ export interface NotePathInput {
 /**
  * §13.3/§13.4 笔记相对路径（相对 Vault 根）：
  * `<importSubdir>/<sourceInstanceId>/<contentKindDir>/<title>-<shortId>.md`
- * 文件名主体过 `sanitizeFilename` 并截断到 `maxFilenameLength`。
+ *
+ * 文件名由 `sanitizeFilename(title)` + `-` + `stableShortId` 组成。stableShortId
+ * 后缀是断点续跑/重跑幂等的关键：同一指纹始终落到同一稳定路径，不依赖 planNote
+ * 的 `pathInUse` stat 兜底（后者会在重跑时把已存在文件误判为冲突，生成 -2/-3 冗余副本）。
+ *
+ * body 过 `sanitizeFilename` 并截断，截断上限预先扣除 `-shortId` 的长度，
+ * 使最终文件名总长 ≤ `maxFilenameLength`。shortId 同样 sanitize 以保证一致性与字符安全。
  */
 export function noteRelativePath(i: NotePathInput): string {
+  const suffix = `-${sanitizeFilename(i.stableShortId, { maxLength: 32 })}`;
   const body = sanitizeFilename(i.title, {
-    maxLength: i.config.maxFilenameLength,
+    maxLength: Math.max(1, i.config.maxFilenameLength - suffix.length),
   });
-  const filename = `${body}.md`;
+  const filename = `${body}${suffix}.md`;
   // importSubdir 为空时，笔记直接放 Vault 根目录（不加来源/类型子目录）
   if (!i.config.importSubdir) {
     return filename;

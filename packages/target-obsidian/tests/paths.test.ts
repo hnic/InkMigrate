@@ -39,7 +39,7 @@ describe('validateVault (§13.2)', () => {
 });
 
 describe('noteRelativePath (§13.3/§13.4)', () => {
-  it('builds toutiao article path under 文章/', () => {
+  it('builds toutiao article path under 文章/ with <title>-<shortId>.md', () => {
     const p = noteRelativePath({
       config: baseConfig,
       sourceInstanceId: 'toutiao-main',
@@ -47,9 +47,43 @@ describe('noteRelativePath (§13.3/§13.4)', () => {
       title: '人工智能如何改变软件开发',
       stableShortId: '0f7d1a2b3c',
     });
+    // §13.4 文件名格式：<title>-<stableShortId>.md
+    // stableShortId 后缀保证断点续跑/重跑时同一指纹落到同一稳定路径，
+    // 避免每次重跑因 pathInUse 误判而生成 -2/-3 冗余副本。
     expect(p).toBe(
-      'Imports/InkMigrate/toutiao-main/文章/人工智能如何改变软件开发.md',
+      'Imports/InkMigrate/toutiao-main/文章/人工智能如何改变软件开发-0f7d1a2b3c.md',
     );
+  });
+  it('filename includes the stableShortId suffix', () => {
+    // 显式断言：stableShortId 必须出现在文件名中（防止回归到丢弃 shortId 的实现）
+    const p = noteRelativePath({
+      config: baseConfig,
+      sourceInstanceId: 'toutiao-main',
+      contentKind: 'article',
+      title: '同名标题',
+      stableShortId: '0f7d1a2b3c',
+    });
+    const filename = p.split('/').pop()!;
+    expect(filename).toBe('同名标题-0f7d1a2b3c.md');
+  });
+  it('different stableShortIds for the same title produce distinct paths (no -N dedupe needed)', () => {
+    // 这是 stableShortId 的核心价值：标题相同但指纹不同的两篇文章
+    // 应天然落到不同文件，而非依赖 planNote 的 -2.md 兜底。
+    const a = noteRelativePath({
+      config: baseConfig,
+      sourceInstanceId: 'toutiao-main',
+      contentKind: 'article',
+      title: '同名标题',
+      stableShortId: 'aaaaaaaaaa',
+    });
+    const b = noteRelativePath({
+      config: baseConfig,
+      sourceInstanceId: 'toutiao-main',
+      contentKind: 'article',
+      title: '同名标题',
+      stableShortId: 'bbbbbbbbbb',
+    });
+    expect(a).not.toBe(b);
   });
   it('routes short-post to 微头条/', () => {
     const p = noteRelativePath({

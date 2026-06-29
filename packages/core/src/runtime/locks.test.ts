@@ -65,4 +65,36 @@ describe('acquireLock (§18.4)', () => {
     expect((err as LockConflictError).path).toBe(join(dir, 'p.lock'));
     first.release();
   });
+
+  it('原子获取：文件已存在（含"新鲜"锁）时绝不静默覆盖，必抛 LockConflictError', () => {
+    // §缺陷6：当前实现用 existsSync→readFileSync→writeFileSync 非原子，
+    // 跨进程抢占时存在 check-then-write 窗口，第二个进程可能在第一个
+    // existsSync(false) 之后、writeFileSync 之前创建锁，导致被静默覆盖。
+    //
+    // 本测试固化原子语义不变量：只要锁文件已存在（无论被谁创建），
+    // acquireLock 必须失败而非覆盖——这是 openSync('wx')（EEXIST）的契约，
+    // 也是消除 TOCTOU 窗口的可观察属性。
+    //
+    // 注：真正的跨进程竞态无法在进程内确定性复现（acquireLock 是同步的，
+    // 同进程顺序调用不会交错）。此测试覆盖"文件已存在则不覆盖"这一原子
+    // 创建的核心保证；跨进程并发由 wx 的 EEXIST 语义在内核层面保证。
+    const lockPath = join(dir, 'atomic.lock');
+    // 模拟"另一进程刚刚创建"的锁文件（新鲜，非 stale）
+    const fresh: LockFileContent = {
+      pid: 4242,
+      hostname: 'other-host',
+      jobId: 'other-job',
+      startedAt: new Date().toISOString(),
+      heartbeatAt: new Date().toISOString(),
+    };
+    writeFileSync(lockPath, JSON.stringify(fresh));
+
+    expect(() =>
+      acquireLock({ locksDir: dir, lockName: 'atomic', jobId: 'me' }),
+    ).toThrow(LockConflictError);
+
+    // 锁文件未被覆盖——仍是 other-job 的内容
+    const after = JSON.parse(readFileSync(lockPath, 'utf8')) as LockFileContent;
+    expect(after.jobId).toBe('other-job');
+  });
 });

@@ -72,7 +72,17 @@ export class ToutiaoBrowserSession {
     const ctx = this.context;
     this.context = undefined;
     if (ctx !== undefined) {
-      await ctx.close();
+      // ctx.close() 无超时参数，长时间有头运行后 Chromium 关闭可能卡死
+      //（残留页面/渲染进程）。一旦永久挂起，cleanup RPC handler 的 finally 永不返回，
+      //前端 busy 永不复位 → 所有按钮灰着点不动。这里给一个上限：超时则放弃等待，
+      //让 RPC 尽快释放；浏览器进程由 Playwright/系统最终回收。
+      const CLOSE_TIMEOUT_MS = 15_000;
+      await Promise.race([
+        ctx.close({ reason: 'browser-session close timeout' }),
+        new Promise<void>((resolve) => setTimeout(resolve, CLOSE_TIMEOUT_MS)),
+      ]).catch(() => {
+        /* close 失败不阻塞：会话即将被丢弃 */
+      });
     }
   }
 

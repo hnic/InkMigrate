@@ -163,6 +163,11 @@ export async function runCleanupUnfavorite(
   let skippedCount = 0;
   let failedCount = 0;
   let unknownCount = 0;
+  // §缺陷2：processedCount 记录"实际已落库的条目数"，与 candidateCount(rows.length)
+  // 区分。取消 / 重试终止时二者不等，必须如实落库，否则 GUI 进度与状态看板会错算。
+  let processedCount = 0;
+  // 是否因取消或重试仍失败而提前终止。决定最终 status：terminated → 'interrupted'。
+  let terminated = false;
   const itemsRepo = new CleanupItems(db);
   const attemptsRepo = new CleanupAttempts(db);
   const sleep = opts.sleepFn ?? defaultSleep;
@@ -172,6 +177,7 @@ export async function runCleanupUnfavorite(
     // 取消检查（GUI 终止按钮）：在处理新条目前退出，已处理的落库不丢
     if (opts.isCancelled?.()) {
       opts.onLog?.({ level: 'warn', message: `任务已终止：已处理 ${i}/${rows.length} 条` });
+      terminated = true;
       break;
     }
     const row = rows[i]!;
@@ -249,6 +255,7 @@ export async function runCleanupUnfavorite(
 
     // d. 落库（UPSERT 支持断点续跑）。抽成函数：重试终止分支也需先落库当前条再 break。
     const persistItem = () => {
+      processedCount++; // 每条落库计一次实际处理数（§缺陷2 对账准确性）
       const actionFinishedAt = now();
       itemsRepo.upsert({
         jobId,
@@ -314,6 +321,7 @@ export async function runCleanupUnfavorite(
           });
           // 先落库当前失败条目，再跳出
           persistItem();
+          terminated = true;
           break;
         }
       }
@@ -330,19 +338,22 @@ export async function runCleanupUnfavorite(
   }
 
   // 5. 收尾
+  // §缺陷2：processedCount 如实记录实际落库条目数；status 按是否提前终止区分
+  // interrupted / completed，避免取消后仍显示"已完成"误导 GUI 看板。
   const finishedAt = now();
   new CleanupJobs(db).updateCounts(jobId, {
-    processedCount: rows.length,
+    processedCount,
     successCount,
     skippedCount,
     failedCount,
     unknownCount,
   });
-  new CleanupJobs(db).updateStatus(jobId, { status: 'completed', finishedAt, updatedAt: finishedAt });
+  const finalStatus = terminated ? 'interrupted' : 'completed';
+  new CleanupJobs(db).updateStatus(jobId, { status: finalStatus, finishedAt, updatedAt: finishedAt });
 
   opts.onLog?.({
     level: failedCount > 0 ? 'warn' : 'info',
-    message: `清理完成：成功 ${successCount}，跳过 ${skippedCount}，失败 ${failedCount}${unknownCount > 0 ? `，未知 ${unknownCount}` : ''}`,
+    message: `${terminated ? '任务已终止' : '清理完成'}：成功 ${successCount}，跳过 ${skippedCount}，失败 ${failedCount}${unknownCount > 0 ? `，未知 ${unknownCount}` : ''}`,
   });
   if (failedCount > 0 && failReasons.size > 0) {
     const summary = Array.from(failReasons.entries())

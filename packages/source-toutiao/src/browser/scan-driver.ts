@@ -69,9 +69,55 @@ export async function driveScanFavorites(
   const extractItemsHtml = async (): Promise<string> => {
     const knownKeys = Array.from(nodeSeen);
     const result = await opts.page.evaluate(
-      (params: { selectorsJson: string; knownJson: string }) => {
+      (params: { selectorsJson: string; knownJson: string; baseUrl: string }) => {
         const selectors = JSON.parse(params.selectorsJson) as string[];
         const known = new Set(JSON.parse(params.knownJson) as string[]);
+        const baseUrl = params.baseUrl;
+
+        // §缺陷3 去重 key 必须与 Node 端 scanner 同口径，否则同一收藏项因
+        // href 中 query/追踪参数差异被浏览器端误判为"新条目"传回 Node，
+        // 再被 Node 端归一化去重丢弃 → 本轮 newInThisRound=0 → 连续多轮
+        // 触发 emptyCycles>=5 提前终止（扫描尚未到底）。
+        // 本函数复刻 src/normalize/dedupe-key.ts 的 deriveDedupeKey 口径
+        //（= externalId ?? canonicalUrl）。page.evaluate 在浏览器上下文执行，
+        // 无法闭包引用 Node 端 import，故在此内联；修改时务必同步两处 +
+        // tests/normalize/dedupe-key.test.ts。
+        const TRACKING_PARAMS = new Set([
+          'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
+          'from', 'source', 'log_from', 'wid', 'share_token', 'appshare',
+        ]);
+        function canonicalizeUrl(raw: string): string {
+          try {
+            const u = new URL(raw);
+            u.hash = '';
+            for (const k of [...u.searchParams.keys()]) {
+              if (TRACKING_PARAMS.has(k)) u.searchParams.delete(k);
+            }
+            return u.toString();
+          } catch {
+            return raw;
+          }
+        }
+        function extractContentId(url: string): string | undefined {
+          try {
+            const u = new URL(url);
+            if (!u.hostname.endsWith('toutiao.com')) return undefined;
+            const m = /\/(article|wenda|video|group|w)\/(\d+)/.exec(u.pathname);
+            return m?.[2];
+          } catch {
+            return undefined;
+          }
+        }
+        function dedupeKey(href: string): string {
+          let abs: string;
+          try {
+            abs = new URL(href, baseUrl).toString();
+          } catch {
+            abs = href;
+          }
+          const canonical = canonicalizeUrl(abs);
+          return extractContentId(canonical) ?? canonical;
+        }
 
         // 合并【所有】条目选择器的并集去重。
         // 同一收藏页混合出现视频/文章/微头条，外层容器 class 不同，
@@ -92,7 +138,7 @@ export async function driveScanFavorites(
           const href = link?.getAttribute('href');
           let key: string | undefined;
           if (href !== null && href !== undefined) {
-            key = href;
+            key = dedupeKey(href);
           } else {
             const textKey = el.textContent?.trim().substring(0, 100) ?? '';
             if (textKey) key = textKey;
@@ -107,7 +153,11 @@ export async function driveScanFavorites(
         for (const el of newEls) wrapper.appendChild(el.cloneNode(true));
         return { html: wrapper.innerHTML, newKeys };
       },
-      { selectorsJson: JSON.stringify(FAVORITES_SELECTORS.item), knownJson: JSON.stringify(knownKeys) },
+      {
+        selectorsJson: JSON.stringify(FAVORITES_SELECTORS.item),
+        knownJson: JSON.stringify(knownKeys),
+        baseUrl: opts.baseUrl,
+      },
     );
     // 在 Node 端更新 seen（页面刷新不会丢失）
     for (const k of result.newKeys) {

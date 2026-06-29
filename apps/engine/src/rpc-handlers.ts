@@ -540,10 +540,30 @@ async function handleCleanupUnfavorite(
         ...(result.jobId ? { jobId: result.jobId } : {}),
       };
     } finally {
-      await adapter.close();
+      // 双保险：BrowserSession.close() 已有 15s 超时，但万一被绕过/失效，
+      // adapter.close() 仍可能永久挂起（Playwright BrowserContext.close 无超时）。
+      // cleanup 结果此时已求值待返回，绝不能被关浏览器拖死——给上限，超时则记日志放弃。
+      await closeAdapterSafely(adapter);
     }
   } finally {
     db.close();
+  }
+}
+
+/**
+ * 带超时关闭源适配器：cleanup 的 RPC 结果已在 return 表达式里求值，
+ * 关浏览器（Playwright BrowserContext.close 无超时）若卡死会吞掉返回值，
+ * 导致前端 busy 永不复位。此处设上限，超时则记日志放弃，保证 RPC 必返回。
+ */
+async function closeAdapterSafely(adapter: { close(): Promise<void> }): Promise<void> {
+  const CLOSE_TIMEOUT_MS = 20_000; // 略大于 BrowserSession 内层的 15s，给第一层先兜
+  try {
+    await Promise.race([
+      adapter.close(),
+      new Promise<void>((resolve) => setTimeout(resolve, CLOSE_TIMEOUT_MS)),
+    ]);
+  } catch (e) {
+    logToStderr('warn', `adapter.close() 异常（已忽略）：${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
