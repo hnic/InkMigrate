@@ -20,14 +20,17 @@ export function createDoctorCommand(): Command {
         const dbPath = join(opts.stateDir, 'inkmigrate.sqlite');
         if (existsSync(dbPath)) {
           try {
+            // §缺陷3：openDatabase 打开时会自动 migrate 到最新版本，因此此处
+            // 读到的 version 必定等于 SCHEMA_VERSION——原先的 version !==
+            // SCHEMA_VERSION 分支是永不可达的死代码。且其提示"请运行
+            // inkmigrate config upgrade"误导：config upgrade 升级的是 YAML 配置，
+            // 与数据库 schema 无关。这里如实报告版本（已由 openDatabase 自动升级），
+            // 不再给无法成立的"版本不一致"提示。
             const db = openDatabase({ path: dbPath });
             const version = getCurrentSchemaVersion(db);
             db.close();
             console.log(`✓ 数据库：${dbPath}`);
-            console.log(`  Schema 版本：${version}（期望 ${SCHEMA_VERSION}）`);
-            if (version !== SCHEMA_VERSION) {
-              console.log(`  ⚠ Schema 版本不一致，请运行 inkmigrate config upgrade。`);
-            }
+            console.log(`  Schema 版本：${version}（期望 ${SCHEMA_VERSION}，已自动迁移）`);
           } catch (e) {
             console.log(`✗ 数据库损坏：${(e as Error).message}`);
           }
