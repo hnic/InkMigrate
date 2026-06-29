@@ -572,6 +572,73 @@ describe('runCleanupUnfavorite', () => {
 
     db.close();
   });
+
+  it('续跑过滤：already_unfavorited（本就未收藏）条目重跑时不被重复导航（§缺陷根治重跑浪费）', async () => {
+    // 对应日志现象"取消收藏遍历了很多已经取消过收藏的页面"：skipped（already_unfavorited）
+    // 在源侧本就是未收藏终态，重跑不该再打开这些页面。
+    const db = seedDb(2);
+    const adapter1 = mockAdapter([
+      { success: true, wasCollected: true, isCollected: false }, // 第 1 条真正取消成功
+      { success: true, wasCollected: false, isCollected: false }, // 第 2 条本就未收藏（skipped）
+    ]);
+    await runCleanupUnfavorite({
+      db, sourceAdapter: adapter1, sourceInstanceId: SOURCE_INSTANCE_ID,
+      migrationJobId: MIGRATION_JOB_ID, workspaceDir: ws, sleepFn: async () => {},
+    });
+
+    // 第二次：executeAction 不应被调用——两条都已落入无需再处理的终态集合
+    let executeCount = 0;
+    const adapter2 = mockAdapter([
+      // 如果 bug 未修，编排器会调用 executeAction 消费这些；receipt 里给个会污染计数的状态
+      { success: false, wasCollected: true, isCollected: true, reason: 'should not be reached' },
+      { success: false, wasCollected: true, isCollected: true, reason: 'should not be reached' },
+    ]);
+    const wrapped: SourceAdapter = {
+      ...adapter2,
+      cleanup: {
+        supportedActions: ['unfavorite'],
+        executeAction: async (ref: SourceItemRef) => {
+          executeCount++;
+          return adapter2.cleanup!.executeAction(ref);
+        },
+      },
+    } as unknown as SourceAdapter;
+
+    const r2 = await runCleanupUnfavorite({
+      db, sourceAdapter: wrapped, sourceInstanceId: SOURCE_INSTANCE_ID,
+      migrationJobId: MIGRATION_JOB_ID, workspaceDir: ws, sleepFn: async () => {},
+    });
+
+    expect(executeCount).toBe(0); // 两条终态条目都不应再被导航
+    expect(r2.successCount).toBe(0);
+    expect(r2.skippedCount).toBe(0);
+
+    db.close();
+  });
+
+  it('未知项打印采样日志：collect button not found 时输出 reason + 标题（可观测性）', async () => {
+    // §缺陷：unknownCount 分支此前只静默计数、从不打日志，导致"未知 N"成黑盒。
+    const db = seedDb(1);
+    const adapter = mockAdapter([
+      { success: false, wasCollected: false, isCollected: false, reason: 'collect button not found' },
+    ]);
+    const logs: { level: string; message: string }[] = [];
+
+    const result = await runCleanupUnfavorite({
+      db, sourceAdapter: adapter, sourceInstanceId: SOURCE_INSTANCE_ID,
+      migrationJobId: MIGRATION_JOB_ID, workspaceDir: ws, sleepFn: async () => {},
+      onLog: (e) => logs.push({ level: e.level, message: e.message }),
+    });
+
+    expect(result.unknownCount).toBe(1);
+    // 应有至少一条日志提及 unknown 的 reason 与条目标题（标题为"标题0"）
+    const unknownLogs = logs.filter((l) =>
+      l.message.includes('collect button not found') && l.message.includes('标题0'),
+    );
+    expect(unknownLogs.length).toBe(1);
+
+    db.close();
+  });
 });
 
 /** 从库里查出本次 cleanup job id（取最新一条）。 */

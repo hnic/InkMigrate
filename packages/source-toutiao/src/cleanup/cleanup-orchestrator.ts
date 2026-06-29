@@ -5,6 +5,7 @@ import {
   CleanupItems,
   CleanupAttempts,
   ACTION_STATUS_UNFAVORITED,
+  ACTION_STATUS_ALREADY_UNFAVORITED,
   withJitter,
   ITEM_INTERVAL_JITTER,
 } from '@inkmigrate/core';
@@ -88,7 +89,7 @@ const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeou
  * executeAction：驱动器内部一次导航完成等待渲染 → 读状态 → 点击 → 轮询复核，
  * 编排器据 receipt 区分 成功/跳过(wasCollected=false)/未知(not found)/失败(still collected)。
  * 结果持久化到 cleanup_plans/jobs/items/action_attempts 四张表，支持断点续跑
- *（findUnfavoritedSourceItemIds 认 actionStatus='unfavorited_verified'）。
+ *（findUnfavoritedSourceItemIds 认 actionStatus='unfavorited_verified' 或 'already_unfavorited'，二者皆为终态）。
  */
 export async function runCleanupUnfavorite(
   opts: CleanupOrchestratorOptions,
@@ -184,6 +185,8 @@ export async function runCleanupUnfavorite(
   const ctx: CleanupContext = { config: {}, workspaceDir };
   // 失败原因聚合（采样 + 汇总），保留既有可观测性
   const failReasons = new Map<string, number>();
+  // §可观测性：未知原因聚合（采样 + 汇总）。unknown 分支此前只静默计数，"未知 N"成黑盒。
+  const unknownReasons = new Map<string, number>();
 
   let successCount = 0;
   let skippedCount = 0;
@@ -252,10 +255,11 @@ export async function runCleanupUnfavorite(
           lastErrorMessage = receipt.detectedState === 'login_required' ? '需要重新登录' : '触发风控验证';
           return { hardFailed: false, detectedState: receipt.detectedState };
         }
-        // 内容不可用（删除等）→ 跳过，继续处理后续
+        // 内容不可用（删除等）→ 跳过，继续处理后续。action_status 同样落 already_unfavorited
+        //（对取消收藏目标已是终态），以便重跑时被 findUnfavoritedSourceItemIds 排除。
         if (receipt.detectedState === 'content_unavailable') {
           precheckStatus = 'content_unavailable';
-          actionStatus = 'already_unfavorited';
+          actionStatus = ACTION_STATUS_ALREADY_UNFAVORITED;
           skippedCount++;
           lastErrorCode = 'content_unavailable';
           lastErrorMessage = '内容不可用（已删除）';
@@ -270,7 +274,7 @@ export async function runCleanupUnfavorite(
             actionStatus = ACTION_STATUS_UNFAVORITED;
             successCount++;
           } else {
-            actionStatus = 'already_unfavorited';
+            actionStatus = ACTION_STATUS_ALREADY_UNFAVORITED;
             skippedCount++;
           }
           return { hardFailed: false };
@@ -280,6 +284,7 @@ export async function runCleanupUnfavorite(
           unknownCount++;
           lastErrorCode = receipt.reason;
           lastErrorMessage = receipt.reason;
+          recordReason(unknownReasons, receipt.reason, row.title, opts.onLog, '未知');
           return { hardFailed: false };
         } else {
           // 点击后仍收藏（含 still collected，风控信号）或其它失败 → 真正失败，触发等待重试
@@ -288,7 +293,7 @@ export async function runCleanupUnfavorite(
           const reason = receipt.reason ?? 'still collected after click';
           lastErrorCode = reason;
           lastErrorMessage = reason;
-          recordFailure(failReasons, reason, row.title, opts.onLog);
+          recordReason(failReasons, reason, row.title, opts.onLog);
           return { hardFailed: true };
         }
       } catch (e) {
@@ -297,7 +302,7 @@ export async function runCleanupUnfavorite(
         const reason = `exception: ${e instanceof Error ? e.message : String(e)}`;
         lastErrorCode = reason;
         lastErrorMessage = reason;
-        recordFailure(failReasons, reason, row.title, opts.onLog);
+        recordReason(failReasons, reason, row.title, opts.onLog);
         return { hardFailed: true };
       }
     };
@@ -429,6 +434,14 @@ export async function runCleanupUnfavorite(
       .join('，');
     opts.onLog?.({ level: 'warn', message: `失败原因汇总：${summary}` });
   }
+  // §可观测性：未知原因汇总。配合上方"未知 N"计数，不再让未知项成黑盒。
+  if (unknownCount > 0 && unknownReasons.size > 0) {
+    const summary = Array.from(unknownReasons.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([reason, count]) => `${reason}×${count}`)
+      .join('，');
+    opts.onLog?.({ level: 'warn', message: `未知原因汇总：${summary}` });
+  }
 
   const result: CleanupOrchestratorResult = {
     jobId,
@@ -443,18 +456,23 @@ export async function runCleanupUnfavorite(
   return result;
 }
 
-function recordFailure(
-  failReasons: Map<string, number>,
+/**
+ * 按 reason 聚合计数 + 前 REASON_SAMPLE_LIMIT 条采样打印。失败与未知共用：
+ * label 决定日志前缀（"失败"/"未知"），语义更准确，避免把"按钮没渲染"误报为"失败"。
+ */
+function recordReason(
+  reasons: Map<string, number>,
   reason: string,
   title: string | null,
   onLog?: (e: CleanupLogEntry) => void,
+  label: '失败' | '未知' = '失败',
 ): void {
-  const prev = failReasons.get(reason) ?? 0;
-  failReasons.set(reason, prev + 1);
+  const prev = reasons.get(reason) ?? 0;
+  reasons.set(reason, prev + 1);
   if (prev < REASON_SAMPLE_LIMIT && onLog) {
     onLog({
       level: 'warn',
-      message: `取消收藏失败（${reason}）：${title?.substring(0, 50) ?? '(无标题)'}`,
+      message: `取消收藏${label}（${reason}）：${title?.substring(0, 50) ?? '(无标题)'}`,
     });
   }
 }

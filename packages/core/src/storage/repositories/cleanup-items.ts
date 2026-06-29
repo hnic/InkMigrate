@@ -41,6 +41,13 @@ export interface CleanupItemRow {
 export const ACTION_STATUS_UNFAVORITED = 'unfavorited_verified';
 
 /**
+ * §缺陷修复：表示"对取消收藏目标已是终态、无需再处理"的 action_status 取值。
+ * 即条目在源侧本就未收藏（打开后判定 not_favorited），或内容已删除（content_unavailable）。
+ * 重跑时这些条目必须排除，否则会被反复重新导航打开（纯浪费 + 加剧风控暴露）。
+ */
+export const ACTION_STATUS_ALREADY_UNFAVORITED = 'already_unfavorited';
+
+/**
  * §16.10 cleanup_items 仓储。单条目清理明细，UNIQUE(job_id, source_item_id) 支持断点续跑。
  */
 export class CleanupItems {
@@ -92,8 +99,11 @@ export class CleanupItems {
       .all(jobId) as CleanupItemRow[];
   }
 
-  /** 查询某 plan 体系下已成功取消收藏的 source_item_id（用于排除重跑）。
-   *  跨 job：只要该 source_item 在任意清理中已 unfavorited_verified，就不再选中。 */
+  /** 查询某 plan 体系下已无需再处理的 source_item_id（用于排除重跑）。
+   *  跨 job：只要该 source_item 在任意清理中已落到"终态"action_status，就不再选中。
+   *  终态包含：unfavorited_verified（真正取消成功）+ already_unfavorited（本就未收藏/
+   *  内容删除——对取消收藏目标已是终态）。§缺陷修复：此前漏排 already_unfavorited，
+   *  导致重跑反复重新打开这些页面。 */
   findUnfavoritedSourceItemIds(sourceInstanceId: string): Set<number> {
     const rows = this.db
       .prepare(
@@ -102,9 +112,9 @@ export class CleanupItems {
          JOIN cleanup_jobs cj ON cj.id = ci.job_id
          JOIN cleanup_plans cp ON cp.id = cj.plan_id
          WHERE cp.source_instance_id = ?
-           AND ci.action_status = ?`,
+           AND ci.action_status IN (?, ?)`,
       )
-      .all(sourceInstanceId, ACTION_STATUS_UNFAVORITED) as Array<{ id: number }>;
+      .all(sourceInstanceId, ACTION_STATUS_UNFAVORITED, ACTION_STATUS_ALREADY_UNFAVORITED) as Array<{ id: number }>;
     return new Set(rows.map((r) => r.id));
   }
 }

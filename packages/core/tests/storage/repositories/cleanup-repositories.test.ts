@@ -175,6 +175,39 @@ describe('cleanup repositories', () => {
       expect(done.has(item2)).toBe(false); // 失败 → 不排除
       expect(done.has(item3)).toBe(false); // 未清理 → 不排除
     });
+
+    it('findUnfavoritedSourceItemIds 也排除 already_unfavorited（本就未收藏，对目标已是终态）', () => {
+      // §缺陷：already_unfavorited 表示条目在源侧本就未收藏（或内容已删除），
+      // 对"取消收藏"目标已是终态。此前只排除 unfavorited_verified，导致重跑反复
+      // 重新打开这些页面（纯浪费 + 加剧风控暴露）。
+      const { jobId: jobId1 } = seedPlanAndJob();
+      const item1 = seedSourceItem(1); // 成功取消
+      const item2 = seedSourceItem(2); // 本就未收藏（skipped）
+      const item3 = seedSourceItem(3); // 内容删除（skipped, content_unavailable）
+      const item4 = seedSourceItem(4); // 未清理
+
+      new CleanupItems(db).upsert({
+        jobId: jobId1, sourceItemId: item1,
+        precheckStatus: 'favorited', actionStatus: ACTION_STATUS_UNFAVORITED,
+        createdAt: 't', updatedAt: 't',
+      });
+      new CleanupItems(db).upsert({
+        jobId: jobId1, sourceItemId: item2,
+        precheckStatus: 'not_favorited', actionStatus: 'already_unfavorited',
+        createdAt: 't', updatedAt: 't',
+      });
+      new CleanupItems(db).upsert({
+        jobId: jobId1, sourceItemId: item3,
+        precheckStatus: 'content_unavailable', actionStatus: 'already_unfavorited',
+        lastErrorCode: 'content_unavailable', createdAt: 't', updatedAt: 't',
+      });
+
+      const done = new CleanupItems(db).findUnfavoritedSourceItemIds('s1');
+      expect(done.has(item1)).toBe(true); // 成功取消 → 排除
+      expect(done.has(item2)).toBe(true); // 本就未收藏 → 排除（§缺陷修复）
+      expect(done.has(item3)).toBe(true); // 内容删除 → 排除（§缺陷修复）
+      expect(done.has(item4)).toBe(false); // 未清理 → 不排除
+    });
   });
 
   describe('CleanupAttempts', () => {
