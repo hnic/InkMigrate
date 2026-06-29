@@ -101,6 +101,9 @@ describe('generateShardIndexes (§13.8)', () => {
     const href = /^\- \[[^\]]+\]\(([^)]+)\)/.exec(mdLinkLine!)![1];
     expect(href.startsWith('../')).toBe(true);
     expect(href).not.toContain('_索引/');
+    // 跨平台回归（CI Windows 失败 #14）：path.relative 在 Windows 上产出反斜杠分隔符
+    // （..\..\），而 Markdown 链接渲染只认正斜杠 → 404。归一化后 href 不得含反斜杠。
+    expect(href).not.toMatch(/\\/);
   });
 
   it('每个分片/总入口返回 writtenFileHash（用于 artifact 追踪 + 重跑保护）', () => {

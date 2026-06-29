@@ -136,8 +136,10 @@ function renderShardMarkdown(
     if (linkStyle === 'wikilink') {
       lines.push(`- [[${e.relativePath.replace(/\.md$/, '')}|${e.title}]]`);
     } else {
-      // markdown 链接按当前分片文件所在目录解析；用相对路径避免 404
-      const rel = relative(shardDir, e.relativePath);
+      // markdown 链接按当前分片文件所在目录解析；用相对路径避免 404。
+      // path.relative 在 Windows 上产出反斜杠分隔符（..\..\），而 Markdown 链接
+      // 必须用正斜杠（跨平台渲染器仅认 /），故统一归一化为正斜杠。
+      const rel = relative(shardDir, e.relativePath).split('\\').join('/');
       lines.push(`- [${e.title}](${rel})`);
     }
   }
