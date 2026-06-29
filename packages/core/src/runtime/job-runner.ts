@@ -6,7 +6,7 @@ import type {
   IndexEntryInput,
 } from '../adapters/adapter.js';
 import type { SourceItem, SourceItemRef } from '../domain/models.js';
-import type { ItemFinalState, FinalStateCounts } from '../domain/states.js';
+import type { ItemFinalState, ItemRecoverableState, FinalStateCounts } from '../domain/states.js';
 import { MigrationJobs } from '../storage/repositories/migration-jobs.js';
 import { SourceItems } from '../storage/repositories/source-items.js';
 import { TargetArtifacts } from '../storage/repositories/target-artifacts.js';
@@ -208,7 +208,10 @@ export async function runMigrationJob(
     // §18.2 限流（429/503）时 Job 进入 paused
     const configRecord = i.targetContext.config as Record<string, unknown>;
     const intervalMs = (configRecord['intervalMs'] as number | undefined) ?? 1500;
-    const itemStates: ItemFinalState[] = [];
+    // itemStates 同时持有完成终态（ItemFinalState，进等式）与可恢复态
+    // （interrupted/retryable_failed，不进等式，仅用于 recoverableCount 统计）。
+    // 规格 §11.1：限流未处理条目归 interrupted（可恢复），不另设终态。
+    const itemStates: (ItemFinalState | ItemRecoverableState)[] = [];
     // 增量状态计数器（避免每条目全量重扫 itemStates）
     const progressCounts: FinalStateCounts = {
       verified: 0,
@@ -218,7 +221,6 @@ export async function runMigrationJob(
       blocked: 0,
       conflict: 0,
       skipped: 0,
-      rate_limited: 0,
     };
     let rateLimited = false;
     try {
@@ -311,10 +313,12 @@ export async function runMigrationJob(
         pausedAt: now(),
         updatedAt: now(),
       });
-      // §13 未处理条目标记为 rate_limited（限流可断点续跑恢复，区别于主动 skipped）
+      // §13 限流未处理条目标记为可恢复态 interrupted（规格 §11.1：rate_limited 是 Job 级
+      // paused 的 pause_reason，非条目终态；未处理条目归 interrupted，completed 前须为 0，
+      // 断点续跑可恢复，且与用户主动 skipped 区分）。
       const processed = itemStates.length;
       for (let idx = processed; idx < refs.length; idx++) {
-        itemStates.push('rate_limited');
+        itemStates.push('interrupted');
       }
       return {
         status: 'paused',
@@ -430,9 +434,9 @@ export async function runMigrationJob(
     });
 
     const jobRow = jobs.get(i.jobId);
-    // §11.9 recoverableCount 从 itemStates 统计（§13 rate_limited 也属可恢复）
+    // §11.9 recoverableCount 从 itemStates 统计（retryable_failed / interrupted 可恢复）
     const recoverableCount = (itemStates as string[]).filter(
-      (s) => s === 'retryable_failed' || s === 'interrupted' || s === 'rate_limited',
+      (s) => s === 'retryable_failed' || s === 'interrupted',
     ).length;
 
     const reconciliation = reconcileJob({

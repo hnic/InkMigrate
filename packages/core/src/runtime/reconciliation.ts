@@ -1,9 +1,9 @@
-import type { ItemFinalState, FinalStateCounts } from '../domain/states.js';
+import type { ItemFinalState, ItemRecoverableState, FinalStateCounts } from '../domain/states.js';
 import { aggregateFailedCount } from '../domain/states.js';
 
-/** §11.9 从条目终态列表派生明细计数。 */
+/** §11.9 从条目终态列表派生明细计数。可恢复态（interrupted/retryable_failed）不计入。 */
 export function deriveFinalStateCounts(
-  states: readonly ItemFinalState[],
+  states: readonly (ItemFinalState | ItemRecoverableState | string)[],
 ): FinalStateCounts {
   const counts: FinalStateCounts = {
     verified: 0,
@@ -13,10 +13,12 @@ export function deriveFinalStateCounts(
     blocked: 0,
     conflict: 0,
     skipped: 0,
-    rate_limited: 0,
   };
   for (const s of states) {
-    counts[s]++;
+    // 仅统计已知完成终态；可恢复态（interrupted/retryable_failed）跳过，不计入等式
+    if (s in counts) {
+      counts[s as keyof FinalStateCounts]++;
+    }
   }
   return counts;
 }
@@ -31,7 +33,8 @@ export interface CachedJobCounts {
 
 export interface ReconcileInput {
   scanCount: number;
-  itemStates: readonly ItemFinalState[];
+  /** 条目状态列表（完成终态 + 可恢复态；可恢复态不计入等式，仅 recoverableCount 用）。 */
+  itemStates: readonly (ItemFinalState | ItemRecoverableState)[];
   recoverableCount: number;
   cachedCounts: CachedJobCounts;
 }
@@ -67,8 +70,7 @@ export function reconcileJob(i: ReconcileInput): ReconciliationResult {
     derived.degraded +
     derivedFailed +
     derived.conflict +
-    derived.skipped +
-    derived.rate_limited;
+    derived.skipped;
   if (sum !== i.scanCount) {
     return {
       ok: false,

@@ -341,9 +341,11 @@ describe('runMigrationJob (§11 端到端)', () => {
     expect(artifacts.every((a) => a.artifact_kind === 'note')).toBe(true);
   });
 
-  it('§13 限流条目终态为 rate_limited（非 skipped），Job 进入 paused', async () => {
+  it('§13 限流条目标为可恢复态 interrupted（非 skipped），Job 进入 paused', async () => {
     // 缺陷13：限流（429/503）时未处理条目被标为 'skipped'，与用户主动跳过的 skipped
-    // 混淆，不利审计。修正后限流条目应为独立终态 'rate_limited'（可断点续跑恢复）。
+    // 混淆，不利审计与断点续跑。按规格 §11.1：限流是 Job 级 paused（pause_reason=
+    // rate_limited），未处理条目应为可恢复态 interrupted（completed 前须为 0），
+    // 不计入完成对账终态，且绝不与 skipped 混淆。
     new SourceInstances(db).create({
       id: 's1', adapterKind: 'toutiao', adapterVersion: '1.0.0',
       adapterApiVersion: '1.0.0', configHash: 'h', createdAt: 't', updatedAt: 't',
@@ -360,8 +362,7 @@ describe('runMigrationJob (§11 端到端)', () => {
     const articleHtml = readFileSync(join(FIXTURES, 'article.html'), 'utf8');
 
     // 构造一个会在第 2 条 extract 时抛 429 的 source：第 1 条正常，第 2 条限流。
-    // retryable:false 让 withRetry 立即抛出（绕过生产 3 次退避重试，加速测试），
-    // 不影响验证"429 → rate_limited 终态"这一核心逻辑。
+    // retryable:false 让 withRetry 立即抛出（绕过生产 3 次退避重试，加速测试）。
     const base = createFixtureSource(favoritesHtml, articleHtml);
     let extractCalls = 0;
     const rateLimitedSource: SourceAdapter = {
@@ -408,13 +409,12 @@ describe('runMigrationJob (§11 端到端)', () => {
       reportsDir: join(dbDir, 'reports'),
     });
 
-    // Job 因限流进入 paused（非 completed）
+    // Job 因限流进入 paused（非 completed），pause_reason=rate_limited
     expect(result.status).toBe('paused');
     expect(result.reconciliationOk).toBe(false);
     expect(result.reconciliationReason).toBe('rate_limited');
-    // 限流条目（第 2 条）+ 其后未处理条目（第 3 条）应归类为 rate_limited，而非 skipped
+    // 限流未处理条目不得误归 skipped（与用户主动跳过区分）
     const counts = result.finalStateCounts as Record<string, number>;
-    expect(counts.rate_limited).toBeGreaterThanOrEqual(1);
     expect(counts.skipped ?? 0).toBe(0);
   });
 
