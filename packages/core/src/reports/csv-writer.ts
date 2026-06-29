@@ -10,7 +10,13 @@ export function escapeCsvField(value: unknown): string {
   return s;
 }
 
-/** 写入 CSV 文件。第一行是列头（从第一个对象的键派生）。空数组写入空文件。 */
+/**
+ * 写入 CSV 文件。第一行是列头。空数组写入空文件。
+ *
+ * §缺陷2：列头取所有行 key 的并集（按首次出现顺序），而非仅 rows[0] 的 key。
+ * 否则可选列（如 externalId/canonicalUrl）一旦在首行缺失，后续行的值会被
+ * 静默丢弃，导致导出数据残缺、列结构不稳定。
+ */
 export function writeCsv(
   path: string,
   rows: ReadonlyArray<Record<string, unknown>>,
@@ -20,7 +26,16 @@ export function writeCsv(
     writeFileSync(path, '', 'utf8');
     return;
   }
-  const headers = Object.keys(rows[0]!);
+  const headers: string[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    for (const key of Object.keys(row)) {
+      if (!seen.has(key)) {
+        seen.add(key);
+        headers.push(key);
+      }
+    }
+  }
   const lines = [headers.map(escapeCsvField).join(',')];
   for (const row of rows) {
     lines.push(headers.map((h) => escapeCsvField(row[h])).join(','));
