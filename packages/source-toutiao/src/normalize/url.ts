@@ -54,6 +54,11 @@ export function extractToutiaoContentId(url: string): string | undefined {
   try {
     const u = new URL(url);
     if (!u.hostname.endsWith('toutiao.com')) return undefined;
+    // §9 移动端分享短链接：m.toutiao.com/is/<digits>/ 中 token 即数字内容 ID，可直接提取。
+    // 注：字母数字 token（/is/<alnum>/）编码的是重定向目标，无法静态提取，
+    // 需 resolveShortLink 跟随重定向（见 normalize/short-link-resolver.ts）。
+    const shortLinkMatch = /\/is\/(\d+)(?:\/|$)/.exec(u.pathname);
+    if (shortLinkMatch) return shortLinkMatch[1];
     // /article/<id>/, /wenda/<id>/, /video/<id>/, /group/<id>/, /w/<id>/（微头条）
     const m = /\/(article|wenda|video|group|w)\/(\d+)/.exec(u.pathname);
     return m?.[2];

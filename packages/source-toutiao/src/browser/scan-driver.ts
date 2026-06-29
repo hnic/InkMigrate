@@ -102,6 +102,9 @@ export async function driveScanFavorites(
           try {
             const u = new URL(url);
             if (!u.hostname.endsWith('toutiao.com')) return undefined;
+            // §9 移动端分享短链接 /is/<digits>/（与 extractToutiaoContentId 保持同口径）
+            const sl = /\/is\/(\d+)(?:\/|$)/.exec(u.pathname);
+            if (sl) return sl[1];
             const m = /\/(article|wenda|video|group|w)\/(\d+)/.exec(u.pathname);
             return m?.[2];
           } catch {

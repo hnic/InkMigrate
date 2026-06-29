@@ -21,6 +21,10 @@ export {
   canonicalizeToutiaoUrl,
   extractToutiaoContentId,
 } from './normalize/url.js';
+export {
+  resolveShortLink,
+  needsShortLinkResolution,
+} from './normalize/short-link-resolver.js';
 export { detectContentKind } from './normalize/content-kind.js';
 export { deriveFingerprintInput } from './normalize/fingerprint.js';
 export {
