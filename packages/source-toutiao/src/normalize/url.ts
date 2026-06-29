@@ -55,8 +55,11 @@ export function extractToutiaoContentId(url: string): string | undefined {
     const u = new URL(url);
     if (!u.hostname.endsWith('toutiao.com')) return undefined;
     // §9 移动端分享短链接：m.toutiao.com/is/<digits>/ 中 token 即数字内容 ID，可直接提取。
-    // 注：字母数字 token（/is/<alnum>/）编码的是重定向目标，无法静态提取，
-    // 需 resolveShortLink 跟随重定向（见 normalize/short-link-resolver.ts）。
+    // 注：字母数字 token（/is/<alnum>/）编码的是重定向目标，无法静态提取。
+    // resolveShortLink（见 normalize/short-link-resolver.ts）已实现该重定向跟随逻辑，
+    // 但当前收藏列表 DOM 渲染的是内容原生 URL（不出现 /is/），故业务管线未接入它
+    // （接入会增加有头导航开销与反爬指纹面）。若未来 DOM 出现字母数字 /is/ 短链，
+    // 接入点应在 scan-driver（driveScanFavorites），而非此处静态提取器。
     const shortLinkMatch = /\/is\/(\d+)(?:\/|$)/.exec(u.pathname);
     if (shortLinkMatch) return shortLinkMatch[1];
     // /article/<id>/, /wenda/<id>/, /video/<id>/, /group/<id>/, /w/<id>/（微头条）

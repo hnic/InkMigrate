@@ -21,10 +21,10 @@ export {
   canonicalizeToutiaoUrl,
   extractToutiaoContentId,
 } from './normalize/url.js';
-export {
-  resolveShortLink,
-  needsShortLinkResolution,
-} from './normalize/short-link-resolver.js';
+// 注意：resolveShortLink / needsShortLinkResolution（normalize/short-link-resolver.ts）
+// 是为字母数字 /is/ 短链准备的防御性预留，当前收藏列表 DOM 不出现 /is/，业务管线
+// 未接入，故不从包公共 API 导出，避免误导维护者以为重定向跟随已生效。
+// 需要时可直接从 './normalize/short-link-resolver.js' 深路径导入。
 export { detectContentKind } from './normalize/content-kind.js';
 export { deriveFingerprintInput } from './normalize/fingerprint.js';
 export {
