@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { openDatabase, type DB, type SourceAdapter, type SourceItemRef, type CleanupActionReceipt } from '@inkmigrate/core';
 import { runCleanupUnfavorite } from '../../src/cleanup/cleanup-orchestrator.js';
 import { mkdtempSync, rmSync, readdirSync, existsSync } from 'node:fs';
@@ -8,6 +8,13 @@ import { join } from 'node:path';
 const SOURCE_INSTANCE_ID = 'src-test';
 const MIGRATION_JOB_ID = 'mig-test-1';
 const TARGET_INSTANCE_ID = 'tgt-test';
+
+// 每个 it 用独立临时目录，避免硬编码 /tmp/ws（Windows 无 /tmp，且会污染宿主机）
+let ws: string;
+beforeEach(() => {
+  ws = mkdtempSync(join(tmpdir(), 'cleanup-ws-'));
+});
+afterEach(() => rmSync(ws, { recursive: true, force: true }));
 
 /** 建内存库并 seed 必要的父表行 + N 条 status='verified' 的 source_items。 */
 function seedDb(itemCount: number): DB {
@@ -95,7 +102,7 @@ describe('runCleanupUnfavorite', () => {
       sourceAdapter: adapter,
       sourceInstanceId: SOURCE_INSTANCE_ID,
       migrationJobId: MIGRATION_JOB_ID,
-      workspaceDir: '/tmp/ws',
+      workspaceDir: ws,
       sleepFn: async () => {}, // 失败会触发 backoff 等待，注入避免真等 10 分钟
     });
 
@@ -119,7 +126,7 @@ describe('runCleanupUnfavorite', () => {
       sourceAdapter: adapter,
       sourceInstanceId: SOURCE_INSTANCE_ID,
       migrationJobId: MIGRATION_JOB_ID,
-      workspaceDir: '/tmp/ws',
+      workspaceDir: ws,
     });
 
     const rows = db
@@ -141,14 +148,14 @@ describe('runCleanupUnfavorite', () => {
     // 第一次：2 条都成功
     const r1 = await runCleanupUnfavorite({
       db, sourceAdapter: adapter, sourceInstanceId: SOURCE_INSTANCE_ID,
-      migrationJobId: MIGRATION_JOB_ID, workspaceDir: '/tmp/ws',
+      migrationJobId: MIGRATION_JOB_ID, workspaceDir: ws,
     });
     expect(r1.successCount).toBe(2);
 
     // 第二次：候选已被 findUnfavoritedSourceItemIds 全部排除 → 0 条
     const r2 = await runCleanupUnfavorite({
       db, sourceAdapter: mockAdapter([]), sourceInstanceId: SOURCE_INSTANCE_ID,
-      migrationJobId: MIGRATION_JOB_ID, workspaceDir: '/tmp/ws',
+      migrationJobId: MIGRATION_JOB_ID, workspaceDir: ws,
     });
     expect(r2.successCount).toBe(0);
 
@@ -182,7 +189,7 @@ describe('runCleanupUnfavorite', () => {
       sourceAdapter: wrapped,
       sourceInstanceId: SOURCE_INSTANCE_ID,
       migrationJobId: MIGRATION_JOB_ID,
-      workspaceDir: '/tmp/ws',
+      workspaceDir: ws,
       isCancelled: () => callCount >= 2,
     });
 
@@ -207,7 +214,7 @@ describe('runCleanupUnfavorite', () => {
       sourceAdapter: adapter,
       sourceInstanceId: SOURCE_INSTANCE_ID,
       migrationJobId: MIGRATION_JOB_ID,
-      workspaceDir: '/tmp/ws',
+      workspaceDir: ws,
       sleepFn,
     });
 
@@ -240,7 +247,7 @@ describe('runCleanupUnfavorite', () => {
       sourceAdapter: adapter,
       sourceInstanceId: SOURCE_INSTANCE_ID,
       migrationJobId: MIGRATION_JOB_ID,
-      workspaceDir: '/tmp/ws',
+      workspaceDir: ws,
       sleepFn: async () => {},
     });
     expect(result.loginPauseCount).toBe(1);
@@ -260,7 +267,7 @@ describe('runCleanupUnfavorite', () => {
       sourceAdapter: adapter,
       sourceInstanceId: SOURCE_INSTANCE_ID,
       migrationJobId: MIGRATION_JOB_ID,
-      workspaceDir: '/tmp/ws',
+      workspaceDir: ws,
       sleepFn: async () => {},
     });
     // content_unavailable 计入跳过，继续处理后续 2 条成功，未中断
@@ -276,33 +283,29 @@ describe('runCleanupUnfavorite', () => {
     // 修正后应调用 generateCleanupPlan，在 <workspaceDir>/reports/cleanup 下生成
     // unfavorite-plan-<planId>.{json,csv,md} 三份审计报告。
     const db = seedDb(2);
-    const wsDir = mkdtempSync(join(tmpdir(), 'cleanup-report-'));
-    try {
-      const adapter = mockAdapter([
-        { success: true, wasCollected: true, isCollected: false },
-        { success: true, wasCollected: true, isCollected: false },
-      ]);
-      const result = await runCleanupUnfavorite({
-        db,
-        sourceAdapter: adapter,
-        sourceInstanceId: SOURCE_INSTANCE_ID,
-        migrationJobId: MIGRATION_JOB_ID,
-        workspaceDir: wsDir,
-        sleepFn: async () => {},
-      });
-      expect(result.successCount).toBe(2);
+    const adapter = mockAdapter([
+      { success: true, wasCollected: true, isCollected: false },
+      { success: true, wasCollected: true, isCollected: false },
+    ]);
+    const result = await runCleanupUnfavorite({
+      db,
+      sourceAdapter: adapter,
+      sourceInstanceId: SOURCE_INSTANCE_ID,
+      migrationJobId: MIGRATION_JOB_ID,
+      workspaceDir: ws,
+      sleepFn: async () => {},
+    });
+    expect(result.successCount).toBe(2);
 
-      const cleanupDir = join(wsDir, 'reports', 'cleanup');
-      expect(existsSync(cleanupDir)).toBe(true);
-      const files = readdirSync(cleanupDir);
-      // 三种格式报告（planId 动态，按扩展名断言）
-      expect(files.some((f) => f.endsWith('.json'))).toBe(true);
-      expect(files.some((f) => f.endsWith('.csv'))).toBe(true);
-      expect(files.some((f) => f.endsWith('.md'))).toBe(true);
-    } finally {
-      db.close();
-      rmSync(wsDir, { recursive: true, force: true });
-    }
+    const cleanupDir = join(ws, 'reports', 'cleanup');
+    expect(existsSync(cleanupDir)).toBe(true);
+    const files = readdirSync(cleanupDir);
+    // 三种格式报告（planId 动态，按扩展名断言）
+    expect(files.some((f) => f.endsWith('.json'))).toBe(true);
+    expect(files.some((f) => f.endsWith('.csv'))).toBe(true);
+    expect(files.some((f) => f.endsWith('.md'))).toBe(true);
+
+    db.close();
   });
 
   it('节奏控制：条目间按 intervalMs±抖动等待（注入 sleepFn 断言不真等）', async () => {
@@ -320,7 +323,7 @@ describe('runCleanupUnfavorite', () => {
       sourceAdapter: adapter,
       sourceInstanceId: SOURCE_INSTANCE_ID,
       migrationJobId: MIGRATION_JOB_ID,
-      workspaceDir: '/tmp/ws',
+      workspaceDir: ws,
       intervalMs: 2000,
       sleepFn: sleepSpy,
     });
@@ -348,7 +351,7 @@ describe('runCleanupUnfavorite', () => {
       sourceAdapter: adapter,
       sourceInstanceId: SOURCE_INSTANCE_ID,
       migrationJobId: MIGRATION_JOB_ID,
-      workspaceDir: '/tmp/ws',
+      workspaceDir: ws,
       sleepFn: sleepSpy,
       // 故意不传 maxItems，验证默认 200
     });
@@ -385,7 +388,7 @@ describe('runCleanupUnfavorite', () => {
       sourceAdapter: wrapped,
       sourceInstanceId: SOURCE_INSTANCE_ID,
       migrationJobId: MIGRATION_JOB_ID,
-      workspaceDir: '/tmp/ws',
+      workspaceDir: ws,
       isCancelled: () => callCount >= 2,
     });
 
@@ -418,7 +421,7 @@ describe('runCleanupUnfavorite', () => {
 
     await runCleanupUnfavorite({
       db, sourceAdapter: wrapped, sourceInstanceId: SOURCE_INSTANCE_ID,
-      migrationJobId: MIGRATION_JOB_ID, workspaceDir: '/tmp/ws', sleepFn: async () => {},
+      migrationJobId: MIGRATION_JOB_ID, workspaceDir: ws, sleepFn: async () => {},
     });
 
     const job = db
@@ -457,7 +460,7 @@ describe('runCleanupUnfavorite', () => {
       sourceAdapter: wrapped,
       sourceInstanceId: SOURCE_INSTANCE_ID,
       migrationJobId: MIGRATION_JOB_ID,
-      workspaceDir: '/tmp/ws',
+      workspaceDir: ws,
       intervalMs: 60000, // 故意大，若取消未跳过等待会拖慢测试
       sleepFn: sleepSpy,
       isCancelled: () => callCount >= 2,
@@ -502,7 +505,7 @@ describe('runCleanupUnfavorite', () => {
 
     const result = await runCleanupUnfavorite({
       db, sourceAdapter: wrapped, sourceInstanceId: SOURCE_INSTANCE_ID,
-      migrationJobId: MIGRATION_JOB_ID, workspaceDir: '/tmp/ws', sleepFn: async () => {},
+      migrationJobId: MIGRATION_JOB_ID, workspaceDir: ws, sleepFn: async () => {},
     });
 
     // 只处理 2 条 article，video 被排除
@@ -524,7 +527,7 @@ describe('runCleanupUnfavorite', () => {
 
     const result = await runCleanupUnfavorite({
       db, sourceAdapter: adapter, sourceInstanceId: SOURCE_INSTANCE_ID,
-      migrationJobId: MIGRATION_JOB_ID, workspaceDir: '/tmp/ws',
+      migrationJobId: MIGRATION_JOB_ID, workspaceDir: ws,
       sleepFn: async (ms) => { sleeps.push(ms); }, // 不真等 10 分钟
     });
 
@@ -559,7 +562,7 @@ describe('runCleanupUnfavorite', () => {
 
     const result = await runCleanupUnfavorite({
       db, sourceAdapter: wrapped, sourceInstanceId: SOURCE_INSTANCE_ID,
-      migrationJobId: MIGRATION_JOB_ID, workspaceDir: '/tmp/ws', sleepFn: async () => {},
+      migrationJobId: MIGRATION_JOB_ID, workspaceDir: ws, sleepFn: async () => {},
     });
 
     // 第 1 条：2 次 execute（首次+重试）都失败 → 终止；第 2 条不处理

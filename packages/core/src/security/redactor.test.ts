@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { homedir } from 'node:os';
 import { createRedactor } from './redactor.js';
 
 describe('redactor (§19.2)', () => {
@@ -46,8 +47,10 @@ describe('redactor (§19.2)', () => {
   });
 
   it('redacts local user home directory paths', () => {
-    expect(r('/Users/hnic/secret/file')).not.toContain('/Users/hnic');
-    expect(r('/Users/hnic/secret/file')).toContain('[HOME]');
+    // 使用运行时 homedir() 构造测试输入，避免硬编码本机绝对路径导致跨机器失败
+    const samplePath = `${homedir()}/secret/file`;
+    expect(r(samplePath)).not.toContain(homedir());
+    expect(r(samplePath)).toContain('[HOME]');
   });
 
   it('passes through innocuous content', () => {
