@@ -21,8 +21,7 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 11
+        # 版本由 package.json 的 packageManager 字段统一管理（Corepack），避免重复指定
 
       - name: Setup Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
