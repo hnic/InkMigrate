@@ -9,7 +9,7 @@ interface Props {
   rpcCall: (method: string, params: Record<string, unknown>) => Promise<unknown>;
   addLog: (level: 'info' | 'warn' | 'error', message: string) => void;
   busy: boolean;
-  /** 当前运行的 phase，用于判断按钮文字（是否本页任务在跑）。disabled 仍用 busy。 */
+  /** 当前运行的 phase：按钮禁用改由 activePhase 判定（避免登录收尾的 busy 锁住迁移）。 */
   activePhase: string | null;
   /** 终止当前正在运行的长任务。 */
   cancel: () => Promise<void>;
@@ -23,7 +23,7 @@ interface MigrateResult {
   jobId: string;
 }
 
-export function MigratePage({ settings, update, rpcCall, addLog, busy, activePhase, cancel }: Props) {
+export function MigratePage({ settings, update, rpcCall, addLog, activePhase, cancel }: Props) {
   const migrating = activePhase === 'migrating';
   const [maxItems, setMaxItems] = useState('');
   const [interval, setIntervalMs] = useState('1500');
@@ -150,12 +150,12 @@ export function MigratePage({ settings, update, rpcCall, addLog, busy, activePha
         </div>
 
         <div style={{ display: 'flex', gap: '8px' }}>
-          <button
-            onClick={handleMigrate}
-            disabled={busy || !settings.stateDir || !settings.vaultPath || !settings.favoritesUrl || !settings.loggedIn}
-          >
-            {migrating ? '迁移中...' : busy ? '等待其他任务完成...' : '开始迁移'}
-          </button>
+              <button
+                onClick={handleMigrate}
+                disabled={migrating || !settings.stateDir || !settings.vaultPath || !settings.favoritesUrl || !settings.loggedIn}
+              >
+                {migrating ? '迁移中...' : '开始迁移'}
+              </button>
           <button onClick={() => void cancel()} disabled={!migrating} className="btn-danger">
             终止
           </button>
@@ -180,9 +180,9 @@ export function MigratePage({ settings, update, rpcCall, addLog, busy, activePha
               </div>
               <button
                 onClick={handleResume}
-                disabled={busy || !settings.stateDir || !settings.vaultPath}
+                disabled={migrating || !settings.stateDir || !settings.vaultPath}
               >
-                {migrating ? '续跑中...' : busy ? '等待...' : '继续迁移'}
+                {migrating ? '续跑中...' : '继续迁移'}
               </button>
             </div>
           ) : (

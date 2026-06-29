@@ -140,6 +140,13 @@ async function handleAuthLogin(params: AuthLoginParams | undefined): Promise<Aut
       session,
       loginTimeoutMs: params.timeoutMs ?? 300_000,
     });
+    // 登录结束（成功或超时）立即推完成进度，消除心跳残留的"登录中 X/300"视觉错位。
+    sendNotification('progress', {
+      phase: 'login',
+      current: 1,
+      total: 1,
+      ...(result.state === 'logged-in' ? { currentItem: '登录成功' } : { currentItem: '登录未完成' }),
+    });
     sendNotification('log', {
       level: result.state === 'logged-in' ? 'info' : 'warn',
       message: `登录结果：${result.state}${result.favoritesUrl ? '，已获取收藏页 URL' : ''}`,

@@ -8,13 +8,13 @@ interface Props {
   rpcCall: (method: string, params: Record<string, unknown>) => Promise<unknown>;
   addLog: (level: 'info' | 'warn' | 'error', message: string) => void;
   busy: boolean;
-  /** 当前运行的 phase，用于判断按钮文字（是否本页任务在跑）。disabled 仍用 busy。 */
+  /** 当前运行的 phase：按钮禁用改由 activePhase 判定（避免登录收尾的 busy 锁住扫描）。 */
   activePhase: string | null;
   /** 终止当前正在运行的长任务。 */
   cancel: () => Promise<void>;
 }
 
-export function ScanPage({ settings, update, rpcCall, addLog, busy, activePhase, cancel }: Props) {
+export function ScanPage({ settings, update, rpcCall, addLog, activePhase, cancel }: Props) {
   const scanning = activePhase === 'scanning';
   const [result, setResult] = useState<{ uniqueItems: number; terminationReason: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -60,8 +60,8 @@ export function ScanPage({ settings, update, rpcCall, addLog, busy, activePhase,
         </div>
 
         <div style={{ display: 'flex', gap: '8px' }}>
-          <button onClick={handleScan} disabled={busy || !settings.stateDir || !settings.favoritesUrl || !settings.loggedIn}>
-            {scanning ? '扫描中...' : busy ? '等待其他任务完成...' : '开始扫描'}
+          <button onClick={handleScan} disabled={scanning || !settings.stateDir || !settings.favoritesUrl || !settings.loggedIn}>
+            {scanning ? '扫描中...' : '开始扫描'}
           </button>
           <button onClick={() => void cancel()} disabled={!scanning} className="btn-danger">
             终止
