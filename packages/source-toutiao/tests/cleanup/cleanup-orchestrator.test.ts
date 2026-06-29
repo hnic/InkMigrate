@@ -403,33 +403,49 @@ describe('runCleanupUnfavorite', () => {
     db.close();
   });
 
-  it('重试仍失败终止任务时 processed_count 反映实际处理数且 status=interrupted', async () => {
-    // §缺陷2：失败终止路径同样应如实记录。第 1 条重试仍失败→终止，只处理 1 条。
+  it('重试达上限仍失败：放弃该条继续下一条（不再终止整个任务）', async () => {
+    // 需求变更：递增等待 + 有限重试。某条达到重试上限仍失败 → 标记失败、跳过、
+    // 继续下一条；任务跑完，status=completed（仅取消/登录墙才 interrupted）。
     const db = seedDb(2);
+    // 第 1 条持续失败（耗尽重试）；第 2 条成功
     const adapter = mockAdapter([
-      { success: false, wasCollected: true, isCollected: true, reason: 'still collected after click' },
-      { success: false, wasCollected: true, isCollected: true, reason: 'still collected after click' },
-      { success: true, wasCollected: true, isCollected: false }, // 不应被消费
+      { success: true, wasCollected: true, isCollected: false }, // 第 2 条成功
     ]);
+    let item1Attempts = 0;
+    let item2Attempts = 0;
     const wrapped: SourceAdapter = {
       ...adapter,
       cleanup: {
         supportedActions: ['unfavorite'],
-        executeAction: async (ref: SourceItemRef) => adapter.cleanup!.executeAction(ref),
+        executeAction: async (ref: SourceItemRef) => {
+          // 第 1 条（canonicalUrl 含 /0/）永远失败；其余走队列（第 2 条成功）
+          if (ref.canonicalUrl?.includes('/article/0/')) {
+            item1Attempts++;
+            return { success: false, wasCollected: true, isCollected: true, reason: 'still collected after click' };
+          }
+          item2Attempts++;
+          return adapter.cleanup!.executeAction(ref);
+        },
       },
     } as unknown as SourceAdapter;
 
-    await runCleanupUnfavorite({
+    const result = await runCleanupUnfavorite({
       db, sourceAdapter: wrapped, sourceInstanceId: SOURCE_INSTANCE_ID,
       migrationJobId: MIGRATION_JOB_ID, workspaceDir: ws, sleepFn: async () => {},
     });
 
+    // 第 1 条被放弃但第 2 条仍被处理（不再终止）
+    expect(item2Attempts).toBe(1);
+    expect(result.failedCount).toBe(1);
+    expect(result.successCount).toBe(1);
+    // 任务正常跑完 2 条，未提前终止
     const job = db
       .prepare(`SELECT status, candidate_count AS candidateCount, processed_count AS processedCount FROM cleanup_jobs ORDER BY created_at DESC LIMIT 1`)
       .get() as { status: string; candidateCount: number; processedCount: number };
-    expect(job.candidateCount).toBe(2);
-    expect(job.processedCount).toBe(1); // 只处理了第 1 条（重试仍失败）就终止
-    expect(job.status).toBe('interrupted');
+    expect(job.processedCount).toBe(2);
+    expect(job.status).toBe('completed');
+    // 避免未用告警
+    expect(item1Attempts).toBeGreaterThan(0);
 
     db.close();
   });
@@ -540,35 +556,32 @@ describe('runCleanupUnfavorite', () => {
     db.close();
   });
 
-  it('重试仍失败→终止任务：第 1 条重试还失败，第 2 条不处理', async () => {
-    const db = seedDb(2);
-    // 第 1 条：失败→重试仍失败（持续风控）；第 2 条本应成功但因终止不被处理
-    const adapter = mockAdapter([
-      { success: false, wasCollected: true, isCollected: true, reason: 'still collected after click' },
-      { success: false, wasCollected: true, isCollected: true, reason: 'still collected after click' },
-      { success: true, wasCollected: true, isCollected: false }, // 第 2 条（不应被消费）
-    ]);
-    let executeCount = 0;
+  it('重试递增等待：第 1 条持续失败时按 15→30→45 分钟递增等待后再重试（§需求）', async () => {
+    // 需求：第二次等 30 分、第三次等 45 分……递增等待 + 重试，达上限后放弃单条继续。
+    const db = seedDb(1);
+    const adapter = mockAdapter([]); // 第 1 条永远失败（mock 在 executeAction 内直接返回失败）
+    const sleeps: number[] = [];
     const wrapped: SourceAdapter = {
       ...adapter,
       cleanup: {
         supportedActions: ['unfavorite'],
-        executeAction: async (ref: SourceItemRef) => {
-          executeCount++;
-          return adapter.cleanup!.executeAction(ref);
-        },
+        executeAction: async () => ({
+          success: false, wasCollected: true, isCollected: true, reason: 'still collected after click',
+        }),
       },
     } as unknown as SourceAdapter;
 
-    const result = await runCleanupUnfavorite({
+    await runCleanupUnfavorite({
       db, sourceAdapter: wrapped, sourceInstanceId: SOURCE_INSTANCE_ID,
-      migrationJobId: MIGRATION_JOB_ID, workspaceDir: ws, sleepFn: async () => {},
+      migrationJobId: MIGRATION_JOB_ID, workspaceDir: ws,
+      sleepFn: async (ms) => { sleeps.push(ms); },
     });
 
-    // 第 1 条：2 次 execute（首次+重试）都失败 → 终止；第 2 条不处理
-    expect(executeCount).toBe(2);
-    expect(result.successCount).toBe(0);
-    expect(result.failedCount).toBe(1); // 终止前落库的第 1 条（重试回退后最终计 1 次失败）
+    // backoff 分段（每 30s 检查取消），故 sleep 全是 30000；按段数验证递增总时长：
+    // 第 1 轮等 15 分 = 30 段、第 2 轮等 30 分 = 60 段、第 3 轮等 45 分 = 90 段 → 共 180 段。
+    // 单条 1 条，无条目间抖动等待。
+    expect(sleeps).toHaveLength(180);
+    expect(sleeps.every((s) => s === 30_000)).toBe(true);
 
     db.close();
   });

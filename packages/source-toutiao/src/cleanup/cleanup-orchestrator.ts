@@ -72,11 +72,18 @@ const DEFAULT_CLEANUP_MAX_ITEMS = 200;
 const DEFAULT_CLEANUP_INTERVAL_MS = 2000;
 
 /**
- * 失败后原地等待的时长（毫秒）。出现取消收藏失败（如风控限流）时，
- * 不连续处理后续条目，原地等待给风控冷却时间，再重试当前条。
- * 等待期间分段（每 30s）检查 isCancelled，支持中途终止。
+ * 失败后递增重试的节奏。
+ *
+ * 需求：出现取消收藏失败（风控等）时，不连续处理后续，原地等待冷却后重试；
+ * 每次重试前等待时长递增（第 1 次重试前等 BASE 分钟、第 2 次等 BASE×2 分钟、
+ * 第 3 次等 BASE×3 分钟……），给累积的风控信号更长的冷却窗口。
+ *
+ * 重试上限 MAX_RETRY_ATTEMPTS：达到上限仍失败 → 放弃该条（标记失败、落库、
+ * failedCount+1），继续下一条，而非终止整个任务。仅用户取消 / 撞登录墙才终止任务。
+ * 等待期间分段（每 BACKOFF_POLL_INTERVAL_MS）检查 isCancelled，支持中途终止。
  */
-const FAILURE_BACKOFF_MS = 15 * 60 * 1000;
+const RETRY_BACKOFF_BASE_MS = 15 * 60 * 1000; // 首轮等待 15 分，之后递增
+const MAX_RETRY_ATTEMPTS = 3;
 const BACKOFF_POLL_INTERVAL_MS = 30_000;
 
 /** 默认 sleep：真实定时器。测试可注入 spy 断言节奏而不真等。 */
@@ -364,38 +371,39 @@ export async function runCleanupUnfavorite(
       break;
     }
 
-    // §18.1 失败原地等待 + 重试：出现真正失败（风控等）时，不连续处理后续，
-    // 原地等待冷却后再重试当前条；重试仍失败则终止任务（避免持续风控期卡死）。
+    // §18.1 失败递增等待 + 有限重试：出现真正失败（风控等）时，原地等待冷却后重试当前条。
+    // 等待时长逐轮递增（15→30→45 分钟），给累积风控信号更长冷却窗口；达 MAX_RETRY_ATTEMPTS
+    // 仍失败则放弃该条（标记失败、继续下一条），而非终止整个任务——仅取消/登录墙才终止任务。
     if (hardFailed && !opts.isCancelled?.()) {
-      opts.onLog?.({
-        level: 'warn',
-        message: `取消收藏失败（${lastErrorMessage}），原地等待 ${Math.round(FAILURE_BACKOFF_MS / 60000)} 分钟后重试当前条...`,
-      });
-      // 分段等待，每段检查取消，支持中途终止。用固定段数（而非 Date.now 截止），
-      // 使注入 sleepFn 的测试不依赖真实时间流逝即可跑完等待。
-      const segments = Math.ceil(FAILURE_BACKOFF_MS / BACKOFF_POLL_INTERVAL_MS);
-      for (let s = 0; s < segments; s++) {
+      for (let attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
         if (opts.isCancelled?.()) break;
-        await sleep(BACKOFF_POLL_INTERVAL_MS);
-      }
-      // 未被取消则重试当前条一次
-      if (!opts.isCancelled?.()) {
-        // 重试前重置本次计数的临时状态（failedCount 已在 attemptOnce 内 +1，重试成功需回退）
+        const waitMs = RETRY_BACKOFF_BASE_MS * attempt; // 15/30/45 分钟
+        opts.onLog?.({
+          level: 'warn',
+          message: `取消收藏失败（${lastErrorMessage}），原地等待 ${Math.round(waitMs / 60000)} 分钟后重试当前条（第 ${attempt}/${MAX_RETRY_ATTEMPTS} 次）...`,
+        });
+        // 分段等待，每段检查取消，支持中途终止。用固定段数（而非 Date.now 截止），
+        // 使注入 sleepFn 的测试不依赖真实时间流逝即可跑完等待。
+        const segments = Math.ceil(waitMs / BACKOFF_POLL_INTERVAL_MS);
+        for (let s = 0; s < segments; s++) {
+          if (opts.isCancelled?.()) break;
+          await sleep(BACKOFF_POLL_INTERVAL_MS);
+        }
+        if (opts.isCancelled?.()) break;
+        // 重试前重置本次计数的临时状态（attemptOnce 失败时 failedCount+1，重试需回退）
         if (actionStatus === 'verification_failed' || actionStatus === 'permanent_failed') {
           failedCount--;
         }
         const retry = await attemptOnce();
-        if (retry.hardFailed) {
-          // 重试仍失败 → 终止整个任务（落库已处理项，未处理的留到下次）
-          opts.onLog?.({
-            level: 'error',
-            message: `重试仍失败，终止任务：已处理 ${i + 1}/${rows.length} 条（未处理的留待下次运行）`,
-          });
-          // 先落库当前失败条目，再跳出
-          persistItem();
-          terminated = true;
-          break;
-        }
+        if (!retry.hardFailed) break; // 重试转成功/非失败态，跳出重试循环
+        // 仍失败 → 进入下一轮更长等待
+      }
+      // 重试循环结束后仍处于失败态 → 放弃该条，继续下一条（不置 terminated，外层 for 继续推进）
+      if (!opts.isCancelled?.() && (actionStatus === 'verification_failed' || actionStatus === 'permanent_failed')) {
+        opts.onLog?.({
+          level: 'error',
+          message: `已达重试上限（${MAX_RETRY_ATTEMPTS} 次），放弃该条，继续下一条：已处理 ${i + 1}/${rows.length} 条`,
+        });
       }
     }
 
