@@ -50,6 +50,36 @@ describe('extractDetail (§12.8 四策略 + §12.9 pipeline)', () => {
     expect(result.quality).toBe('full');
   });
 
+  it('§10 图集专用提取器：保留每张图的 figcaption 说明（不丢图注）', () => {
+    // 站点专用提取器此前缺失，gallery 走 Readability 回退会丢失/错排图注。
+    // 专用提取器应识别 data-testid="gallery-detail"，按 figure 结构保留每张图的说明。
+    const html = loadFixture('gallery');
+    const result = extractDetail({
+      html,
+      canonicalUrl: 'https://www.toutiao.com/article/gallery1/',
+      originalUrl: 'https://www.toutiao.com/article/gallery1/',
+    });
+    expect(result.title).toBe('2025 年科技回顾图集');
+    // 三张图的说明都应保留在正文
+    expect(result.markdown).toContain('芯片突破');
+    expect(result.markdown).toContain('火箭发射');
+    expect(result.markdown).toContain('AI 模型');
+    // 图片清单含全部图集图
+    expect(result.images).toContain('https://p3-sign.toutiaoimg.com/g1.webp');
+    expect(result.images).toContain('https://p3-sign.toutiaoimg.com/g2.webp');
+    expect(result.images).toContain('https://p3-sign.toutiaoimg.com/g3.webp');
+  });
+
+  it('§10 微头条专用提取器：保留正文段落', () => {
+    const html = loadFixture('short-post');
+    const result = extractDetail({
+      html,
+      canonicalUrl: 'https://www.toutiao.com/w/micro1/',
+      originalUrl: 'https://www.toutiao.com/w/micro1/',
+    });
+    expect(result.markdown).toContain('今天尝试用 AI 写代码');
+  });
+
   it('marks deleted page as degraded (§12.7 已删除/失效)', () => {
     const html = loadFixture('deleted');
     const result = extractDetail({
