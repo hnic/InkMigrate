@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { generateShardIndexes, type IndexEntry } from '../src/indexes/index-generator.js';
-import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ObsidianTargetConfig } from '../src/config.js';
@@ -75,5 +75,84 @@ describe('generateShardIndexes (§13.8)', () => {
     expect(r2.shards.map((s) => s.relativePath).sort()).toEqual(
       r1.shards.map((s) => s.relativePath).sort(),
     );
+  });
+
+  it('markdown 链接使用相对 _索引/ 的相对路径（§缺陷4 防 404 失效）', () => {
+    // §缺陷4：索引文件位于 <importSubdir>/<src>/_索引/ 下，直接拼 e.relativePath
+    // （Vault 根相对路径，如 Imports/.../文章/x.md）会让 Markdown 渲染器按
+    // 当前 _索引/ 目录解析，变成 _索引/Imports/.../文章/x.md → 404。
+    // 修正后应用 path.relative 计算到目标文章的真正相对路径（以 ../ 开头）。
+    const markdownConfig: ObsidianTargetConfig = { ...config, linkStyle: 'markdown' };
+    const result = generateShardIndexes({
+      config: markdownConfig,
+      vaultPath: vault,
+      sourceInstanceId: 's1',
+      entries,
+      groupBy: ['content-type'],
+    });
+    const shardAbs = join(vault, result.shards[0]!.relativePath);
+    const content = readFileSync(shardAbs, 'utf8');
+    // 每条 markdown 链接应相对当前分片文件（位于 _索引/ 下），即以 ../ 开头，
+    // 而非指向 Vault 根的 Imports/... 绝对路径。
+    const mdLinkLine = content
+      .split('\n')
+      .find((l) => /^\- \[[^\]]+\]\(([^)]+)\)/.test(l));
+    expect(mdLinkLine).toBeDefined();
+    const href = /^\- \[[^\]]+\]\(([^)]+)\)/.exec(mdLinkLine!)![1];
+    expect(href.startsWith('../')).toBe(true);
+    expect(href).not.toContain('_索引/');
+  });
+
+  it('每个分片/总入口返回 writtenFileHash（用于 artifact 追踪 + 重跑保护）', () => {
+    const result = generateShardIndexes({
+      config,
+      vaultPath: vault,
+      sourceInstanceId: 's1',
+      entries,
+      groupBy: ['content-type'],
+    });
+    for (const shard of result.shards) {
+      expect(shard.writtenFileHash).toBeDefined();
+      expect(typeof shard.writtenFileHash).toBe('string');
+    }
+    expect(result.entryIndex.writtenFileHash).toBeDefined();
+  });
+
+  it('重跑保护：用户手改过的分片不被覆写（§13.8 可重复生成且不覆盖用户笔记）', () => {
+    // 第一轮生成 → 落库 writtenFileHash
+    const opts = { config, vaultPath: vault, sourceInstanceId: 's1', entries, groupBy: ['content-type'] as const };
+    const r1 = generateShardIndexes(opts);
+    const shard0 = r1.shards[0]!;
+    const shardAbs = join(vault, shard0.relativePath);
+    const recordedHash = shard0.writtenFileHash!;
+
+    // 用户手动编辑该分片（on-disk 哈希与 recordedHash 不符）
+    writeFileSync(shardAbs, readFileSync(shardAbs, 'utf8') + '\n\n用户批注', 'utf8');
+
+    // 第二轮：传入 recordedHash → 检测到用户修改 → 跳过覆写该分片
+    const r2 = generateShardIndexes({
+      ...opts,
+      knownArtifacts: [{ relativePath: shard0.relativePath, writtenFileHash: recordedHash }],
+    });
+    const modified = r2.shards.find((s) => s.relativePath === shard0.relativePath)!;
+    // 用户内容原样保留
+    expect(readFileSync(shardAbs, 'utf8')).toContain('用户批注');
+    // 该分片被标记为冲突跳过（未被覆写）
+    expect(modified.skippedDueToConflict).toBe(true);
+  });
+
+  it('重跑保护：未修改的分片正常覆写更新', () => {
+    const opts = { config, vaultPath: vault, sourceInstanceId: 's1', entries, groupBy: ['content-type'] as const };
+    const r1 = generateShardIndexes(opts);
+    const shard0 = r1.shards[0]!;
+    const shardAbs = join(vault, shard0.relativePath);
+    // 第二轮：hash 匹配 → 正常覆写（无 skippedDueToConflict）
+    const r2 = generateShardIndexes({
+      ...opts,
+      knownArtifacts: [{ relativePath: shard0.relativePath, writtenFileHash: shard0.writtenFileHash! }],
+    });
+    const same = r2.shards.find((s) => s.relativePath === shard0.relativePath)!;
+    expect(same.skippedDueToConflict).toBeFalsy();
+    expect(readFileSync(shardAbs, 'utf8').length).toBeGreaterThan(0);
   });
 });

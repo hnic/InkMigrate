@@ -23,6 +23,30 @@ export interface TargetContext extends AdapterContext {
   vaultPath: string;
   /** §10.2 目标适配器运行时配置（已通过适配器自己的 Zod schema 校验）。 */
   targetConfig: Record<string, unknown>;
+  /**
+   * §13.8 renderIndex 输入：本 Job 已写入/验证的笔记条目，供目标适配器生成索引。
+   * 仅在生成索引阶段由 Job Runner 填充；plan/write/verify 阶段忽略此字段。
+   * 可选 → 不实现 renderIndex 的适配器与旧调用方不受影响。
+   */
+  indexEntries?: readonly IndexEntryInput[];
+  /** §13.8 renderIndex 用：当前 Job 的来源实例 ID（构造索引目录路径）。仅索引阶段填充。 */
+  sourceInstanceId?: string;
+  /** §13.8 renderIndex 用：当前 Job 已落库的索引 artifact（relativePath + 哈希），用于重跑保护。 */
+  knownIndexArtifacts?: readonly { relativePath: string; writtenFileHash: string }[];
+}
+
+/**
+ * §13.8 索引条目输入（核心定义，目标适配器按需映射到自己的 IndexEntry）。
+ * 字段对齐分片索引分组维度（month/content-type/collection）。
+ */
+export interface IndexEntryInput {
+  title: string;
+  /** 笔记相对 Vault 根的路径（含 .md）。 */
+  relativePath: string;
+  contentKind: string;
+  publishedAt?: string;
+  favoritedAt?: string;
+  collections: readonly string[];
 }
 export interface CleanupContext extends AdapterContext {}
 

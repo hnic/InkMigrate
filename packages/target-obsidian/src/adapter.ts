@@ -7,6 +7,7 @@ import {
   type SourceItem,
   type TargetAdapter,
   type TargetContext,
+  type TargetWriteResult,
   type TargetPlan,
   type TargetVerification,
   type ValidationResult,
@@ -17,6 +18,10 @@ import { stringifyFrontmatter } from './frontmatter.js';
 import { renderBody, htmlToMarkdown } from './body.js';
 import { atomicWrite, readTargetIfExists } from './atomic-write.js';
 import { decideOverwrite } from './overwrite-policy.js';
+import {
+  generateShardIndexes,
+  type IndexEntry,
+} from './indexes/index-generator.js';
 import type { ObsidianWriteResult } from './result.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
@@ -38,6 +43,7 @@ export function createObsidianTarget(): ObsidianTargetAdapter {
     writeWithExpectedHash: (plan, ctx, expectedWrittenFileHash) =>
       writeNote(plan, ctx, expectedWrittenFileHash),
     verify: verifyNote,
+    renderIndex: (ctx) => renderIndexNotes(ctx),
   };
 }
 
@@ -184,6 +190,13 @@ async function writeNote(
   if (targetExists && expectedWrittenFileHash !== undefined) {
     observedPrewriteFileHash = writtenFileHash(Buffer.from(existing!, 'utf8'));
     userModified = observedPrewriteFileHash !== expectedWrittenFileHash;
+  } else if (targetExists && expectedWrittenFileHash === undefined) {
+    // §缺陷1（数据丢失防护）：目标已存在但 DB 无 writtenFileHash 记录（首次迁移
+    // 遇到用户手写同名笔记 / DB 损坏后重跑）。无法判定文件归属 → 保守视为"用户/
+    // 外来所有"，userModified=true 使 preserve/metadata-only 走 mark_conflict
+    // 挂起保护，绝不默认 write_canonical 静默覆写用户数据。
+    observedPrewriteFileHash = writtenFileHash(Buffer.from(existing!, 'utf8'));
+    userModified = true;
   }
 
   const decideInput: Parameters<typeof decideOverwrite>[0] = {
@@ -282,6 +295,62 @@ async function verifyNote(
     };
   }
   return { ok: true };
+}
+
+/**
+ * §13.8 索引生成（renderIndex）：把本 Job 已写入的笔记条目生成为分片索引 +
+ * 总入口索引，返回 TargetWriteResult[] 供 Job Runner 落库为 artifact_kind='index'。
+ *
+ * 入口由 ctx.indexEntries / ctx.sourceInstanceId 提供（Job Runner 在 generating_indexes
+ * 阶段填充）；无条目 → 空数组（不报错，适配器不强制支持索引）。
+ *
+ * §13.8 重跑保护：ctx.knownIndexArtifacts 传入上一轮落库的索引哈希，用户手改过的
+ * 分片不会被覆写（generateShardIndexes 内部处理）。
+ */
+async function renderIndexNotes(ctx: TargetContext): Promise<TargetWriteResult[]> {
+  const config = parseConfig(ctx);
+  validateVault(config.vaultPath);
+  const sourceInstanceId = ctx.sourceInstanceId;
+  const inputs = ctx.indexEntries;
+  if (sourceInstanceId === undefined || inputs === undefined || inputs.length === 0) {
+    return [];
+  }
+  const entries: IndexEntry[] = inputs.map((e) => ({
+    title: e.title,
+    relativePath: e.relativePath,
+    contentKind: e.contentKind,
+    ...(e.publishedAt !== undefined ? { publishedAt: e.publishedAt } : {}),
+    ...(e.favoritedAt !== undefined ? { favoritedAt: e.favoritedAt } : {}),
+    collections: [...e.collections],
+  }));
+  const result = generateShardIndexes({
+    config,
+    vaultPath: config.vaultPath,
+    sourceInstanceId,
+    entries,
+    groupBy: config.indexGroupBy,
+    ...(ctx.knownIndexArtifacts !== undefined
+      ? { knownArtifacts: ctx.knownIndexArtifacts }
+      : {}),
+  });
+  // 桥接 GenerateIndexResult → TargetWriteResult[]（relativePath + 写入哈希）
+  const out: TargetWriteResult[] = [];
+  for (const shard of result.shards) {
+    if (shard.writtenFileHash === undefined) continue;
+    out.push({
+      relativePath: shard.relativePath,
+      targetContentHash: shard.writtenFileHash, // 索引内容哈希 = 写入字节哈希
+      writtenFileHash: shard.writtenFileHash,
+    });
+  }
+  if (result.entryIndex.writtenFileHash !== undefined) {
+    out.push({
+      relativePath: result.entryIndex.relativePath,
+      targetContentHash: result.entryIndex.writtenFileHash,
+      writtenFileHash: result.entryIndex.writtenFileHash,
+    });
+  }
+  return out;
 }
 
 function parseConfig(ctx: TargetContext): ObsidianTargetConfig {

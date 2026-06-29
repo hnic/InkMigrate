@@ -64,4 +64,26 @@ describe('ObsidianTargetConfigSchema (§13.2/§13.7/§13.9)', () => {
       ObsidianTargetConfigSchema.parse({ vaultPath: '/v', bogus: 1 }),
     ).toThrow();
   });
+
+  it('indexGroupBy 默认 [month, content-type]（§13.8 分片索引维度）', () => {
+    const cfg = ObsidianTargetConfigSchema.parse({ vaultPath: '/v' });
+    expect(cfg.indexGroupBy).toEqual(['month', 'content-type']);
+  });
+
+  it('indexGroupBy 接受有序组合（month/content-type/collection/notebook）', () => {
+    const cfg = ObsidianTargetConfigSchema.parse({
+      vaultPath: '/v',
+      indexGroupBy: ['collection', 'month'],
+    });
+    expect(cfg.indexGroupBy).toEqual(['collection', 'month']);
+  });
+
+  it('indexGroupBy 拒绝非法维度', () => {
+    expect(() =>
+      ObsidianTargetConfigSchema.parse({
+        vaultPath: '/v',
+        indexGroupBy: ['author'],
+      }),
+    ).toThrow();
+  });
 });

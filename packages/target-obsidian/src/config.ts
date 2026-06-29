@@ -37,6 +37,14 @@ export const ObsidianTargetConfigSchema = z
     /** §13.4 文件名主体最大长度，默认 100。 */
     maxFilenameLength: z.number().int().positive().default(100),
     /**
+     * §13.8 分片索引分组维度（有序数组）。默认 `['month', 'content-type']`。
+     * 可组合 `month`、`content-type`、`collection`、`notebook`。空数组 = 单一分片。
+     * 供 Obsidian 适配器的 renderIndex 生成分片索引用。
+     */
+    indexGroupBy: z
+      .array(z.enum(['month', 'content-type', 'collection', 'notebook']))
+      .default(['month', 'content-type']),
+    /**
      * 内部注入键（非用户配置）：Job Runner 注入的 migration_job_id，
      * 用于 frontmatter。用户配置中不需要提供。`.strict()` 仍然生效，
      * 但这个键是允许的内部扩展点。

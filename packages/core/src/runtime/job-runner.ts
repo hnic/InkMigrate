@@ -3,6 +3,7 @@ import type {
   SourceAdapter,
   TargetAdapter,
   TargetContext,
+  IndexEntryInput,
 } from '../adapters/adapter.js';
 import type { SourceItem, SourceItemRef } from '../domain/models.js';
 import type { ItemFinalState, FinalStateCounts } from '../domain/states.js';
@@ -341,6 +342,81 @@ export async function runMigrationJob(
       conflictCount: counts.conflict,
       skippedCount: counts.skipped,
     });
+
+    // §13.8 索引生成阶段（generating_indexes）：仅当 Job 未被限流/中断时执行。
+    // 索引是 Job 级 artifact（artifact_kind='index'），非关键路径——失败不影响迁移状态。
+    // 仅在目标适配器实现 renderIndex 时执行。
+    if (!rateLimited && !interrupted && i.targetAdapter.renderIndex !== undefined) {
+      try {
+        jobs.updateStatus(i.jobId, {
+          status: 'running',
+          currentStage: 'generating_indexes',
+          updatedAt: now(),
+        });
+        // 收集 verified 笔记条目（含来源元数据），构造 indexEntries
+        const verifiedRows = targetArtifacts.listVerifiedNotesForIndex(
+          i.jobId,
+          i.sourceInstanceId,
+        );
+        const indexEntries: IndexEntryInput[] = verifiedRows.map((r) => {
+          let meta: Record<string, unknown> = {};
+          try {
+            meta = JSON.parse(r.sourceMetadataJson) as Record<string, unknown>;
+          } catch {
+            meta = {};
+          }
+          const collections = Array.isArray(meta.displayCollection)
+            ? (meta.displayCollection as string[])
+            : typeof meta.displayCollection === 'string'
+              ? [meta.displayCollection as string]
+              : [];
+          const entry: IndexEntryInput = {
+            title: r.title ?? '(无标题)',
+            relativePath: r.relativePath,
+            contentKind: r.contentKind,
+            collections,
+          };
+          return entry;
+        });
+        // §13.8 重跑保护：传入上一轮已落库的 index artifact 哈希
+        const knownIndexArtifacts = targetArtifacts
+          .listIndexArtifacts(i.jobId)
+          .filter((a): a is { relativePath: string; writtenFileHash: string } => a.writtenFileHash !== undefined);
+        // 索引目录的路径段必须与笔记实际写入路径一致（<importSubdir>/<seg>/_索引/）。
+        // 笔记路径由 ref.sourceInstanceId 决定，可能与 i.sourceInstanceId（DB 键）不同，
+        // 故从第一条笔记的 relativePath 反解路径段，避免索引目录与笔记分目录错配。
+        const importSubdir = (i.targetContext.targetConfig as { importSubdir?: string }).importSubdir ?? 'Imports/InkMigrate';
+        const pathSeg = indexEntries.length > 0
+          ? indexEntries[0]!.relativePath.replace(`${importSubdir}/`, '').split('/')[0] ?? i.sourceInstanceId
+          : i.sourceInstanceId;
+        const indexCtx: TargetContext = {
+          ...targetContextWithJobId,
+          sourceInstanceId: pathSeg,
+          indexEntries,
+          ...(knownIndexArtifacts.length > 0 ? { knownIndexArtifacts } : {}),
+        };
+        const indexResults = await i.targetAdapter.renderIndex(indexCtx);
+        // 落库为 artifact_kind='index'（job 级，sourceItemId 留空）
+        const idxTs = now();
+        for (const r of indexResults) {
+          targetArtifacts.create({
+            migrationJobId: i.jobId,
+            artifactKind: 'index',
+            targetInstanceId: i.targetInstanceId,
+            relativePath: r.relativePath,
+            targetContentHash: r.targetContentHash,
+            writtenFileHash: r.writtenFileHash,
+            status: 'verified',
+            verifiedAt: idxTs,
+            createdAt: idxTs,
+            updatedAt: idxTs,
+          });
+        }
+      } catch (e) {
+        // 索引生成失败不阻断迁移（索引非发布门槛）
+        log('warn', `索引生成失败（不影响迁移结果）：${(e as Error).message ?? e}`);
+      }
+    }
 
     // reporting
     if (i.onProgress !== undefined) {

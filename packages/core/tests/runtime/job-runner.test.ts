@@ -4,6 +4,7 @@ import { openDatabase, type DB } from '../../src/storage/database.js';
 import { SourceInstances } from '../../src/storage/repositories/source-instances.js';
 import { TargetInstances } from '../../src/storage/repositories/target-instances.js';
 import { MigrationJobs } from '../../src/storage/repositories/migration-jobs.js';
+import { TargetArtifacts } from '../../src/storage/repositories/target-artifacts.js';
 import {
   computeFingerprint,
   validateSourceItemQuality,
@@ -192,6 +193,61 @@ describe('runMigrationJob (§11 端到端)', () => {
     expect(existsSync(join(dbDir, 'reports/j1/summary.json'))).toBe(true);
   });
 
+  it('§13.8 完成后生成索引 artifact（generating_indexes 阶段）', async () => {
+    new SourceInstances(db).create({
+      id: 's1', adapterKind: 'toutiao', adapterVersion: '1.0.0',
+      adapterApiVersion: '1.0.0', configHash: 'h', createdAt: 't', updatedAt: 't',
+    });
+    new TargetInstances(db).create({
+      id: 't1', adapterKind: 'obsidian', adapterVersion: '1.0.0',
+      adapterApiVersion: '1.0.0', configHash: 'h', createdAt: 't', updatedAt: 't',
+    });
+    new MigrationJobs(db).create({
+      id: 'jidx', sourceInstanceId: 's1', targetInstanceId: 't1',
+      status: 'created', currentStage: 'preflight', createdAt: 't', updatedAt: 't',
+    });
+    const favoritesHtml = readFileSync(join(FIXTURES, 'favorites-list.html'), 'utf8');
+    const articleHtml = readFileSync(join(FIXTURES, 'article.html'), 'utf8');
+    const targetCtx: TargetContext = {
+      config: {},
+      workspaceDir: dbDir,
+      vaultPath: vaultDir,
+      targetConfig: {
+        vaultPath: vaultDir,
+        importSubdir: 'Imports/InkMigrate',
+        attachmentsSubdir: 'Attachments/InkMigrate',
+        linkStyle: 'wikilink',
+        overwritePolicy: 'preserve',
+        collectionMapping: { toTags: false, toFolders: false },
+        maxFilenameLength: 100,
+      } as Record<string, unknown>,
+    };
+
+    const result = await runMigrationJob({
+      db,
+      jobId: 'jidx',
+      sourceAdapter: createFixtureSource(favoritesHtml, articleHtml),
+      targetAdapter: createObsidianTarget(),
+      sourceInstanceId: 's1',
+      targetInstanceId: 't1',
+      targetContext: targetCtx,
+      workspaceDir: dbDir,
+      reportsDir: join(dbDir, 'reports'),
+    });
+
+    expect(result.status).toBe('completed');
+    // §13.8 index artifact 落库（artifact_kind='index'）
+    const indexArtifacts = new TargetArtifacts(db)
+      .listByJob('jidx')
+      .filter((a) => a.artifactKind === 'index');
+    expect(indexArtifacts.length).toBeGreaterThan(0);
+    // 索引文件写入 Vault（_索引/ 分片 + 总入口）
+    const indexDir = join(vaultDir, 'Imports/InkMigrate/toutiao-main/_索引');
+    expect(existsSync(indexDir)).toBe(true);
+    const entryIndex = join(vaultDir, 'Imports/InkMigrate/toutiao-main/toutiao-main收藏索引.md');
+    expect(existsSync(entryIndex)).toBe(true);
+  });
+
   it('writes migration_attempts audit trail per item (§16.7)', async () => {
     new SourceInstances(db).create({
       id: 's1', adapterKind: 'toutiao', adapterVersion: '1.0.0',
@@ -275,9 +331,10 @@ describe('runMigrationJob (§11 端到端)', () => {
       workspaceDir: dbDir, reportsDir: join(dbDir, 'reports'),
     });
 
-    // §16.6: target_artifacts 表中有 verified 状态的行
+    // §16.6: target_artifacts 表中有 verified 状态的 note 行（§13.8 索引 artifact 另算）
     const artifacts = db.prepare(
-      'SELECT status, artifact_kind FROM target_artifacts WHERE migration_job_id = ?',
+      `SELECT status, artifact_kind FROM target_artifacts
+       WHERE migration_job_id = ? AND artifact_kind = 'note'`,
     ).all('j3') as Array<{ status: string; artifact_kind: string }>;
     expect(artifacts.length).toBeGreaterThanOrEqual(3);
     expect(artifacts.every((a) => a.status === 'verified')).toBe(true);

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { createObsidianTarget } from '../src/adapter.js';
 import { makeTempVault } from './helpers/vault.js';
 import { makeFullArticleItem, makeDegradedItem } from './helpers/fixtures.js';
@@ -133,6 +133,30 @@ describe('createObsidianTarget (§8.4 + §13)', () => {
   });
 
   describe('user modification protection (§24.5 #7, §13.9)', () => {
+    it('preserve policy 不覆写 DB 无哈希记录的外来同名文件（§缺陷1 数据丢失防护）', async () => {
+      // 缺陷1：磁盘上存在同名文件但 DB 无该条目 writtenFileHash 记录（首次迁移
+      // 遇到用户手写同名笔记 / DB 损坏后重跑）。expectedWrittenFileHash === undefined
+      // 时无法判定归属，必须保守视为"用户所有"→ preserve 触发 mark_conflict，
+      // 绝不能默认 write_canonical 静默覆写用户数据。
+      const item = makeFullArticleItem();
+      const plan = await adapter.plan(item, ctx(vault.vaultPath));
+      const abs = join(vault.vaultPath, plan.relativePath);
+      // 模拟"外来"同名文件：在迁移写入前，用户已在该路径手写笔记
+      const foreignContent = '---\n---\n\n这是我手写的重要笔记，不可丢失。';
+      mkdirSync(dirname(abs), { recursive: true });
+      writeFileSync(abs, foreignContent, 'utf8');
+
+      // 迁移写入，expectedWrittenFileHash 为 undefined（DB 无记录）
+      const result = await adapter.write(
+        plan,
+        ctx(vault.vaultPath, { overwritePolicy: 'preserve' }),
+        // 故意不传 expectedWrittenFileHash
+      );
+
+      // preserve + 归属未知 → mark_conflict → 外来文件原样保留，绝不被覆写
+      expect(result.actionCode).toBe('stage_attempt');
+      expect(readFileSync(abs, 'utf8')).toBe(foreignContent);
+    });
     it('preserve policy preserves user file when user modified (§24.5 #7)', async () => {
       const item = makeFullArticleItem();
       const plan = await adapter.plan(item, ctx(vault.vaultPath));
@@ -209,6 +233,52 @@ describe('createObsidianTarget (§8.4 + §13)', () => {
       );
       expect(content).toContain('# 人工智能如何改变软件开发');
       expect(content).toContain('来源信息');
+    });
+  });
+
+  describe('renderIndex (§13.8 索引生成)', () => {
+    it('按 indexGroupBy 生成分片索引并返回 TargetWriteResult[]', async () => {
+      const entries = [
+        {
+          title: '文章1',
+          relativePath: 'Imports/InkMigrate/s1/文章/文章1-abc.md',
+          contentKind: 'article',
+          favoritedAt: '2026-01-16T12:00:00+08:00',
+          collections: ['技术'],
+        },
+        {
+          title: '视频1',
+          relativePath: 'Imports/InkMigrate/s1/视频/视频1-ghi.md',
+          contentKind: 'video',
+          favoritedAt: '2026-01-11T12:00:00+08:00',
+          collections: ['技术'],
+        },
+      ];
+      const result = await adapter.renderIndex!({
+        ...ctx(vault.vaultPath),
+        sourceInstanceId: 's1',
+        indexEntries: entries,
+      });
+      expect(Array.isArray(result)).toBe(true);
+      expect(result.length).toBeGreaterThan(0);
+      for (const r of result) {
+        expect(r.relativePath.endsWith('.md')).toBe(true);
+        expect(typeof r.targetContentHash).toBe('string');
+        expect(typeof r.writtenFileHash).toBe('string');
+      }
+      // 至少一个分片在 _索引/ 下；总入口索引在 <src>/ 根
+      expect(result.some((r) => r.relativePath.includes('_索引'))).toBe(true);
+      // 文件确实写入 Vault（抽查第一个）
+      const abs = join(vault.vaultPath, result[0]!.relativePath);
+      expect(existsSync(abs)).toBe(true);
+    });
+
+    it('无 indexEntries 时返回空数组（不报错）', async () => {
+      const result = await adapter.renderIndex!({
+        ...ctx(vault.vaultPath),
+        sourceInstanceId: 's1',
+      });
+      expect(result).toEqual([]);
     });
   });
 
