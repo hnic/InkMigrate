@@ -15,6 +15,21 @@ export interface StructuredData {
  * §12.8 strategy 2：从 JSON-LD、Open Graph、Meta 标签提取结构化数据。
  * 在 jsdom 独立 DOM 上运行（不修改 Playwright 页面）。
  */
+/**
+ * §12.8 strategy 2：从 JSON-LD、Open Graph、Meta 标签提取结构化数据。
+ * 在 jsdom 独立 DOM 上运行（不修改 Playwright 页面）。
+ *
+ * §11 性能：核心逻辑 `extractStructuredDataFromDoc` 直接接受已解析的 document，
+ * 避免调用方（detail-extractor）对同一 html 重复 new JSDOM。下方 `extractStructuredData`
+ * 保留为独立调用入口（自建 JSDOM），向后兼容。
+ */
+export function extractStructuredDataFromDoc(doc: Document): StructuredData {
+  const out: StructuredData = {};
+  _extractStructuredDataCore(doc, out);
+  return out;
+}
+
+/** 原独立入口：自建 JSDOM 解析 html（供外部单独调用，不依赖调用方的 document）。 */
 export function extractStructuredData(
   html: string,
   baseUrl: string,
@@ -25,8 +40,12 @@ export function extractStructuredData(
     runScripts: 'outside-only',
     resources: undefined,
   });
-  const doc = dom.window.document;
   const out: StructuredData = {};
+  _extractStructuredDataCore(dom.window.document, out);
+  return out;
+}
+
+function _extractStructuredDataCore(doc: Document, out: StructuredData): void {
 
   // JSON-LD
   const jsonLd = doc.querySelector('script[type="application/ld+json"]');
@@ -67,6 +86,4 @@ export function extractStructuredData(
   if (ogUrl !== undefined) out.ogUrl = ogUrl;
   const description = meta('og:description') ?? meta('description');
   if (description !== undefined) out.description = description;
-
-  return out;
 }

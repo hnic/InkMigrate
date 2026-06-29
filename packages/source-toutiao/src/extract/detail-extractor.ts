@@ -1,7 +1,7 @@
 import type { SourceDegradation } from '@inkmigrate/core';
 import { JSDOM } from 'jsdom';
-import { extractStructuredData } from './structured-data.js';
-import { readabilityFallback } from './readability-fallback.js';
+import { extractStructuredDataFromDoc } from './structured-data.js';
+import { readabilityFallbackFromDoc } from './readability-fallback.js';
 import { runSafetyPipeline } from '../pipeline/pipeline.js';
 import { SPECIAL_PAGE_SELECTORS } from '../selectors/index.js';
 
@@ -55,9 +55,10 @@ export function extractDetail(i: DetailInput): DetailResult {
     };
   }
 
-  // 提取元数据（JSON-LD/OG）
-  const sd = extractStructuredData(i.html, i.canonicalUrl);
-  const rb = readabilityFallback(i.html, i.canonicalUrl);
+  // 提取元数据（JSON-LD/OG）。§11 性能：复用上方已解析的 doc，避免重复 new JSDOM
+  // （structured-data 与 readability-fallback 原本各自对 i.html 再 parse 一次）。
+  const sd = extractStructuredDataFromDoc(doc);
+  const rb = readabilityFallbackFromDoc(doc);
   const title =
     sd.headline ??
     sd.title ??
