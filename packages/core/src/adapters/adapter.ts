@@ -85,6 +85,12 @@ export interface CleanupActionReceipt {
   wasCollected?: boolean;
   isCollected?: boolean;
   reason?: string;
+  /**
+   * §5/§14.12 检测到的特殊页面状态（登录墙/风控挑战/内容不可用）。
+   * 驱动编排器对 login/challenge 走受控中断（而非 15 分钟硬等）；content_unavailable
+   * 视为跳过。可选 + additive → 旧调用方不受影响。
+   */
+  detectedState?: 'login_required' | 'challenge_required' | 'content_unavailable';
 }
 
 /** §8.3 cleanup 验证结果。 */

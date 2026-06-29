@@ -1,6 +1,6 @@
 import type { Page } from 'playwright';
 import type { SourceItemRef } from '@inkmigrate/core';
-import { UNFAVORITE_SELECTORS } from '../selectors/index.js';
+import { UNFAVORITE_SELECTORS, SPECIAL_PAGE_SELECTORS } from '../selectors/index.js';
 
 export interface UnfavoriteDriverOptions {
   page: Page;
@@ -27,6 +27,11 @@ export interface UnfavoriteDriverResult {
   isCollected: boolean;
   /** 失败原因（success=false 时）。 */
   reason?: string;
+  /**
+   * §5/§14.12 检测到的特殊页面状态（登录墙/风控挑战/内容不可用）。
+   * 命中时 success=false、reason 为对应状态码，编排器据此受控中断。
+   */
+  detectedState?: 'login_required' | 'challenge_required' | 'content_unavailable';
 }
 
 /** 选择器参数包：aria-pressed 主信号 + collected class 回退。 */
@@ -131,6 +136,20 @@ export async function driveUnfavorite(
     timeout: opts.navigationTimeoutMs ?? 30_000,
   });
 
+  // §5/§14.12 特殊页面检测（登录墙/风控挑战/内容不可用）：在等待收藏按钮前先识别。
+  // 命中即提前返回 success=false + detectedState，编排器据此受控中断（而非把
+  // 按钮未渲染误判为 unknown，或把风控页的不可点按钮当 hardFailed 触发 15 分钟硬等）。
+  const detected = await detectSpecialPage(opts.page);
+  if (detected !== undefined) {
+    return {
+      success: false,
+      wasCollected: false,
+      isCollected: false,
+      reason: detected,
+      detectedState: detected,
+    };
+  }
+
   // 等待收藏按钮渲染：domcontentloaded 时 SPA 详情页可能尚未渲染按钮，
   // 瞬时 count() 会误判 not found（这是"未知"大量产生的根因）。
   const collectBtn = opts.page
@@ -183,6 +202,45 @@ export async function driveUnfavorite(
     isCollected,
     ...(isCollected ? { reason: 'still collected after click' } : {}),
   };
+}
+
+/**
+ * §5/§14.12 检测特殊页面状态（登录墙/风控挑战/内容不可用）。
+ *
+ * 判定顺序与 adapter.verifySourceRef 一致：
+ * 1. URL 含 login/passport → 登录墙（被重定向到登录页）
+ * 2. 安全验证选择器命中 → 风控挑战（验证码）
+ * 3. 内容删除/不可用标记命中 → 内容不可用
+ *
+ * 命中即返回对应状态码；均未命中返回 undefined（正常内容页，继续 unfavorite 流程）。
+ * 这套检测能力此前只在 verifySourceRef（校验路径）实现，cleanup 执行路径漏检，
+ * 导致登录/风控被误判为"按钮未找到（unknown）"或"点击后仍收藏（hardFailed）"。
+ */
+async function detectSpecialPage(
+  page: Page,
+): Promise<'login_required' | 'challenge_required' | 'content_unavailable' | undefined> {
+  // 1. URL 重定向到登录/passlot
+  const currentUrl = page.url().toLowerCase();
+  if (currentUrl.includes('login') || currentUrl.includes('passport')) {
+    return 'login_required';
+  }
+  // 2. 风控挑战（验证码）
+  const challengeCount = await page
+    .locator(SPECIAL_PAGE_SELECTORS.securityChallenge[0])
+    .count()
+    .catch(() => 0);
+  if (challengeCount > 0) {
+    return 'challenge_required';
+  }
+  // 3. 内容删除/不可用
+  const deletedCount = await page
+    .locator(SPECIAL_PAGE_SELECTORS.contentDeleted[0])
+    .count()
+    .catch(() => 0);
+  if (deletedCount > 0) {
+    return 'content_unavailable';
+  }
+  return undefined;
 }
 
 /**

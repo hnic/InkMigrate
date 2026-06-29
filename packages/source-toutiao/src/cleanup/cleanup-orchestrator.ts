@@ -52,6 +52,10 @@ export interface CleanupOrchestratorResult {
   skippedCount: number;
   failedCount: number;
   unknownCount: number;
+  /** §5/§14.12 因登录墙/风控挑战而受控中断的条目数。 */
+  loginPauseCount: number;
+  /** §5/§14.12 受控中断原因（login_required / challenge_required），无则 undefined。 */
+  pauseReason?: string;
 }
 
 /** 每种失败原因只打印前几条样例，避免日志刷屏。 */
@@ -120,7 +124,7 @@ export async function runCleanupUnfavorite(
 
   if (rows.length === 0) {
     opts.onLog?.({ level: 'info', message: alreadyDone.size > 0 ? '没有需要清理的条目（均已成功取消收藏）' : '没有已迁移的条目可清理' });
-    return { jobId: '', planId: '', successCount: 0, skippedCount: 0, failedCount: 0, unknownCount: 0 };
+    return { jobId: '', planId: '', successCount: 0, skippedCount: 0, failedCount: 0, unknownCount: 0, loginPauseCount: 0 };
   }
 
   const now = () => new Date().toISOString();
@@ -163,11 +167,15 @@ export async function runCleanupUnfavorite(
   let skippedCount = 0;
   let failedCount = 0;
   let unknownCount = 0;
+  // §5/§14.12 登录/风控挑战受控中断计数（不再 15 分钟硬等）。对应 cleanup-report 的 loginPauseCount。
+  let loginPauseCount = 0;
   // §缺陷2：processedCount 记录"实际已落库的条目数"，与 candidateCount(rows.length)
   // 区分。取消 / 重试终止时二者不等，必须如实落库，否则 GUI 进度与状态看板会错算。
   let processedCount = 0;
   // 是否因取消或重试仍失败而提前终止。决定最终 status：terminated → 'interrupted'。
   let terminated = false;
+  // §5/§14.12 受控中断原因（login_required / challenge_required）。区分于普通 cancel/重试终止。
+  let pauseReason: string | undefined;
   const itemsRepo = new CleanupItems(db);
   const attemptsRepo = new CleanupAttempts(db);
   const sleep = opts.sleepFn ?? defaultSleep;
@@ -209,10 +217,29 @@ export async function runCleanupUnfavorite(
     let lastErrorCode: string | null = null;
     let lastErrorMessage: string | null = null;
 
-    /** 单次执行 + 四类映射。返回是否为"真正失败"（需触发等待重试）。 */
-    const attemptOnce = async (): Promise<{ hardFailed: boolean }> => {
+    /** 单次执行 + 四类映射。返回是否为"真正失败"（需触发等待重试）+ 检测到的特殊状态。 */
+    const attemptOnce = async (): Promise<{ hardFailed: boolean; detectedState?: 'login_required' | 'challenge_required' | 'content_unavailable' }> => {
       try {
         const receipt = await cleanup.executeAction(ref, 'unfavorite', ctx);
+
+        // §5/§14.12 特殊页面检测：登录墙/风控挑战 → 受控中断（不硬等、不重试）
+        if (receipt.detectedState === 'login_required' || receipt.detectedState === 'challenge_required') {
+          precheckStatus = receipt.detectedState;
+          actionStatus = receipt.detectedState;
+          lastErrorCode = receipt.detectedState;
+          lastErrorMessage = receipt.detectedState === 'login_required' ? '需要重新登录' : '触发风控验证';
+          return { hardFailed: false, detectedState: receipt.detectedState };
+        }
+        // 内容不可用（删除等）→ 跳过，继续处理后续
+        if (receipt.detectedState === 'content_unavailable') {
+          precheckStatus = 'content_unavailable';
+          actionStatus = 'already_unfavorited';
+          skippedCount++;
+          lastErrorCode = 'content_unavailable';
+          lastErrorMessage = '内容不可用（已删除）';
+          return { hardFailed: false, detectedState: 'content_unavailable' };
+        }
+
         precheckStatus = receipt.wasCollected ? 'favorited' : 'not_favorited';
 
         if (receipt.success && receipt.isCollected === false) {
@@ -290,7 +317,25 @@ export async function runCleanupUnfavorite(
       }
     };
 
-    let { hardFailed } = await attemptOnce();
+    let { hardFailed, detectedState } = await attemptOnce();
+
+    // §5/§14.12 受控中断：检测到登录墙/风控挑战 → 立即落库当前条并终止任务，
+    // 不走 15 分钟硬等（风控期重试无意义，且延长无登录状态的操作会加剧指纹风险）。
+    // 提示用户重新登录后重跑（已处理的成功项由 cleanup_items 续跑排除）。
+    if (detectedState === 'login_required' || detectedState === 'challenge_required') {
+      loginPauseCount++;
+      persistItem();
+      terminated = true;
+      pauseReason = detectedState;
+      opts.onLog?.({
+        level: 'warn',
+        message:
+          detectedState === 'login_required'
+            ? '检测到登录失效，受控中断任务（请重新登录后重跑）'
+            : '检测到风控验证挑战，受控中断任务（稍后重跑）',
+      });
+      break;
+    }
 
     // §18.1 失败原地等待 + 重试：出现真正失败（风控等）时，不连续处理后续，
     // 原地等待冷却后再重试当前条；重试仍失败则终止任务（避免持续风控期卡死）。
@@ -363,7 +408,17 @@ export async function runCleanupUnfavorite(
     opts.onLog?.({ level: 'warn', message: `失败原因汇总：${summary}` });
   }
 
-  return { jobId, planId, successCount, skippedCount, failedCount, unknownCount };
+  const result: CleanupOrchestratorResult = {
+    jobId,
+    planId,
+    successCount,
+    skippedCount,
+    failedCount,
+    unknownCount,
+    loginPauseCount,
+  };
+  if (pauseReason !== undefined) result.pauseReason = pauseReason;
+  return result;
 }
 
 function recordFailure(

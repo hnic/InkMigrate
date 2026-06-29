@@ -187,6 +187,87 @@ describe('runCleanupUnfavorite', () => {
     db.close();
   });
 
+  it('检测到登录墙时受控中断：不触发 15 分钟硬等，status=interrupted，loginPauseCount=1（§5）', async () => {
+    const db = seedDb(3);
+    // 第 1 条成功，第 2 条返回 login_required → 受控中断，第 3 条不处理
+    const adapter = mockAdapter([
+      { success: true, wasCollected: true, isCollected: false },
+      { success: false, detectedState: 'login_required', wasCollected: false, isCollected: false },
+      { success: true, wasCollected: true, isCollected: false }, // 不应被消费
+    ]);
+    // 失败回退等待的 sleep 调用计数——受控中断路径不应触发 backoff sleep
+    const sleepCalls: number[] = [];
+    const sleepFn = async (ms: number): Promise<void> => { sleepCalls.push(ms); };
+
+    const result = await runCleanupUnfavorite({
+      db,
+      sourceAdapter: adapter,
+      sourceInstanceId: SOURCE_INSTANCE_ID,
+      migrationJobId: MIGRATION_JOB_ID,
+      workspaceDir: '/tmp/ws',
+      sleepFn,
+    });
+
+    // loginPauseCount + pauseReason 透传
+    expect(result.loginPauseCount).toBe(1);
+    expect(result.pauseReason).toBe('login_required');
+    // 不应有 15 分钟（FAILURE_BACKOFF_MS）的 backoff sleep
+    expect(sleepCalls.some((ms) => ms === 30_000 && sleepCalls.filter((x) => x === 30_000).length >= 30)).toBe(false);
+    // Job 状态为 interrupted（受控中断），非 completed
+    const job = db
+      .prepare(`SELECT status FROM cleanup_jobs ORDER BY created_at DESC LIMIT 1`)
+      .get() as { status: string };
+    expect(job.status).toBe('interrupted');
+    // 已落库 2 条（第 1 条成功 + 第 2 条 login_required），第 3 条未处理
+    const itemsCount = db
+      .prepare(`SELECT COUNT(*) AS c FROM cleanup_items WHERE job_id = (SELECT id FROM cleanup_jobs ORDER BY created_at DESC LIMIT 1)`)
+      .get() as { c: number };
+    expect(itemsCount.c).toBe(2);
+    db.close();
+  });
+
+  it('检测到风控验证挑战时受控中断（challenge_required，§5）', async () => {
+    const db = seedDb(2);
+    const adapter = mockAdapter([
+      { success: false, detectedState: 'challenge_required', wasCollected: false, isCollected: false },
+      { success: true, wasCollected: true, isCollected: false }, // 不应被消费
+    ]);
+    const result = await runCleanupUnfavorite({
+      db,
+      sourceAdapter: adapter,
+      sourceInstanceId: SOURCE_INSTANCE_ID,
+      migrationJobId: MIGRATION_JOB_ID,
+      workspaceDir: '/tmp/ws',
+      sleepFn: async () => {},
+    });
+    expect(result.loginPauseCount).toBe(1);
+    expect(result.pauseReason).toBe('challenge_required');
+    db.close();
+  });
+
+  it('内容不可用（content_unavailable）按跳过处理、继续后续（§5）', async () => {
+    const db = seedDb(3);
+    const adapter = mockAdapter([
+      { success: false, detectedState: 'content_unavailable', wasCollected: false, isCollected: false },
+      { success: true, wasCollected: true, isCollected: false },
+      { success: true, wasCollected: true, isCollected: false },
+    ]);
+    const result = await runCleanupUnfavorite({
+      db,
+      sourceAdapter: adapter,
+      sourceInstanceId: SOURCE_INSTANCE_ID,
+      migrationJobId: MIGRATION_JOB_ID,
+      workspaceDir: '/tmp/ws',
+      sleepFn: async () => {},
+    });
+    // content_unavailable 计入跳过，继续处理后续 2 条成功，未中断
+    expect(result.skippedCount).toBe(1);
+    expect(result.successCount).toBe(2);
+    expect(result.loginPauseCount).toBe(0);
+    expect(result.pauseReason).toBeUndefined();
+    db.close();
+  });
+
   it('节奏控制：条目间按 intervalMs±抖动等待（注入 sleepFn 断言不真等）', async () => {
     const db = seedDb(3);
     const adapter = mockAdapter([

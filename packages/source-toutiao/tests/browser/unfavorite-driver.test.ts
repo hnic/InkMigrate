@@ -202,4 +202,71 @@ describe('driveUnfavorite', () => {
 
     await session.close();
   }, 60000); // heavy 阅读有多次随机停留，给足超时
+
+  it('§5 风控验证页（security-challenge）：检测到 challenge_required，不点击直接返回', async () => {
+    const challengeHtml = `<!doctype html><html><body>
+<div data-testid="security-challenge"><h1>安全验证</h1><p>请完成滑块验证</p></div>
+</body></html>`;
+    const profileDir = createTempProfileDir();
+    const session = new ToutiaoBrowserSession({ profileDir, headless: true });
+    await session.launch();
+    const page = await session.newPage();
+    await page.route(DETAIL_URL, (route) =>
+      route.fulfill({ contentType: 'text/html; charset=utf-8', body: challengeHtml }),
+    );
+
+    const result = await driveUnfavorite({ page, ref: makeRef(), readingSimulation: 'none' });
+
+    // §5 命中风控验证页 → success=false + detectedState=challenge_required（不点击）
+    expect(result.success).toBe(false);
+    expect(result.detectedState).toBe('challenge_required');
+    expect(result.reason).toBe('challenge_required');
+
+    await session.close();
+  });
+
+  it('§5 登录墙重定向：检测到 login_required', async () => {
+    // 模拟被重定向到登录页（URL 含 login）
+    const LOGIN_URL = 'https://www.toutiao.com/passport/login';
+    const profileDir = createTempProfileDir();
+    const session = new ToutiaoBrowserSession({ profileDir, headless: true });
+    await session.launch();
+    const page = await session.newPage();
+    // DETAIL_URL 重定向到 LOGIN_URL
+    await page.route(DETAIL_URL, (route) =>
+      route.fulfill({ status: 302, headers: { location: LOGIN_URL } }),
+    );
+    await page.route(LOGIN_URL, (route) =>
+      route.fulfill({ contentType: 'text/html; charset=utf-8', body: '<!doctype html><html><body><h1>登录</h1></body></html>' }),
+    );
+
+    const result = await driveUnfavorite({ page, ref: makeRef(), readingSimulation: 'none' });
+
+    expect(result.success).toBe(false);
+    expect(result.detectedState).toBe('login_required');
+    expect(result.reason).toBe('login_required');
+
+    await session.close();
+  });
+
+  it('§5 内容已删除（content-deleted）：检测到 content_unavailable', async () => {
+    const deletedHtml = `<!doctype html><html><body>
+<div data-testid="content-deleted"><p>该内容已被删除</p></div>
+</body></html>`;
+    const profileDir = createTempProfileDir();
+    const session = new ToutiaoBrowserSession({ profileDir, headless: true });
+    await session.launch();
+    const page = await session.newPage();
+    await page.route(DETAIL_URL, (route) =>
+      route.fulfill({ contentType: 'text/html; charset=utf-8', body: deletedHtml }),
+    );
+
+    const result = await driveUnfavorite({ page, ref: makeRef(), readingSimulation: 'none' });
+
+    expect(result.success).toBe(false);
+    expect(result.detectedState).toBe('content_unavailable');
+    expect(result.reason).toBe('content_unavailable');
+
+    await session.close();
+  });
 });
