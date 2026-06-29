@@ -1,6 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
 import { openDatabase, type DB, type SourceAdapter, type SourceItemRef, type CleanupActionReceipt } from '@inkmigrate/core';
 import { runCleanupUnfavorite } from '../../src/cleanup/cleanup-orchestrator.js';
+import { mkdtempSync, rmSync, readdirSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const SOURCE_INSTANCE_ID = 'src-test';
 const MIGRATION_JOB_ID = 'mig-test-1';
@@ -266,6 +269,40 @@ describe('runCleanupUnfavorite', () => {
     expect(result.loginPauseCount).toBe(0);
     expect(result.pauseReason).toBeUndefined();
     db.close();
+  });
+
+  it('§5-part2 生成不可变清理计划报告（reports/cleanup 下 JSON/CSV/MD）', async () => {
+    // generateCleanupPlan 此前是死代码，编排器手写 planId/planHash 不落地报告。
+    // 修正后应调用 generateCleanupPlan，在 <workspaceDir>/reports/cleanup 下生成
+    // unfavorite-plan-<planId>.{json,csv,md} 三份审计报告。
+    const db = seedDb(2);
+    const wsDir = mkdtempSync(join(tmpdir(), 'cleanup-report-'));
+    try {
+      const adapter = mockAdapter([
+        { success: true, wasCollected: true, isCollected: false },
+        { success: true, wasCollected: true, isCollected: false },
+      ]);
+      const result = await runCleanupUnfavorite({
+        db,
+        sourceAdapter: adapter,
+        sourceInstanceId: SOURCE_INSTANCE_ID,
+        migrationJobId: MIGRATION_JOB_ID,
+        workspaceDir: wsDir,
+        sleepFn: async () => {},
+      });
+      expect(result.successCount).toBe(2);
+
+      const cleanupDir = join(wsDir, 'reports', 'cleanup');
+      expect(existsSync(cleanupDir)).toBe(true);
+      const files = readdirSync(cleanupDir);
+      // 三种格式报告（planId 动态，按扩展名断言）
+      expect(files.some((f) => f.endsWith('.json'))).toBe(true);
+      expect(files.some((f) => f.endsWith('.csv'))).toBe(true);
+      expect(files.some((f) => f.endsWith('.md'))).toBe(true);
+    } finally {
+      db.close();
+      rmSync(wsDir, { recursive: true, force: true });
+    }
   });
 
   it('节奏控制：条目间按 intervalMs±抖动等待（注入 sleepFn 断言不真等）', async () => {

@@ -9,6 +9,7 @@ import {
   ITEM_INTERVAL_JITTER,
 } from '@inkmigrate/core';
 import { type PreActionState } from './cleanup-state-machine.js';
+import { generateCleanupPlan } from './plan-generator.js';
 
 export interface CleanupProgress {
   phase: 'cleanup';
@@ -130,15 +131,36 @@ export async function runCleanupUnfavorite(
   const now = () => new Date().toISOString();
   const ts = now();
 
-  // 2. 建 plan + job
-  const planId = `cleanup-plan-${Date.now()}`;
+  // 2. 建 plan + job。§5-part2 调用 generateCleanupPlan 生成不可变计划并落地
+  // reports/cleanup 下的 JSON/CSV/MD 审计报告（此前为死代码，编排器手写 planId）。
+  const candidates = rows.map((r) => ({
+    sourceItemId: r.id,
+    ...(r.external_id ? { externalId: r.external_id } : {}),
+    ...(r.canonical_url ? { canonicalUrl: r.canonical_url } : {}),
+    title: r.title ?? '(无标题)',
+  }));
+  const excluded = Array.from(alreadyDone).map((id) => ({
+    sourceItemId: id,
+    reason: 'already_unfavorited',
+  }));
+  const plan = generateCleanupPlan({
+    reportsDir: `${workspaceDir}/reports`,
+    sourceInstanceId,
+    migrationJobId,
+    action: 'unfavorite',
+    candidates,
+    excluded,
+    databaseSnapshotVersion: Date.now(),
+    configHash: `ch-${workspaceDir.length}`,
+  });
+  const planId = plan.planId;
   const jobId = `cleanup-${Date.now()}`;
   new CleanupPlans(db).create({
     id: planId,
     sourceInstanceId,
     migrationJobId,
     action: 'unfavorite',
-    planHash: `ph-${Date.now()}`,
+    planHash: plan.planHash,
     configHash: `ch-${workspaceDir.length}`,
     candidateCount: rows.length,
     excludedCount: alreadyDone.size,
@@ -148,7 +170,7 @@ export async function runCleanupUnfavorite(
   new CleanupJobs(db).create({
     id: jobId,
     planId,
-    planHash: `ph-${Date.now()}`,
+    planHash: plan.planHash,
     action: 'unfavorite',
     status: 'running',
     candidateCount: rows.length,
