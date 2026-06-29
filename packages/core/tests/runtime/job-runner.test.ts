@@ -341,6 +341,83 @@ describe('runMigrationJob (§11 端到端)', () => {
     expect(artifacts.every((a) => a.artifact_kind === 'note')).toBe(true);
   });
 
+  it('§13 限流条目终态为 rate_limited（非 skipped），Job 进入 paused', async () => {
+    // 缺陷13：限流（429/503）时未处理条目被标为 'skipped'，与用户主动跳过的 skipped
+    // 混淆，不利审计。修正后限流条目应为独立终态 'rate_limited'（可断点续跑恢复）。
+    new SourceInstances(db).create({
+      id: 's1', adapterKind: 'toutiao', adapterVersion: '1.0.0',
+      adapterApiVersion: '1.0.0', configHash: 'h', createdAt: 't', updatedAt: 't',
+    });
+    new TargetInstances(db).create({
+      id: 't1', adapterKind: 'obsidian', adapterVersion: '1.0.0',
+      adapterApiVersion: '1.0.0', configHash: 'h', createdAt: 't', updatedAt: 't',
+    });
+    new MigrationJobs(db).create({
+      id: 'jrl', sourceInstanceId: 's1', targetInstanceId: 't1',
+      status: 'created', currentStage: 'preflight', createdAt: 't', updatedAt: 't',
+    });
+    const favoritesHtml = readFileSync(join(FIXTURES, 'favorites-list.html'), 'utf8');
+    const articleHtml = readFileSync(join(FIXTURES, 'article.html'), 'utf8');
+
+    // 构造一个会在第 2 条 extract 时抛 429 的 source：第 1 条正常，第 2 条限流。
+    // retryable:false 让 withRetry 立即抛出（绕过生产 3 次退避重试，加速测试），
+    // 不影响验证"429 → rate_limited 终态"这一核心逻辑。
+    const base = createFixtureSource(favoritesHtml, articleHtml);
+    let extractCalls = 0;
+    const rateLimitedSource: SourceAdapter = {
+      ...base,
+      async extract(ref) {
+        extractCalls++;
+        if (extractCalls === 2) {
+          const err = new Error('rate limited') as Error & {
+            httpStatus?: number;
+            retryable?: boolean;
+          };
+          err.httpStatus = 429;
+          err.retryable = false;
+          throw err;
+        }
+        return base.extract(ref);
+      },
+    };
+
+    const targetCtx: TargetContext = {
+      config: {},
+      workspaceDir: dbDir,
+      vaultPath: vaultDir,
+      targetConfig: {
+        vaultPath: vaultDir,
+        importSubdir: 'Imports/InkMigrate',
+        attachmentsSubdir: 'Attachments/InkMigrate',
+        linkStyle: 'wikilink',
+        overwritePolicy: 'preserve',
+        collectionMapping: { toTags: false, toFolders: false },
+        maxFilenameLength: 100,
+      } as Record<string, unknown>,
+    };
+
+    const result = await runMigrationJob({
+      db,
+      jobId: 'jrl',
+      sourceAdapter: rateLimitedSource,
+      targetAdapter: createObsidianTarget(),
+      sourceInstanceId: 's1',
+      targetInstanceId: 't1',
+      targetContext: targetCtx,
+      workspaceDir: dbDir,
+      reportsDir: join(dbDir, 'reports'),
+    });
+
+    // Job 因限流进入 paused（非 completed）
+    expect(result.status).toBe('paused');
+    expect(result.reconciliationOk).toBe(false);
+    expect(result.reconciliationReason).toBe('rate_limited');
+    // 限流条目（第 2 条）+ 其后未处理条目（第 3 条）应归类为 rate_limited，而非 skipped
+    const counts = result.finalStateCounts as Record<string, number>;
+    expect(counts.rate_limited).toBeGreaterThanOrEqual(1);
+    expect(counts.skipped ?? 0).toBe(0);
+  });
+
   it('injects migration_job_id into frontmatter (§13.5)', async () => {
     new SourceInstances(db).create({
       id: 's1', adapterKind: 'toutiao', adapterVersion: '1.0.0',

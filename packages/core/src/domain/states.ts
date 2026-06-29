@@ -49,7 +49,10 @@ export const ITEM_PROCESSING_STATES = [
 ] as const;
 export type ItemProcessingState = (typeof ITEM_PROCESSING_STATES)[number];
 
-// §11.1 可恢复状态，不计入完成对账终态
+// §11.1 可恢复状态，不计入完成对账终态。
+// 注：rate_limited 虽语义可恢复（断点续跑），但作为 final state 参与计数/等式，
+// 其"可恢复"属性由 job-runner.recoverableCount 的 filter 显式识别，不在此枚举，
+// 以保持 recoverable 与 final 不相交的不变量。
 export const ITEM_RECOVERABLE_STATES = [
   'retryable_failed',
   'interrupted',
@@ -57,6 +60,8 @@ export const ITEM_RECOVERABLE_STATES = [
 export type ItemRecoverableState = (typeof ITEM_RECOVERABLE_STATES)[number];
 
 // §11.1 本 Job 完整性方程允许的条目终态
+// §13 rate_limited：限流（429/503）未处理条目，语义属可恢复（断点续跑可恢复），
+// 与用户主动 skip 的 skipped 区分，避免对账/审计混淆。
 export const ITEM_FINAL_STATES = [
   'verified',
   'degraded',
@@ -65,6 +70,7 @@ export const ITEM_FINAL_STATES = [
   'blocked',
   'conflict',
   'skipped',
+  'rate_limited',
 ] as const;
 export type ItemFinalState = (typeof ITEM_FINAL_STATES)[number];
 
@@ -77,6 +83,7 @@ export const COMPLETION_EQUATION_TERMS = [
   'blocked',
   'conflict',
   'skipped',
+  'rate_limited',
 ] as const;
 
 // §16.6 target_artifacts.status 受控值
@@ -123,6 +130,8 @@ export interface FinalStateCounts {
   blocked: number;
   conflict: number;
   skipped: number;
+  /** §13 限流（429/503）未处理条目；语义可恢复（断点续跑），与 skipped 区分。 */
+  rate_limited: number;
 }
 
 export interface CompletionEquationInput {
@@ -134,8 +143,11 @@ export interface CompletionEquationInput {
 /**
  * §11.9 完整性方程校验：
  *   scan_count == verified + degraded + permanent_failed + unsupported
- *                 + blocked + conflict + skipped
+ *                 + blocked + conflict + skipped + rate_limited
  * 且不存在悬挂的可恢复状态。
+ *
+ * 注：rate_limited 条目只在 Job=paused 时出现（不进 completed），此函数主要
+ * 用于 completed 校验；rate_limited 计入 sum 以保持方程在 paused 场景下也自洽。
  */
 export function verifyCompletionEquation(
   input: CompletionEquationInput,
@@ -148,7 +160,8 @@ export function verifyCompletionEquation(
     input.counts.unsupported +
     input.counts.blocked +
     input.counts.conflict +
-    input.counts.skipped;
+    input.counts.skipped +
+    input.counts.rate_limited;
   return sum === input.scanCount;
 }
 

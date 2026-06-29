@@ -13,6 +13,7 @@ export function deriveFinalStateCounts(
     blocked: 0,
     conflict: 0,
     skipped: 0,
+    rate_limited: 0,
   };
   for (const s of states) {
     counts[s]++;
@@ -66,7 +67,8 @@ export function reconcileJob(i: ReconcileInput): ReconciliationResult {
     derived.degraded +
     derivedFailed +
     derived.conflict +
-    derived.skipped;
+    derived.skipped +
+    derived.rate_limited;
   if (sum !== i.scanCount) {
     return {
       ok: false,

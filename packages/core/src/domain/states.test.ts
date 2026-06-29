@@ -96,7 +96,7 @@ describe('states (§11.1, §16.6)', () => {
   });
 
   describe('completion equation (§11.9)', () => {
-    it('terms match the seven allowed final states values', () => {
+    it('terms match the allowed final states values (含 §13 rate_limited)', () => {
       expect(COMPLETION_EQUATION_TERMS).toEqual([
         'verified',
         'degraded',
@@ -105,6 +105,7 @@ describe('states (§11.1, §16.6)', () => {
         'blocked',
         'conflict',
         'skipped',
+        'rate_limited',
       ]);
       // every term must be a recognized final state
       for (const t of COMPLETION_EQUATION_TERMS) {
@@ -123,6 +124,7 @@ describe('states (§11.1, §16.6)', () => {
             blocked: 1,
             conflict: 4,
             skipped: 5,
+            rate_limited: 0,
           },
           recoverable: 0,
         }),
@@ -140,6 +142,7 @@ describe('states (§11.1, §16.6)', () => {
             blocked: 1,
             conflict: 4,
             skipped: 5,
+            rate_limited: 0,
           },
           recoverable: 0,
         }),
@@ -157,6 +160,7 @@ describe('states (§11.1, §16.6)', () => {
             blocked: 1,
             conflict: 4,
             skipped: 5,
+            rate_limited: 0,
           },
           recoverable: 1,
         }),
@@ -175,6 +179,7 @@ describe('states (§11.1, §16.6)', () => {
           blocked: 1,
           conflict: 4,
           skipped: 5,
+          rate_limited: 0,
         }),
       ).toBe(6);
     });
@@ -188,6 +193,7 @@ describe('states (§11.1, §16.6)', () => {
           blocked: 0,
           conflict: 0,
           skipped: 0,
+          rate_limited: 0,
         }),
       ).toBe(0);
     });

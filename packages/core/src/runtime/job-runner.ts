@@ -218,6 +218,7 @@ export async function runMigrationJob(
       blocked: 0,
       conflict: 0,
       skipped: 0,
+      rate_limited: 0,
     };
     let rateLimited = false;
     try {
@@ -310,10 +311,10 @@ export async function runMigrationJob(
         pausedAt: now(),
         updatedAt: now(),
       });
-      // 未处理条目标记为 skipped
+      // §13 未处理条目标记为 rate_limited（限流可断点续跑恢复，区别于主动 skipped）
       const processed = itemStates.length;
       for (let idx = processed; idx < refs.length; idx++) {
-        itemStates.push('skipped');
+        itemStates.push('rate_limited');
       }
       return {
         status: 'paused',
@@ -429,9 +430,9 @@ export async function runMigrationJob(
     });
 
     const jobRow = jobs.get(i.jobId);
-    // §11.9 recoverableCount 从 itemStates 统计
+    // §11.9 recoverableCount 从 itemStates 统计（§13 rate_limited 也属可恢复）
     const recoverableCount = (itemStates as string[]).filter(
-      (s) => s === 'retryable_failed' || s === 'interrupted',
+      (s) => s === 'retryable_failed' || s === 'interrupted' || s === 'rate_limited',
     ).length;
 
     const reconciliation = reconcileJob({
