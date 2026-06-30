@@ -56,7 +56,11 @@ export interface GenerateIndexInput {
  * 总入口只链接分片，不直接列出条目。
  */
 export function generateShardIndexes(i: GenerateIndexInput): GenerateIndexResult {
-  const indexDir = `${i.config.importSubdir}/${i.sourceInstanceId}/_索引`;
+  // 路径段用数组 + filter(Boolean).join('/') 拼接：importSubdir 为空时自动跳过该段，
+  // 绝不产生以 '/' 开头的绝对路径（否则 resolveWithin 判定 escapes root）。
+  const indexDir = [i.config.importSubdir, i.sourceInstanceId, '_索引']
+    .filter(Boolean)
+    .join('/');
   const knownByPath = new Map((i.knownArtifacts ?? []).map((a) => [a.relativePath, a.writtenFileHash]));
 
   // I18: 分片内条目按 relativePath 稳定排序后再分组，保证字节级幂等。
@@ -99,7 +103,10 @@ export function generateShardIndexes(i: GenerateIndexInput): GenerateIndexResult
     });
   }
 
-  const entryIndexRel = `${i.config.importSubdir}/${i.sourceInstanceId}/${i.sourceInstanceId}收藏索引.md`;
+  // 同 indexDir：数组拼接避免空 importSubdir 产生绝对路径
+  const entryIndexRel = [i.config.importSubdir, i.sourceInstanceId, `${i.sourceInstanceId}收藏索引.md`]
+    .filter(Boolean)
+    .join('/');
   const entryContent = renderEntryIndex(shards, i.sourceInstanceId);
   const entryWritten = writeShard(i.vaultPath, entryIndexRel, entryContent, knownByPath.get(entryIndexRel));
 

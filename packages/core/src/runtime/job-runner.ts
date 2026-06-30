@@ -458,9 +458,17 @@ export async function runMigrationJob(
         // 笔记路径由 ref.sourceInstanceId 决定，可能与 i.sourceInstanceId（DB 键）不同，
         // 故从第一条笔记的 relativePath 反解路径段，避免索引目录与笔记分目录错配。
         const importSubdir = (i.targetContext.targetConfig as { importSubdir?: string }).importSubdir ?? 'Imports/InkMigrate';
-        const pathSeg = indexEntries.length > 0
-          ? indexEntries[0]!.relativePath.replace(`${importSubdir}/`, '').split('/')[0] ?? i.sourceInstanceId
-          : i.sourceInstanceId;
+        // importSubdir 为空时笔记直接放 Vault 根（裸文件名，无目录段），反解取不到
+        // sourceInstanceId——此时直接用 DB 的 sourceInstanceId 作为索引路径段。
+        // 非空时剥掉 importSubdir 前缀取第一段；剥不掉（路径格式不符）也回退到 sourceInstanceId。
+        let pathSeg = i.sourceInstanceId;
+        if (importSubdir && indexEntries.length > 0) {
+          const stripped = indexEntries[0]!.relativePath.replace(`${importSubdir}/`, '');
+          if (stripped.includes('/')) {
+            const seg = stripped.split('/')[0];
+            if (seg) pathSeg = seg;
+          }
+        }
         const indexCtx: TargetContext = {
           ...targetContextWithJobId,
           sourceInstanceId: pathSeg,

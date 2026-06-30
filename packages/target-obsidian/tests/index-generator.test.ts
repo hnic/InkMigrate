@@ -158,4 +158,35 @@ describe('generateShardIndexes (§13.8)', () => {
     expect(same.skippedDueToConflict).toBeFalsy();
     expect(readFileSync(shardAbs, 'utf8').length).toBeGreaterThan(0);
   });
+
+  it('importSubdir 为空时索引不产生绝对路径（不 escapes root）', () => {
+    // 回归场景：CLI migrate 默认 importSubdir=''（笔记直接放 Vault 根）。
+    // 此前 indexDir/entryIndexRel 无条件拼 `${importSubdir}/...`，
+    // 空字符串产生以 / 开头的绝对路径 → resolveWithin 判定 escapes root → 报错。
+    const rootConfig: ObsidianTargetConfig = {
+      ...config,
+      importSubdir: '',
+    };
+    // importSubdir='' 时笔记路径就是裸文件名（见 noteRelativePath）
+    const rootEntries: IndexEntry[] = [
+      { title: '文章1', relativePath: '文章1-abc.md', contentKind: 'article', publishedAt: '2026-01-15T10:00:00+08:00', favoritedAt: '2026-01-16T12:00:00+08:00', collections: [] },
+      { title: '文章2', relativePath: '文章2-def.md', contentKind: 'article', publishedAt: '2026-02-20T10:00:00+08:00', favoritedAt: '2026-02-21T12:00:00+08:00', collections: [] },
+    ];
+    // 修复前：抛 path "..." escapes root（因 indexDir 以 / 开头）
+    // 修复后：索引落在 Vault 内的合理相对路径，正常生成
+    const result = generateShardIndexes({
+      config: rootConfig,
+      vaultPath: vault,
+      sourceInstanceId: 'toutiao-main',
+      entries: rootEntries,
+      groupBy: ['month', 'content-type'],
+    });
+    expect(result.shards.length).toBeGreaterThan(0);
+    // 所有 shard 路径必须是相对路径（不以 / 开头）
+    expect(result.shards.every((s) => !s.relativePath.startsWith('/'))).toBe(true);
+    expect(!result.entryIndex.relativePath.startsWith('/')).toBe(true);
+    // shard 文件实际写入 Vault（在 Vault 根的 _索引/ 子目录下）
+    const shardAbs = join(vault, result.shards[0]!.relativePath);
+    expect(existsSync(shardAbs)).toBe(true);
+  });
 });

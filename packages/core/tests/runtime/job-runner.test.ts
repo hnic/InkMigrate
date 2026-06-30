@@ -249,6 +249,55 @@ describe('runMigrationJob (§11 端到端)', () => {
     expect(existsSync(entryIndex)).toBe(true);
   });
 
+  it('importSubdir 为空时索引生成不崩溃（pathSeg 回退 + indexDir 不产生绝对路径）', async () => {
+    // 回归：CLI migrate 默认 importSubdir=''，笔记直接落 Vault 根（裸文件名）。
+    // 此前 pathSeg 反解在裸文件名上退化为文件名、indexDir 拼接产生 '/...' 绝对路径
+    // → resolveWithin 抛 escapes root → 索引生成失败。
+    new SourceInstances(db).create({
+      id: 's1', adapterKind: 'toutiao', adapterVersion: '1.0.0',
+      adapterApiVersion: '1.0.0', configHash: 'h', createdAt: 't', updatedAt: 't',
+    });
+    new TargetInstances(db).create({
+      id: 't1', adapterKind: 'obsidian', adapterVersion: '1.0.0',
+      adapterApiVersion: '1.0.0', configHash: 'h', createdAt: 't', updatedAt: 't',
+    });
+    new MigrationJobs(db).create({
+      id: 'jidx-root', sourceInstanceId: 's1', targetInstanceId: 't1',
+      status: 'created', currentStage: 'preflight', createdAt: 't', updatedAt: 't',
+    });
+    const favoritesHtml = readFileSync(join(FIXTURES, 'favorites-list.html'), 'utf8');
+    const articleHtml = readFileSync(join(FIXTURES, 'article.html'), 'utf8');
+    const targetCtx: TargetContext = {
+      config: {},
+      workspaceDir: dbDir,
+      vaultPath: vaultDir,
+      targetConfig: {
+        vaultPath: vaultDir, importSubdir: '', attachmentsSubdir: 'Attachments',
+        linkStyle: 'wikilink', overwritePolicy: 'preserve',
+        collectionMapping: { toTags: false, toFolders: false }, maxFilenameLength: 100,
+      } as Record<string, unknown>,
+    };
+
+    const result = await runMigrationJob({
+      db, jobId: 'jidx-root',
+      sourceAdapter: createFixtureSource(favoritesHtml, articleHtml),
+      targetAdapter: createObsidianTarget(),
+      sourceInstanceId: 's1', targetInstanceId: 't1',
+      targetContext: targetCtx, workspaceDir: dbDir, reportsDir: join(dbDir, 'reports'),
+    });
+    expect(result.status).toBe('completed');
+    // 索引 artifact 落库（不因 escapes root 而失败）
+    const indexArtifacts = new TargetArtifacts(db)
+      .listByJob('jidx-root')
+      .filter((a) => a.artifactKind === 'index');
+    expect(indexArtifacts.length).toBeGreaterThan(0);
+    // 索引文件写入 Vault 内（相对路径，不以 / 开头；落 Vault 根的 _索引/ 下）
+    for (const a of indexArtifacts) {
+      expect(!a.relativePath.startsWith('/')).toBe(true);
+      expect(existsSync(join(vaultDir, a.relativePath))).toBe(true);
+    }
+  });
+
   it('writes migration_attempts audit trail per item (§16.7)', async () => {
     new SourceInstances(db).create({
       id: 's1', adapterKind: 'toutiao', adapterVersion: '1.0.0',
