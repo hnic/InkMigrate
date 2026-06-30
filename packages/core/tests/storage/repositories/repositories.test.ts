@@ -96,6 +96,12 @@ describe('repositories', () => {
 
     it('updateStatus updates status, current_stage, pause reason, timestamps', () => {
       seedInstancesAndJob();
+      // 走合法路径 created → running → paused（状态机守卫要求合法转换）
+      new MigrationJobs(db).updateStatus('j1', {
+        status: 'running',
+        currentStage: 'extracting',
+        updatedAt: 'u1b',
+      });
       new MigrationJobs(db).updateStatus('j1', {
         status: 'paused',
         currentStage: 'extracting',
@@ -107,6 +113,25 @@ describe('repositories', () => {
       expect(j.status).toBe('paused');
       expect(j.currentStage).toBe('extracting');
       expect(j.pauseReasonCode).toBe('auth_required');
+    });
+
+    it('updateStatus clears pause fields on resume (running) and rejects illegal transitions', () => {
+      seedInstancesAndJob();
+      const jobs = new MigrationJobs(db);
+      jobs.updateStatus('j1', { status: 'running', currentStage: 'scanning', updatedAt: 'r1' });
+      jobs.updateStatus('j1', { status: 'paused', pauseReasonCode: 'rate_limited', pausedAt: 'p1', updatedAt: 'r2' });
+      // paused → running 恢复：应清空 pause_reason_code / paused_at（显式 SET 而非 COALESCE）
+      jobs.updateStatus('j1', { status: 'running', currentStage: 'extracting', updatedAt: 'r3' });
+      const resumed = jobs.get('j1');
+      expect(resumed.status).toBe('running');
+      // SQL NULL 经 better-sqlite3 返回为 JS null（类型标注为 optional string，运行时为 null）
+      expect(resumed.pauseReasonCode).toBeNull();
+      expect(resumed.pausedAt).toBeNull();
+      // 终态不可再转换
+      jobs.updateStatus('j1', { status: 'completed', currentStage: 'completed', updatedAt: 'r4' });
+      expect(() =>
+        jobs.updateStatus('j1', { status: 'running', currentStage: 'preflight', updatedAt: 'r5' }),
+      ).toThrow(/非法 Job 状态转换/);
     });
   });
 

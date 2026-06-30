@@ -24,10 +24,12 @@ export function detectContentKind(input: DetectInput): SourceContentKind {
   if (input.url !== undefined) {
     try {
       const u = new URL(input.url);
-      if (/\/article\//.test(u.pathname)) return 'article';
+      // §I-D：新增 /a/、/group/ 文章路径（旧路径检测会把这些判成 'unknown'）。
+      // /w/ 改为锚定后续数字（/\/w\/(\d+)/），避免误命中 /world/ 等路径。
+      if (/\/(article|a|group)\//.test(u.pathname)) return 'article';
       if (/\/wenda\//.test(u.pathname)) return 'question-answer';
       if (/\/video\//.test(u.pathname)) return 'video';
-      if (/\/w\//.test(u.pathname)) return 'short-post'; // 微头条
+      if (/\/w\/(\d+)/.test(u.pathname)) return 'short-post'; // 微头条
     } catch {
       // ignore
     }

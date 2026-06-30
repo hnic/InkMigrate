@@ -35,7 +35,8 @@ export function saveDiagnostics(i: DiagnosticsInput): void {
   };
   if (i.attemptedSelectors !== undefined) errorData.attemptedSelectors = i.attemptedSelectors;
   if (i.pageUrl !== undefined) errorData.pageUrl = redactor(i.pageUrl);
-  if (i.pageTitle !== undefined) errorData.pageTitle = i.pageTitle;
+  // N12: pageTitle 同样脱敏（标题理论上可含敏感信息，且诊断包常被分享）。
+  if (i.pageTitle !== undefined) errorData.pageTitle = redactor(i.pageTitle);
   if (i.loginState !== undefined) errorData.loginState = i.loginState;
   if (i.securityChallenge !== undefined) errorData.securityChallenge = i.securityChallenge;
   if (i.generatedDegradedNote !== undefined) errorData.generatedDegradedNote = i.generatedDegradedNote;

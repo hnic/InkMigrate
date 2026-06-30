@@ -34,11 +34,14 @@ export function isPathInside(child: string, parent: string): boolean {
 /**
  * §13.2 解引用符号链接后再次确认 `target` 仍在 `root` 内。
  * 调用方应捕获 ENOENT（链接或目标不存在）。
+ *
+ * target 等于 root（文件就位于 Vault 根目录）视为安全——isPathInside 严格区分
+ * "在内部"与"相等"，但符号链接逃逸校验的语义是"不逃出 root"，相等即不逃出。
  */
 export function assertSymlinkSafe(root: string, target: string): void {
   const realRoot = realpathSync(root);
   const realTarget = realpathSync(target);
-  if (!isPathInside(realTarget, realRoot)) {
+  if (realTarget !== realRoot && !isPathInside(realTarget, realRoot)) {
     throw new Error(
       `resolved path "${realTarget}" escapes root "${realRoot}" via symlink`,
     );

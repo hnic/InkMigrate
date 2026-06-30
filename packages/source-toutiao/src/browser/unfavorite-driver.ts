@@ -168,10 +168,14 @@ export async function driveUnfavorite(
     .locator(UNFAVORITE_SELECTORS.collectButton.join(', '))
     .first();
   try {
+    // C9: 不只等 'attached'（元素在 DOM 但 SPA 可能尚未 hydration 写入 aria-pressed），
+    // 而是等到 aria-pressed 属性出现，避免读到缺失值后回退到已知失效的 class 判定，
+    // 后者会把"实际仍收藏"误判为"未收藏"→ 落库 already_unfavorited 终态 → 永久遗漏清理目标。
     await collectBtn.waitFor({
       state: 'attached',
       timeout: opts.navigationTimeoutMs ?? 10_000,
     });
+    await waitForCollectedAttribute(collectBtn, opts.navigationTimeoutMs ?? 10_000);
   } catch {
     // 超时仍未渲染：用 count 复核，保留 not found 语义（编排器据此计入"未知"）
   }
@@ -236,17 +240,25 @@ async function detectSpecialPage(
   if (currentUrl.includes('login') || currentUrl.includes('passport')) {
     return 'login_required';
   }
-  // 2. 风控挑战（验证码）
+  // C8: 风控挑战（验证码）。原实现只用 fixture testid `[data-testid="security-challenge"]`，
+  // 真实头条页面不存在该 testid → 撞到真实验证码页时永不命中 → 不中断 → 继续下一条，
+  // 或在风控期内反复操作导致封号。补充 URL 模式（verify/captcha/safe/sec）与真实页面
+  // 候选选择器（iframe.captcha、含验证码/安全验证文案的元素）。
+  if (/\/(verify|captcha|safe|sec)\b/i.test(currentUrl)) {
+    return 'challenge_required';
+  }
+  const challengeSelectors = SPECIAL_PAGE_SELECTORS.securityChallenge.join(', ');
   const challengeCount = await page
-    .locator(SPECIAL_PAGE_SELECTORS.securityChallenge[0])
+    .locator(challengeSelectors)
     .count()
     .catch(() => 0);
   if (challengeCount > 0) {
     return 'challenge_required';
   }
-  // 3. 内容删除/不可用
+  // 3. 内容删除/不可用（遍历所有候选选择器，而非仅 [0]）
+  const deletedSelectors = SPECIAL_PAGE_SELECTORS.contentDeleted.join(', ');
   const deletedCount = await page
-    .locator(SPECIAL_PAGE_SELECTORS.contentDeleted[0])
+    .locator(deletedSelectors)
     .count()
     .catch(() => 0);
   if (deletedCount > 0) {
@@ -268,6 +280,32 @@ export async function inspectCollectedState(
   const exists = await collectBtn.count().catch(() => 0);
   if (exists === 0) return null;
   return readCollectedState(collectBtn);
+}
+
+/**
+ * C9: 等待收藏按钮的 aria-pressed 属性出现（SPA hydration 完成的信号）。
+ * 仅 attached 不保证 hydration 已写入状态属性。读到缺失值会回退到 class 判定，
+ * 而真实页面按钮不带 collected class（selectors 注释已声明），导致误判"未收藏"。
+ * 这里轮询直到属性出现或超时，超时则回退（保留原行为，但给 SPA 足够 hydration 时间）。
+ */
+async function waitForCollectedAttribute(
+  collectBtn: ReturnType<Page['locator']>,
+  timeoutMs: number,
+): Promise<void> {
+  await collectBtn
+    .page()
+    .waitForFunction(
+      (locator) => {
+        const el = document.querySelector(locator);
+        if (el === null) return false;
+        return el.getAttribute('aria-pressed') !== null;
+      },
+      UNFAVORITE_SELECTORS.collectButton.join(', '),
+      { timeout: timeoutMs },
+    )
+    .catch(() => {
+      // 超时容忍：回退到 readCollectedState 的既有逻辑
+    });
 }
 
 /** 读单个收藏按钮的收藏状态：aria-pressed 主信号（true=已收藏），collected class 回退。 */

@@ -357,6 +357,8 @@ export async function runCleanupUnfavorite(
 
     /** 当前条目的最新尝试结果（闭包变量，供 persistItem 读取最终态）。 */
     let latestOutcome: AttemptOutcome | undefined;
+    // §I-F(2)：当前条目已执行的尝试次数（首轮=1，每次重试 +1），供 persistItem 落 attemptNo。
+    let attemptCount = 0;
 
     /**
      * 记录一次尝试的可观测信号（失败/未知原因聚合 + 采样日志）并更新 latestOutcome。
@@ -364,6 +366,7 @@ export async function runCleanupUnfavorite(
      * 计数器不在此时累加：重试会改变最终归属，计数只在 persistItem 前按最终结果应用一次。
      */
     const observeAttempt = (outcome: AttemptOutcome): void => {
+      attemptCount++;
       latestOutcome = outcome;
       if (outcome.reasonForLog !== undefined) {
         const map = outcome.reasonForLog.bucket === 'unknown' ? unknownReasons : failReasons;
@@ -404,11 +407,15 @@ export async function runCleanupUnfavorite(
         updatedAt: actionFinishedAt,
       });
       // 审计日志（cleanup_item_id 由 UPSERT 产生，回查）
-      const itemRow = itemsRepo.listByJob(jobId).find((it) => it.sourceItemId === row.id);
+      // I7: 走 UNIQUE(job_id, source_item_id) 索引的精确查询，替代 listByJob 全表扫描 + find
+      //（原 O(n²)，批量清理数百条时显著降低 DB 负载）。
+      const itemRow = itemsRepo.findByJobAndSourceItem(jobId, row.id);
       if (itemRow !== undefined) {
         attemptsRepo.create({
           cleanupItemId: itemRow.id,
-          attemptNo: 1,
+          // §I-F(2)：此前硬编码 attemptNo: 1，丢失了重试次数。改用本轮实际尝试次数
+          //（首轮=1，每次重试 +1），使审计日志能反映重试历程。
+          attemptNo: attemptCount,
           preActionState: o.precheckStatus,
           actionResult: o.actionStatus,
           postActionState: o.actionStatus,

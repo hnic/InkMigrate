@@ -20,7 +20,7 @@ import {
   profileExists,
 } from '@inkmigrate/source-toutiao';
 import { createObsidianTarget } from '@inkmigrate/target-obsidian';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -56,10 +56,8 @@ export function createMigrateCommand(): Command {
       dryRun?: boolean;
     }) => {
       const dbPath = join(opts.stateDir, 'inkmigrate.sqlite');
-      // fixture 模式下自动创建数据库；真实模式下要求先 scan
-      const db: DB = existsSync(dbPath)
-        ? openDatabase({ path: dbPath })
-        : openDatabase({ path: dbPath }); // openDatabase 自动 migrate
+      // N1: openDatabase 会自动 migrate（不存在则建库），两个分支等价，去掉冗余三元。
+      const db: DB = openDatabase({ path: dbPath });
       try {
         const jobId = `mig-${Date.now()}`;
         const now = new Date().toISOString();

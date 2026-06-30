@@ -24,10 +24,11 @@ export interface DeriveInput {
  * 任一上层有值就用上层；下层字段不再混入（避免 fingerprint 输入不稳定）。
  */
 export function deriveFingerprintInput(i: DeriveInput): FingerprintInput {
+  // §I2：L1 命中时只输出 externalId，不再混入 canonicalUrl。
+  // 否则同一篇文章被采集两次（一次带 externalId、一次不带）会产生不同 SHA-256
+  // 指纹 → 重复迁移。上层有值就用上层，下层字段（URL）不再混入。
   if (i.contentId !== undefined && i.contentId.length > 0) {
-    const out: FingerprintInput = { externalId: i.contentId };
-    if (i.canonicalUrl !== undefined) out.canonicalUrl = i.canonicalUrl;
-    return out;
+    return { externalId: i.contentId };
   }
   if (i.canonicalUrl !== undefined && i.canonicalUrl.length > 0) {
     return { canonicalUrl: i.canonicalUrl };

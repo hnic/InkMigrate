@@ -99,6 +99,31 @@ export class CleanupItems {
       .all(jobId) as CleanupItemRow[];
   }
 
+  /**
+   * 按 job + source_item 精确查询单条 cleanup_item（走 UNIQUE(job_id, source_item_id) 索引）。
+   * I7: 替代 persistItem 里的 `listByJob(jobId).find(...)` 全表扫描（O(n²)），
+   * 批量清理数百条时显著降低 DB 负载。无行返回 undefined。
+   */
+  findByJobAndSourceItem(
+    jobId: string,
+    sourceItemId: number,
+  ): CleanupItemRow | undefined {
+    return this.db
+      .prepare(
+        `SELECT id, job_id AS jobId, source_item_id AS sourceItemId,
+                precheck_status AS precheckStatus, pre_action_state AS preActionState,
+                action_status AS actionStatus, post_action_state AS postActionState,
+                attempt_count AS attemptCount,
+                action_started_at AS actionStartedAt, action_finished_at AS actionFinishedAt,
+                verified_at AS verifiedAt,
+                last_error_code AS lastErrorCode, last_error_message AS lastErrorMessage,
+                diagnostic_path AS diagnosticPath,
+                created_at AS createdAt, updated_at AS updatedAt
+         FROM cleanup_items WHERE job_id=? AND source_item_id=?`,
+      )
+      .get(jobId, sourceItemId) as CleanupItemRow | undefined;
+  }
+
   /** 查询某 plan 体系下已无需再处理的 source_item_id（用于排除重跑）。
    *  跨 job：只要该 source_item 在任意清理中已落到"终态"action_status，就不再选中。
    *  终态包含：unfavorited_verified（真正取消成功）+ already_unfavorited（本就未收藏/

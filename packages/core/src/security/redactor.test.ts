@@ -68,4 +68,25 @@ describe('redactor (§19.2)', () => {
     expect(out).not.toContain('13800138000');
     expect(out).not.toContain('=x');
   });
+
+  it('redacts Set-Cookie response header (I22: \\bcookie\\b 不匹配 Set-Cookie)', () => {
+    expect(r('Set-Cookie: sid=abc123; Path=/')).toBe('Set-Cookie: [REDACTED]');
+  });
+
+  it('redacts password / secret / apikey assignments (I22)', () => {
+    expect(r('password=hunter2')).toBe('password=[REDACTED]');
+    expect(r('api_key=sk_test_123')).toBe('api_key=[REDACTED]');
+    expect(r('apikey=sk_test_123')).toBe('apikey=[REDACTED]');
+    expect(r('client_secret=abc')).toBe('client_secret=[REDACTED]');
+    // header / env 形式（key 后直接跟 : 或 =）
+    expect(r('X-Secret: shh')).toBe('X-Secret: [REDACTED]');
+  });
+
+  it('redacts favorites-page session token embedded in URL (C11)', () => {
+    const out = r('已获取收藏页 URL: https://www.toutiao.com/c/user/token/ABCDEF123456?tab=fav');
+    expect(out).not.toContain('ABCDEF123456');
+    expect(out).toContain('<redacted>');
+    // URL 结构其余部分保留，便于诊断
+    expect(out).toContain('toutiao.com/c/user/token/');
+  });
 });

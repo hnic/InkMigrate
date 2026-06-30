@@ -11,31 +11,27 @@ import { randomBytes } from 'node:crypto';
 import { assertSymlinkSafe, writtenFileHash } from '@inkmigrate/core';
 
 /**
- * §13.10 原子写入流程：
+ * §13.10 原子写入流程（底层，不校验 frontmatter 结构）。
  *
  * 1. 在同目录创建隐藏临时文件（`.inkmigrate-<basename>.<rand>.tmp`）。
  * 2. 写入（writeFileSync 在 Node 上默认 flush 元数据）。
- * 3. 解析 YAML frontmatter 与 Markdown 基础结构（必须有 `---` 起始与结束）。
- * 4. 验证非空。
- * 5. 原子 rename 到目标路径。
+ * 3. 安全校验：解引用符号链接确认 tmpPath 真实路径在 Vault 内。
+ * 4. 原子 rename 到目标路径。
+ *
+ * I17: 抽出此底层函数供分片索引 / 附件复用——它们不需要 frontmatter 校验，
+ * 但同样需要原子性（temp + rename），避免进程被杀留下半截损坏文件被幂等性逻辑固化。
  *
  * §13.2 任何目标路径都必须在解引用符号链接后再次确认位于 Vault 内。
- * 本函数要求调用方传入 `vaultRoot`，写入前对目标路径做 `assertSymlinkSafe`。
- *
  * 任何验证失败都不触碰目标文件，并清理临时文件。
  */
-export function atomicWrite(
+export function atomicWriteRaw(
   targetPath: string,
   content: string,
   vaultRoot?: string,
 ): string {
-  // Step 4 (early): 非空检查
   if (content.length === 0) {
-    throw new Error('atomicWrite: content is empty');
+    throw new Error('atomicWriteRaw: content is empty');
   }
-
-  // Step 3: frontmatter 结构验证
-  validateFrontmatterStructure(content);
 
   // §13.2 符号链接逃逸防护：如果调用方提供了 vaultRoot，写入前再次确认
   if (vaultRoot !== undefined && existsSync(targetPath)) {
@@ -50,25 +46,39 @@ export function atomicWrite(
     `.inkmigrate-${basename(targetPath)}.${randomBytes(6).toString('hex')}.tmp`,
   );
   try {
-    // Step 2: 写入临时文件
     writeFileSync(tmpPath, content, { encoding: 'utf8' });
 
-    // 安全校验：写入 tmp 后、rename 前，校验 tmpPath 的真实路径不逃逸 Vault。
-    // 即使 targetPath 原本不存在，父目录链中的符号链接也能被检测到。
     if (vaultRoot !== undefined) {
       assertSymlinkSafe(vaultRoot, tmpPath);
     }
 
-    // Step 5: 原子 rename
     renameSync(tmpPath, targetPath);
   } catch (e) {
-    // 清理临时文件（如还在）
     if (existsSync(tmpPath)) rmSync(tmpPath, { force: true });
     throw e;
   }
 
-  // 返回写入内容的 hash（避免调用方写后再回读）
   return writtenFileHash(Buffer.from(content, 'utf8'));
+}
+
+/**
+ * §13.10 原子写入流程（笔记专用，校验 frontmatter 结构）。
+ *
+ * 在 atomicWriteRaw 之上叠加 Step 3 的 YAML frontmatter 结构验证（必须有 `---`
+ * 起始与结束），笔记内容必须满足此前置条件。
+ */
+export function atomicWrite(
+  targetPath: string,
+  content: string,
+  vaultRoot?: string,
+): string {
+  // Step 4 (early): 非空检查（先于 frontmatter 校验，空内容报 empty 而非 frontmatter 错）
+  if (content.length === 0) {
+    throw new Error('atomicWrite: content is empty');
+  }
+  // Step 3: frontmatter 结构验证
+  validateFrontmatterStructure(content);
+  return atomicWriteRaw(targetPath, content, vaultRoot);
 }
 
 /**

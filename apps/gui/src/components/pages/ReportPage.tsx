@@ -13,6 +13,9 @@ interface JobInfo {
   verifiedCount: number;
   degradedCount: number;
   failedCount: number;
+  // N8: 与 engine StatusQueryResult 对齐——此前漏了 conflictCount/skippedCount，导致这两类计数永远不展示。
+  conflictCount?: number;
+  skippedCount?: number;
 }
 
 export function ReportPage({ settings, rpcCall }: Props) {

@@ -8,7 +8,17 @@ export interface ItemAttemptInput {
   attemptNo: number;
   startedAt: string;
   candidateQuality?: string;
+  /** §13.9 候选降级清单 JSON。提交本轮尝试的 degradations 以补全审计链。 */
+  candidateDegradationsJson?: string;
   candidateSourceContentHash?: string;
+  /** §13.9 本轮覆盖策略（write_canonical/forced_overwrite/metadata_only 等）。 */
+  overwritePolicy?: string;
+  /** §20 诊断/审计元数据 JSON。 */
+  auditMetadataJson?: string;
+  /** §13.9 触发本轮尝试的 HTTP 状态码（限流/4xx/5xx）。 */
+  httpStatus?: number;
+  /** §20 诊断产物路径。 */
+  diagnosticPath?: string;
   /** §13.9 强制覆盖审计关联的 Artifact */
   targetArtifactId?: number;
   createdAt: string;
@@ -32,6 +42,9 @@ export interface FinishAttemptInput {
   expectedWrittenFileHash?: string;
   observedPrewriteFileHash?: string;
   resultWrittenFileHash?: string;
+  /** §20 完成时补录的 HTTP 状态码与诊断路径。 */
+  httpStatus?: number;
+  diagnosticPath?: string;
 }
 
 export interface AttemptRow {
@@ -73,13 +86,18 @@ export class MigrationAttempts {
   createItem(i: ItemAttemptInput): number {
     const result = this.db
       .prepare(
-        `INSERT INTO migration_attempts(migration_job_id,attempt_scope,source_item_id,target_artifact_id,stage,action_code,attempt_no,candidate_quality,candidate_source_content_hash,started_at,created_at)
-         VALUES(@migrationJobId,'item',@sourceItemId,@targetArtifactId,@stage,@actionCode,@attemptNo,@candidateQuality,@candidateSourceContentHash,@startedAt,@createdAt)`,
+        `INSERT INTO migration_attempts(migration_job_id,attempt_scope,source_item_id,target_artifact_id,stage,action_code,attempt_no,candidate_quality,candidate_degradations_json,candidate_source_content_hash,overwrite_policy,audit_metadata_json,http_status,diagnostic_path,started_at,created_at)
+         VALUES(@migrationJobId,'item',@sourceItemId,@targetArtifactId,@stage,@actionCode,@attemptNo,@candidateQuality,@candidateDegradationsJson,@candidateSourceContentHash,@overwritePolicy,@auditMetadataJson,@httpStatus,@diagnosticPath,@startedAt,@createdAt)`,
       )
       .run({
         targetArtifactId: null,
         candidateQuality: null,
+        candidateDegradationsJson: null,
         candidateSourceContentHash: null,
+        overwritePolicy: null,
+        auditMetadataJson: '{}',
+        httpStatus: null,
+        diagnosticPath: null,
         ...i,
       });
     return Number(result.lastInsertRowid);
@@ -122,7 +140,9 @@ export class MigrationAttempts {
              error_message=@errorMessage,
              expected_written_file_hash=COALESCE(@expectedWrittenFileHash, expected_written_file_hash),
              observed_prewrite_file_hash=COALESCE(@observedPrewriteFileHash, observed_prewrite_file_hash),
-             result_written_file_hash=COALESCE(@resultWrittenFileHash, result_written_file_hash)
+             result_written_file_hash=COALESCE(@resultWrittenFileHash, result_written_file_hash),
+             http_status=COALESCE(@httpStatus, http_status),
+             diagnostic_path=COALESCE(@diagnosticPath, diagnostic_path)
          WHERE id=@id`,
       )
       .run({
@@ -134,6 +154,8 @@ export class MigrationAttempts {
         expectedWrittenFileHash: f.expectedWrittenFileHash ?? null,
         observedPrewriteFileHash: f.observedPrewriteFileHash ?? null,
         resultWrittenFileHash: f.resultWrittenFileHash ?? null,
+        httpStatus: f.httpStatus ?? null,
+        diagnosticPath: f.diagnosticPath ?? null,
       });
   }
 }

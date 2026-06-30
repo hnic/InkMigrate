@@ -11,9 +11,22 @@ export const ObsidianTargetConfigSchema = z
     /** §13.2 Vault 根目录绝对路径。 */
     vaultPath: z.string().min(1),
     /** §13.3 笔记导入根目录（相对 Vault），默认 `Imports/InkMigrate`。 */
-    importSubdir: z.string().default('Imports/InkMigrate'),
+    importSubdir: z
+      .string()
+      // I16: 拒绝 `..` 路径段，防止配置错误/恶意配置生成逃逸风格的相对路径。
+      // resolveWithin 在写入时会兜底拦截，但配置校验阶段就拒绝能让 plan 阶段
+      // 不生成畸形 relativePath，避免 plan 成功、write 才炸的语义割裂。
+      .refine((s) => !s.split('/').some((seg) => seg === '..'), {
+        message: 'importSubdir 不得包含 ".." 路径段',
+      })
+      .default('Imports/InkMigrate'),
     /** §13.7 附件根目录（相对 Vault），默认 `Attachments/InkMigrate`。 */
-    attachmentsSubdir: z.string().default('Attachments/InkMigrate'),
+    attachmentsSubdir: z
+      .string()
+      .refine((s) => !s.split('/').some((seg) => seg === '..'), {
+        message: 'attachmentsSubdir 不得包含 ".." 路径段',
+      })
+      .default('Attachments/InkMigrate'),
     /** §13.7 链接风格，默认 wikilink。 */
     linkStyle: z.enum(['wikilink', 'markdown']).default('wikilink'),
     /** §13.9 覆盖策略，默认 preserve（最安全）。 */

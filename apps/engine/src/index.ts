@@ -15,6 +15,16 @@ import { startStdinLoop, logToStderr } from './transport.js';
 import { getHeapStatistics } from 'node:v8';
 
 function main(): void {
+  // I26: 长驻 sidecar 进程必须有兜底，否则任何 handler 外的异步 reject
+  //（listen 失败、心跳回调异常、动态 import 失败）会让整进程崩溃，粒度过粗。
+  // 这里只记录到 stderr 并继续运行，让宿主通过日志发现问题而非"整进程消失"。
+  process.on('unhandledRejection', (reason) => {
+    logToStderr('error', `未处理的 Promise 拒绝：${String(reason)}`);
+  });
+  process.on('uncaughtException', (err) => {
+    logToStderr('error', `未捕获异常：${err.message}\n${err.stack ?? ''}`);
+  });
+
   // 检查堆大小是否足够（全量迁移数千条需要大量内存）
   const heapStats = getHeapStatistics();
   const limitMB = Math.round(heapStats.heap_size_limit / 1024 / 1024);

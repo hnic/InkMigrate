@@ -33,21 +33,29 @@ export function resolveLazyLoadAndUrls(
 
   // 图片：先解析懒加载
   doc.querySelectorAll('img').forEach((img) => {
-    // srcset 第一个候选
-    const srcset = img.getAttribute('srcset');
-    if (srcset) {
-      const first = srcset.split(',')[0]?.trim().split(/\s+/)[0];
-      if (first) {
-        img.setAttribute('src', first);
-      }
-    }
-    // data-src / data-original
-    for (const attr of ['data-src', 'data-original', 'data-lazy-src']) {
+    // §I-B：data-* 属性优先（高清原图），srcset 仅作兜底。
+    // 此前顺序反了：srcset 先被解析，随后 data-src/data-original/data-lazy-src
+    // 又覆盖了 src，导致低清 data-src 覆盖了高清 srcset。
+    let resolved: string | null = null;
+    for (const attr of ['data-original', 'data-src', 'data-lazy-src']) {
       const v = img.getAttribute(attr);
       if (v) {
-        img.setAttribute('src', v);
+        resolved = v;
         break;
       }
+    }
+    // 仅当无 data-* 时，回退到 srcset 第一个候选
+    if (resolved === null) {
+      const srcset = img.getAttribute('srcset');
+      if (srcset) {
+        const first = srcset.split(',')[0]?.trim().split(/\s+/)[0];
+        if (first) {
+          resolved = first;
+        }
+      }
+    }
+    if (resolved !== null) {
+      img.setAttribute('src', resolved);
     }
     const src = img.getAttribute('src');
     if (src) {

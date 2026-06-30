@@ -47,21 +47,27 @@ const ALLOWED_ATTR = [
 ];
 
 /**
- * §12.9 允许的 URI 规则：默认放行，仅拒绝已知危险 scheme。
+ * §12.9 允许的 URI 规则：正向白名单（而非黑名单）。
  *
- * 危险 scheme：javascript:、vbscript:、data:（不受控）、file:。
- * 其余（http/https/mailto/ftp/tel + 相对 URL + 锚点）都允许通过；
- * 相对 URL 在 stage 6 解析为绝对。
+ * C13: 原实现用负向先行断言（黑名单 `^(?!javascript:|...)`）只拒绝已知危险 scheme，
+ * 与 stage 5"允许列表 HTML Sanitization"的设计意图矛盾——黑名单一旦遗漏新 scheme
+ * （mhtml:/x-schema: 等）即漏。改为正向白名单：
+ * - 显式安全 scheme：http/https/ftp/mailto/tel
+ * - 相对路径/锚点/query：以 `#`、`/`、`./`、`../`、`?` 开头
+ * - 无 scheme 的纯相对路径（如 `img/x.webp`、`foo`）：首段（到第一个 / ? # 之前）不含 `:`
+ *   ——含 `:` 的首段必是 scheme（如 `javascript:`、`data:`），拒绝。
+ * 白名单比 DOMPurify 默认更严，杜绝 scheme 注入面。
  */
-const SAFE_URI = /^(?!javascript:|vbscript:|data:|file:)/i;
+const SAFE_URI =
+  /^(?:(?:https?|ftp|mailto|tel):|[/?#]|[^/?#:]+(?:[/?#]|$))/i;
 
 export function sanitizeHtml(html: string): string {
   return DOMPurify.sanitize(html, {
     ALLOWED_TAGS,
     ALLOWED_ATTR,
     ALLOW_DATA_ATTR: false,
-    FORBID_TAGS: ['form', 'input', 'button', 'select', 'option', 'textarea', 'style'],
-    FORBID_ATTR: ['style', 'class'],
+    // I7: DOMPurify 中 ALLOWED_TAGS 优先级高于 FORBID_TAGS，同时设置时 FORBID 被忽略。
+    // form/input/button/style 本就不在 ALLOWED_TAGS 里，删除冗余 FORBID 配置以免误导。
     ALLOWED_URI_REGEXP: SAFE_URI,
   }) as string;
 }

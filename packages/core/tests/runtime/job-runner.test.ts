@@ -4,6 +4,7 @@ import { openDatabase, type DB } from '../../src/storage/database.js';
 import { SourceInstances } from '../../src/storage/repositories/source-instances.js';
 import { TargetInstances } from '../../src/storage/repositories/target-instances.js';
 import { MigrationJobs } from '../../src/storage/repositories/migration-jobs.js';
+import { SourceItems } from '../../src/storage/repositories/source-items.js';
 import { TargetArtifacts } from '../../src/storage/repositories/target-artifacts.js';
 import {
   computeFingerprint,
@@ -465,5 +466,103 @@ describe('runMigrationJob (§11 端到端)', () => {
         expect(content).toMatch(/source_url:\s*https:\/\/www\.toutiao\.com/);
       }
     }
+  });
+
+  it('scan 幂等兜底：同 external_id 不同 fingerprint 不触发 UNIQUE 约束违反', async () => {
+    // 回归场景：DB 里已有用【旧 fingerprint 算法】写入的 source_item（external_id='7428...'），
+    // 本次 scan 用【新 fingerprint 算法】算出不同 fingerprint。仅按 fingerprint 查重会放过
+    // 这条 ref，随后被 UNIQUE(source_instance_id, external_id) 约束拒绝（UNIQUE constraint
+    // failed: source_items.source_instance_id, source_items.external_id）。
+    // 修复：persistSourceItemRef 在 fingerprint 未命中时，再用 external_id 兜底查重。
+    new SourceInstances(db).create({
+      id: 's1', adapterKind: 'toutiao', adapterVersion: '1.0.0',
+      adapterApiVersion: '1.0.0', configHash: 'h', createdAt: 't', updatedAt: 't',
+    });
+    new TargetInstances(db).create({
+      id: 't1', adapterKind: 'obsidian', adapterVersion: '1.0.0',
+      adapterApiVersion: '1.0.0', configHash: 'h', createdAt: 't', updatedAt: 't',
+    });
+    new MigrationJobs(db).create({
+      id: 'j-dedup', sourceInstanceId: 's1', targetInstanceId: 't1',
+      status: 'created', currentStage: 'preflight', createdAt: 't', updatedAt: 't',
+    });
+
+    // 预置一条【旧算法 fingerprint】的 source_item（模拟历史数据），
+    // external_id 与本次 scan 即将产生的 ref 相同。
+    const oldFingerprint = 'sha256:' + '0'.repeat(64); // 故意不同于新算法
+    new SourceItems(db).create({
+      sourceInstanceId: 's1',
+      externalId: '7428193012345678901',
+      fingerprint: oldFingerprint,
+      stableKey: 'sk-old',
+      itemKey: 'ik-old',
+      stableShortId: 'sid-old',
+      canonicalUrl: 'https://www.toutiao.com/article/7428193012345678901/',
+      contentKind: 'article',
+      discoveredAt: 't',
+      status: 'discovered',
+      createdAt: 't',
+      updatedAt: 't',
+    });
+
+    // 适配器产出【新算法 fingerprint】但相同 external_id 的 ref
+    const newFp = computeFingerprint(
+      deriveFingerprintInput({ contentId: '7428193012345678901' }),
+    );
+    expect(newFp).not.toBe(oldFingerprint); // 确认新旧 fingerprint 不同
+    const adapter: SourceAdapter = {
+      ...createToutiaoSource(),
+      async *scan() {
+        const ref: SourceItemRef = {
+          sourceInstanceId: 's1',
+          externalId: '7428193012345678901',
+          canonicalUrl: 'https://www.toutiao.com/article/7428193012345678901/',
+          title: '历史文章',
+          contentKind: 'article',
+          discoveredAt: new Date().toISOString(),
+          fingerprint: newFp,
+          sourceMetadata: {},
+        };
+        yield ref;
+      },
+      async extract(ref) {
+        const item: SourceItem = {
+          ref,
+          title: '历史文章',
+          tags: [], collections: [], assets: [], links: [],
+          quality: 'full', degradations: [],
+          extractionMethod: 'fixture', extractionWarnings: [], sourceMetadata: {},
+        };
+        return item;
+      },
+    };
+
+    const targetCtx: TargetContext = {
+      config: {},
+      workspaceDir: dbDir,
+      vaultPath: vaultDir,
+      targetConfig: {
+        vaultPath: vaultDir, importSubdir: '', attachmentsSubdir: 'Attachments',
+        linkStyle: 'wikilink', overwritePolicy: 'preserve',
+        collectionMapping: { toTags: false, toFolders: false }, maxFilenameLength: 100,
+      } as Record<string, unknown>,
+    };
+
+    // 修复前：抛 UNIQUE constraint failed: source_items.source_instance_id, source_items.external_id
+    // 修复后：external_id 兜底命中，跳过插入，Job 正常完成
+    const result = await runMigrationJob({
+      db,
+      jobId: 'j-dedup',
+      sourceAdapter: adapter,
+      targetAdapter: createObsidianTarget(),
+      sourceInstanceId: 's1',
+      targetInstanceId: 't1',
+      targetContext: targetCtx,
+      workspaceDir: dbDir,
+      reportsDir: join(dbDir, 'reports'),
+    });
+    expect(result.scanCount).toBe(1);
+    expect(result.status).toBe('completed');
+    expect(result.reconciliationOk).toBe(true);
   });
 });

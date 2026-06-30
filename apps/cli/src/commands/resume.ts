@@ -51,6 +51,10 @@ export function createResumeCommand(): Command {
       try {
         // 读取原 Job 信息
         const oldJob = new MigrationJobs(db).get(opts.job);
+        if (oldJob === undefined) {
+          console.error(`Job ${opts.job} 不存在，无法续跑`);
+          process.exit(1);
+        }
         const sourceInstanceId = oldJob.sourceInstanceId;
         const targetInstanceId = oldJob.targetInstanceId;
 

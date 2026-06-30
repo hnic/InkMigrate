@@ -1,6 +1,7 @@
-import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
+import { mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, relative } from 'node:path';
 import { assertWriteDirSafe, writtenFileHash, resolveWithin, sanitizeFilename } from '@inkmigrate/core';
+import { atomicWriteRaw } from '../atomic-write.js';
 import type { ObsidianTargetConfig } from '../config.js';
 
 export interface IndexEntry {
@@ -58,8 +59,15 @@ export function generateShardIndexes(i: GenerateIndexInput): GenerateIndexResult
   const indexDir = `${i.config.importSubdir}/${i.sourceInstanceId}/_索引`;
   const knownByPath = new Map((i.knownArtifacts ?? []).map((a) => [a.relativePath, a.writtenFileHash]));
 
+  // I18: 分片内条目按 relativePath 稳定排序后再分组，保证字节级幂等。
+  // 否则两次 Job 以不同顺序喂入条目（DB 查询无 ORDER BY、并发收集）会让分片字节
+  // 不同，导致重跑无谓改写所有分片、writtenFileHash 抖动，破坏 §13.8"可重复生成"。
+  const sortedEntries = [...i.entries].sort((a, b) =>
+    a.relativePath.localeCompare(b.relativePath),
+  );
+
   const groups = new Map<string, IndexEntry[]>();
-  for (const entry of i.entries) {
+  for (const entry of sortedEntries) {
     const key = buildShardKey(entry, i.groupBy);
     const arr = groups.get(key) ?? [];
     arr.push(entry);
@@ -205,6 +213,9 @@ function writeShard(
   const parentDir = dirname(abs);
   mkdirSync(parentDir, { recursive: true });
   assertWriteDirSafe(vaultPath, abs);
-  writeFileSync(abs, content, 'utf8');
-  return { hash: writtenFileHash(Buffer.from(content, 'utf8')), skipped: false };
+  // I17: 用 atomicWriteRaw（temp + rename）而非直接 writeFileSync。
+  // 进程被杀时直接写会留下半截损坏文件，且重跑保护会把它当"用户改过 → 跳过覆写"
+  // → 数据损坏被幂等性逻辑固化。atomicWriteRaw 失败只丢 tmp，目标文件要么旧要么新。
+  const hash = atomicWriteRaw(abs, content, vaultPath);
+  return { hash, skipped: false };
 }

@@ -56,6 +56,9 @@ export function postCleanMarkdown(md: string): string {
   for (let i = 0; i < 3; i++) {
     const before = s;
     s = s.replace(NESTED_LINK, (match, text: string, _url: string) => {
+      // §I-A：图片链接 [![alt](img)](link) 不能折叠成 [alt](img)，否则外层链接 URL 丢失。
+      // 含图片语法（![）时原样返回，不折叠。
+      if (text.includes('![')) return match;
       if (/\]\([^)]*\)/.test(text)) {
         const inner = /\[([^\]]*)\]\(([^)]*)\)/.exec(text);
         if (inner) {

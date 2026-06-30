@@ -45,7 +45,9 @@ export function renderBody(i: RenderBodyInput): string {
   const linkStyle = i.linkStyle ?? 'wikilink';
 
   const lines: string[] = [];
-  lines.push(`# ${item.title}`);
+  // N4: 标题去换行，避免多行标题破坏 H1 结构。
+  const safeTitle = item.title.replace(/[\r\n]+/g, ' ').trim() || '(无标题)';
+  lines.push(`# ${safeTitle}`);
   lines.push('');
 
   // 来源信息 callout
@@ -59,7 +61,8 @@ export function renderBody(i: RenderBodyInput): string {
     infoLines.push(`- 收藏时间：${formatDateLine(item.favoritedAt)}`);
   }
   if (item.ref.canonicalUrl !== undefined) {
-    infoLines.push(`- [打开原文](${item.ref.canonicalUrl})`);
+    // N4: URL 用 <...> 包裹，避免含 ) 的 URL 截断 Markdown 链接。
+    infoLines.push(`- [打开原文](<${item.ref.canonicalUrl}>)`);
   }
   lines.push('> [!info] 来源信息');
   for (const l of infoLines) lines.push(`> ${l}`);

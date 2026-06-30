@@ -53,6 +53,7 @@ describe('downloadImage (§12.10)', () => {
     const result = await downloadImage({
       url: `${baseUrl}/ok.png`,
       maxBytes: 1024 * 1024,
+      allowPrivateTargets: true,
     });
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -67,6 +68,7 @@ describe('downloadImage (§12.10)', () => {
     const result = await downloadImage({
       url: `${baseUrl}/zero.png`,
       maxBytes: 1024 * 1024,
+      allowPrivateTargets: true,
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -79,6 +81,7 @@ describe('downloadImage (§12.10)', () => {
     const result = await downloadImage({
       url: `${baseUrl}/html-as-image.png`,
       maxBytes: 1024 * 1024,
+      allowPrivateTargets: true,
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -91,6 +94,7 @@ describe('downloadImage (§12.10)', () => {
     const result = await downloadImage({
       url: `${baseUrl}/too-big.png`,
       maxBytes: 1000,
+      allowPrivateTargets: true,
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -103,10 +107,27 @@ describe('downloadImage (§12.10)', () => {
     const result = await downloadImage({
       url: `${baseUrl}/missing.png`,
       maxBytes: 1024 * 1024,
+      allowPrivateTargets: true,
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.reason).toMatch(/status|404|http/i);
+    }
+  });
+
+  it('C7: blocks SSRF to loopback / private / cloud-metadata targets', async () => {
+    const { downloadImage } = await import('../src/assets/image-downloader.js');
+    // 生产默认（allowPrivateTargets 不传）应拒绝指向内网/元数据的 URL
+    for (const evil of [
+      'http://127.0.0.1:1/x.png', // loopback
+      'http://169.254.169.254/latest/meta-data/iam/x', // AWS metadata
+      'http://10.0.0.1/x.png', // private
+    ]) {
+      const result = await downloadImage({ url: evil, maxBytes: 1024 });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toMatch(/ssrf|private|loopback|metadata/i);
+      }
     }
   });
 });

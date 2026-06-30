@@ -132,16 +132,45 @@ export async function runMigrationJob(
     jobId: i.jobId,
   });
 
+  // C4 崩溃自愈：若本次是新获取锁（上轮进程崩溃/OOM/SIGKILL，finally 未执行），
+  // 而 DB 里该 Job 仍是 running，说明是孤儿 Job。先把它自愈为 interrupted，
+  // 否则 canResumeFrom('running')=false 会永久卡死，用户无法续跑。
+  // 锁文件有 isStaleLock 恢复，这里补上 Job 状态的等价恢复，让两者一致。
+  const priorJob = jobs.get(i.jobId);
+  if (priorJob !== undefined && priorJob.status === 'running') {
+    log('warn', `检测到孤儿 Job（上轮崩溃未清理，status=running），自愈为 interrupted`);
+    jobs.updateStatus(i.jobId, {
+      status: 'interrupted',
+      currentStage: priorJob.currentStage,
+      updatedAt: now(),
+    });
+  }
+
   // §18.3 信号处理
   let interrupted = false;
+  // C5: AbortController 让取消信号穿透到 withRetry 的退避等待，避免在长退避
+  //（最长 30s）期间无法响应中断。onFirstInterrupt / isCancelled 都触发 abort。
+  const abortController = new AbortController();
   const uninstallSignals = installSignalHandlers({
     onFirstInterrupt: async () => {
       interrupted = true;
+      abortController.abort();
     },
     onSecondInterrupt: () => {
-      // 第二次中断：立即退出。finally 不会执行，故此处同步释放锁，
-      // 否则锁文件心跳时间戳可能仍很新（默认 1s 刷新），下次启动 isStaleLock
-      //（60s 阈值）会判定非陈旧而抛 LockConflictError，锁被永久卡住。
+      // 第二次中断：立即退出。finally 不会执行，故此处同步：
+      // 1) 把 Job 落库为 interrupted（better-sqlite3 同步，exit 前完成），
+      //    否则 status 停留 running，canResumeFrom('running')=false，永久无法续跑；
+      // 2) 释放锁，否则锁文件心跳时间戳可能仍很新（默认 1s 刷新），下次启动
+      //    isStaleLock（60s 阈值）会判定非陈旧而抛 LockConflictError，锁被卡住。
+      try {
+        jobs.updateStatus(i.jobId, {
+          status: 'interrupted',
+          currentStage: 'extracting',
+          updatedAt: new Date().toISOString(),
+        });
+      } catch {
+        // 硬退路径：吞掉 DB 写入错误，避免影响退出。
+      }
       lock.release();
       process.exit(130);
     },
@@ -241,6 +270,11 @@ export async function runMigrationJob(
       const ref = refs[idx]!;
       // §18.3 检查中断标志——完成当前条目后停止
       // SIGINT（CLI Ctrl+C）或 cancel.cancel RPC（GUI 终止按钮）都会触发
+      // C5: isCancelled 触发时同步 abort abortController，让正在进行的 withRetry
+      // 退避等待立即中断，而非等满最长 30s 退避。
+      if (i.isCancelled?.() && !abortController.signal.aborted) {
+        abortController.abort();
+      }
       if (interrupted || i.isCancelled?.()) break;
 
       jobs.updateStatus(i.jobId, {
@@ -262,6 +296,7 @@ export async function runMigrationJob(
         targetInstanceId: i.targetInstanceId,
         workspaceDir: i.workspaceDir,
         retryPolicy: DEFAULT_RETRY_POLICY,
+        signal: abortController.signal,
         ...(i.onLog !== undefined ? { onLog: i.onLog } : {}),
       }).catch((e): ItemFinalState => {
         // §18.2 限流检测：processOneItem 抛出 __rateLimited 时 Job 进入 paused
@@ -269,6 +304,11 @@ export async function runMigrationJob(
         if (rlErr.__rateLimited === true) {
           log('warn', `限流检测 (${rlErr.httpStatus})，Job 进入 paused`);
           throw e; // 向上传播到 runMigrationJob 的 try 块
+        }
+        // C5: 取消导致的 'aborted' 错误归为 skipped（可恢复续跑），不污染为 permanent_failed
+        if (e instanceof Error && e.message === 'aborted') {
+          log('warn', `条目因取消信号中断，归为可恢复态（续跑可重试）`);
+          return 'skipped';
         }
         // 契约上 processOneItem 内部 catch 已返回 ItemFinalState，不应走到这里。
         // 若到达此分支，说明 processOneItem 的错误契约被违反（开始抛出未被内部
@@ -336,10 +376,21 @@ export async function runMigrationJob(
       for (let idx = processed; idx < refs.length; idx++) {
         itemStates.push('interrupted');
       }
+      // I11: 限流 return 前刷新 DB 缓存计数列，使 GUI 显示与 itemStates 派生值一致，
+      // 否则缓存列停留在限流前的中间值，恢复后对账可能误报。
+      const rateLimitedCounts = deriveFinalStateCounts(itemStates);
+      jobs.updateCounts(i.jobId, {
+        verifiedCount: rateLimitedCounts.verified,
+        degradedCount: rateLimitedCounts.degraded,
+        failedCount:
+          rateLimitedCounts.permanent_failed + rateLimitedCounts.unsupported + rateLimitedCounts.blocked,
+        conflictCount: rateLimitedCounts.conflict,
+        skippedCount: rateLimitedCounts.skipped,
+      });
       return {
         status: 'paused',
         scanCount: refs.length,
-        finalStateCounts: deriveFinalStateCounts(itemStates) as unknown as Record<string, number>,
+        finalStateCounts: rateLimitedCounts as unknown as Record<string, number>,
         reconciliationOk: false,
         reconciliationReason: 'rate_limited',
       };
@@ -450,6 +501,9 @@ export async function runMigrationJob(
     });
 
     const jobRow = jobs.get(i.jobId);
+    if (jobRow === undefined) {
+      throw new Error(`Job ${i.jobId} 不存在（可能在运行期间被删除）`);
+    }
     // §11.9 recoverableCount 从 itemStates 统计（retryable_failed / interrupted 可恢复）
     const recoverableCount = (itemStates as string[]).filter(
       (s) => s === 'retryable_failed' || s === 'interrupted',
@@ -529,6 +583,14 @@ function persistSourceItemRef(
 ): void {
   const existing = repo.findByFingerprint(sourceInstanceId, ref.fingerprint);
   if (existing !== undefined) return;
+  // 幂等兜底：DB 有 UNIQUE(source_instance_id, external_id) 约束，但 fingerprint
+  // 算法变更或同文章不同 URL（相同数字 ID）会让两条 ref 的 fingerprint 不同——
+  // 仅按 fingerprint 查重会放过第二条，随后被 external_id 唯一约束拒绝
+  //（UNIQUE constraint failed）。命中 external_id 即视为已扫描，跳过插入。
+  if (ref.externalId !== undefined) {
+    const byExt = repo.findByExternalId(sourceInstanceId, ref.externalId);
+    if (byExt !== undefined) return;
+  }
   const stableKey = computeStableKey(sourceInstanceId, ref.fingerprint);
   const input: Parameters<SourceItems['create']>[0] = {
     sourceInstanceId,
@@ -564,6 +626,8 @@ interface ProcessOneItemInput {
   targetInstanceId: string;
   workspaceDir: string;
   retryPolicy: import('./retry.js').RetryPolicy;
+  /** C5: 取消信号，穿透到 withRetry 退避等待，让中断在长退避期间也能生效。 */
+  signal?: AbortSignal;
   /** 日志回调（可选），把条目级诊断（失败/降级/冲突）转发到调用方。 */
   onLog?: (level: 'info' | 'warn' | 'error', message: string) => void;
 }
@@ -597,6 +661,7 @@ async function processOneItem(
           workspaceDir: i.workspaceDir,
         }),
       i.retryPolicy,
+      i.signal,
     );
 
     // §17.5 质量升级检测

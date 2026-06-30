@@ -62,6 +62,9 @@ export interface NotePathInput {
  *
  * body 过 `sanitizeFilename` 并截断，截断上限预先扣除 `-shortId` 的长度，
  * 使最终文件名总长 ≤ `maxFilenameLength`。shortId 同样 sanitize 以保证一致性与字符安全。
+ *
+ * I15: sourceInstanceId 来自来源适配器配置（半可信），原样拼入路径会创建意外子目录
+ * （含 `/`）或注入控制字符到文件名。统一 sanitize 为单段路径（替换路径分隔符）。
  */
 export function noteRelativePath(i: NotePathInput): string {
   const suffix = `-${sanitizeFilename(i.stableShortId, { maxLength: 32 })}`;
@@ -74,9 +77,18 @@ export function noteRelativePath(i: NotePathInput): string {
     return filename;
   }
   const dir = CONTENT_KIND_DIR[i.contentKind];
-  return [i.config.importSubdir, i.sourceInstanceId, dir, filename]
+  const safeSourceId = sanitizePathSegment(i.sourceInstanceId);
+  return [i.config.importSubdir, safeSourceId, dir, filename]
     .filter(Boolean)
     .join('/');
+}
+
+/**
+ * I15: 把来源实例 ID 规范化为单一安全路径段——替换正反斜杠为 `-`（防止创建意外
+ * 子目录层级或 `..` 逃逸），其余字符安全性由下游 resolveWithin 在写入时兜底。
+ */
+function sanitizePathSegment(seg: string): string {
+  return seg.replace(/[\\/]/g, '-');
 }
 
 /** §13.2 把 Vault 内相对路径解析为绝对路径，并在解析时拒绝逃逸。 */
@@ -97,7 +109,8 @@ export interface AssetPathInput {
 /** §13.7 附件相对路径：`<attachmentsSubdir>/<sourceInstanceId>/<itemKey>/<filename>` */
 export function assetRelativePath(i: AssetPathInput): string {
   const safeName = sanitizeFilename(i.filename, { maxLength: 200 });
-  return [i.config.attachmentsSubdir, i.sourceInstanceId, i.itemKey, safeName]
+  const safeSourceId = sanitizePathSegment(i.sourceInstanceId);
+  return [i.config.attachmentsSubdir, safeSourceId, i.itemKey, safeName]
     .filter(Boolean)
     .join('/');
 }

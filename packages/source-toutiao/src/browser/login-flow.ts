@@ -56,84 +56,92 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginFlowRes
 
   // 如果有收藏页 URL 就用它；否则用首页
   const targetUrl = opts.favoritesUrl ?? TOUTIAO_HOME;
-  // 用 domcontentloaded 而非 networkidle——首页广告/追踪请求会让 networkidle 很慢
-  await page.goto(targetUrl, {
-    waitUntil: 'domcontentloaded',
-    timeout: 45_000,
-  });
+  // §I-E：把获取页面之后的逻辑整体包进 try/finally。
+  // collectLoginSignals 内部会 page.context().cookies()，可能抛错；若不包 finally，
+  // 抛错时 `if (ownsPage) await page.close()` 会被跳过 → 页面泄漏。
+  try {
+    // 用 domcontentloaded 而非 networkidle——首页广告/追踪请求会让 networkidle 很慢
+    await page.goto(targetUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: 45_000,
+    });
 
-  // auth.login 的目的是让用户手动登录，不做首轮自动检测。
-  // 等待用户在浏览器中完成登录，轮询检测登录态。
-  let signals: Partial<LoginSignals> = {};
-  let state: LoginState = 'auth-state-unknown';
+    // auth.login 的目的是让用户手动登录，不做首轮自动检测。
+    // 等待用户在浏览器中完成登录，轮询检测登录态。
+    let signals: Partial<LoginSignals> = {};
+    let state: LoginState = 'auth-state-unknown';
 
-  // 等待用户手动登录
-  const timeoutMs = opts.loginTimeoutMs ?? 300_000;
-  const pollMs = opts.pollIntervalMs ?? 2000;
-  const deadline = Date.now() + timeoutMs;
+    // 等待用户手动登录
+    const timeoutMs = opts.loginTimeoutMs ?? 300_000;
+    const pollMs = opts.pollIntervalMs ?? 2000;
+    const deadline = Date.now() + timeoutMs;
 
-  // 首轮检测前等待页面渲染（不等完整 networkidle，只等 DOM 元素出现）
-  // 等登录按钮（未登录）或用户头像（已登录）之一出现——两者都标志 header 已渲染
-  await page.waitForSelector('.login-button, .ttp-header-profile .user-icon', {
-    timeout: 10_000,
-  }).catch(() => {});
+    // 首轮检测前等待页面渲染（不等完整 networkidle，只等 DOM 元素出现）
+    // 等登录按钮（未登录）或用户头像（已登录）之一出现——两者都标志 header 已渲染
+    await page.waitForSelector('.login-button, .ttp-header-profile .user-icon', {
+      timeout: 10_000,
+    }).catch(() => {});
 
-  // 合并头像+用户名检测为单次 evaluate，减少往返
-  let isFirstRound = true;
-  // 记录首轮是否见到登录按钮——用于判断"按钮消失"是登录成功还是页面根本没渲染
-  let firstRoundHadLoginButton: boolean | null = null;
-  while (Date.now() < deadline) {
-    const loginCheck = await page.evaluate(() => {
-      // 未登录时 header 是 <a class="login-button">；登录后头像在 .user-icon > a > img
-      const hasLoginButton = document.querySelector('.login-button') !== null;
-      const profile = document.querySelector(
-        '.ttp-header-profile img, .header-profile-wrapper img, .user-icon img',
-      );
-      const hasAvatar = profile !== null;
-      // 头条改版后用户名不在 .name 元素里，而在头像链接的 aria-label 属性
-      const userIcon = document.querySelector(
-        '.ttp-header-profile .user-icon, .header-profile-wrapper .user-icon',
-      );
-      const nameFromLabel = userIcon?.querySelector('a')?.getAttribute('aria-label')?.trim();
-      const hasName = (nameFromLabel?.length ?? 0) > 0;
-      // header 区是否已渲染（避免对空白页误判）
-      const headerRendered =
-        document.querySelector('.ttp-header-profile, .ttp-site-header, header') !== null;
-      return { hasAvatar, hasName, hasLoginButton, headerRendered };
-    }).catch(() => ({ hasAvatar: false, hasName: false, hasLoginButton: true, headerRendered: false }));
+    // 合并头像+用户名检测为单次 evaluate，减少往返
+    let isFirstRound = true;
+    // 记录首轮是否见到登录按钮——用于判断"按钮消失"是登录成功还是页面根本没渲染
+    let firstRoundHadLoginButton: boolean | null = null;
+    while (Date.now() < deadline) {
+      const loginCheck = await page.evaluate(() => {
+        // 未登录时 header 是 <a class="login-button">；登录后头像在 .user-icon > a > img
+        const hasLoginButton = document.querySelector('.login-button') !== null;
+        const profile = document.querySelector(
+          '.ttp-header-profile img, .header-profile-wrapper img, .user-icon img',
+        );
+        const hasAvatar = profile !== null;
+        // 头条改版后用户名不在 .name 元素里，而在头像链接的 aria-label 属性
+        const userIcon = document.querySelector(
+          '.ttp-header-profile .user-icon, .header-profile-wrapper .user-icon',
+        );
+        const nameFromLabel = userIcon?.querySelector('a')?.getAttribute('aria-label')?.trim();
+        const hasName = (nameFromLabel?.length ?? 0) > 0;
+        // header 区是否已渲染（避免对空白页误判）
+        const headerRendered =
+          document.querySelector('.ttp-header-profile, .ttp-site-header, header') !== null;
+        return { hasAvatar, hasName, hasLoginButton, headerRendered };
+      }).catch(() => ({ hasAvatar: false, hasName: false, hasLoginButton: true, headerRendered: false }));
 
-    if (firstRoundHadLoginButton === null && loginCheck.headerRendered) {
-      firstRoundHadLoginButton = loginCheck.hasLoginButton;
+      if (firstRoundHadLoginButton === null && loginCheck.headerRendered) {
+        firstRoundHadLoginButton = loginCheck.hasLoginButton;
+      }
+
+      // 登录判定（两个独立条件，任一满足）：
+      //   A. 正向：头像 + 用户名都存在（aria-label 命中）
+      //   B. 负向：首轮见过登录按钮、之后消失（真·登录态翻转）
+      // 注意 B 必须确认首轮有按钮，否则空白页/未渲染页会被误判登录
+      const positive = loginCheck.hasAvatar && loginCheck.hasName;
+      const loginButtonGone =
+        firstRoundHadLoginButton === true && !loginCheck.hasLoginButton;
+      if (positive || loginButtonGone) {
+        signals = await collectLoginSignals(page, targetUrl);
+        state = 'logged-in';
+        // 登录成功后从页面提取收藏页 URL
+        const favUrl = await extractFavoritesUrl(page);
+        return { state, signals, ...(favUrl !== undefined ? { favoritesUrl: favUrl } : {}) };
+      }
+
+      // 首轮不等 pollMs（已登录时 waitForSelector 后立即检测），后续轮询等待
+      if (!isFirstRound) {
+        await new Promise((resolve) => setTimeout(resolve, pollMs));
+      }
+      isFirstRound = false;
     }
 
-    // 登录判定（两个独立条件，任一满足）：
-    //   A. 正向：头像 + 用户名都存在（aria-label 命中）
-    //   B. 负向：首轮见过登录按钮、之后消失（真·登录态翻转）
-    // 注意 B 必须确认首轮有按钮，否则空白页/未渲染页会被误判登录
-    const positive = loginCheck.hasAvatar && loginCheck.hasName;
-    const loginButtonGone =
-      firstRoundHadLoginButton === true && !loginCheck.hasLoginButton;
-    if (positive || loginButtonGone) {
-      signals = await collectLoginSignals(page, targetUrl);
-      state = 'logged-in';
-      // 登录成功后从页面提取收藏页 URL
-      const favUrl = await extractFavoritesUrl(page);
-      if (ownsPage) await page.close();
-      return { state, signals, ...(favUrl !== undefined ? { favoritesUrl: favUrl } : {}) };
+    // 超时：返回最终状态
+    const timeoutSignals = await collectLoginSignals(page, targetUrl);
+    const timeoutState = detectLoginState(timeoutSignals);
+    return { state: timeoutState, signals: timeoutSignals };
+  } finally {
+    // 无论正常返回还是 collectLoginSignals 抛错，都确保关闭自有的页面，避免泄漏。
+    if (ownsPage) {
+      await page.close();
     }
-
-    // 首轮不等 pollMs（已登录时 waitForSelector 后立即检测），后续轮询等待
-    if (!isFirstRound) {
-      await new Promise((resolve) => setTimeout(resolve, pollMs));
-    }
-    isFirstRound = false;
   }
-
-  // 超时：返回最终状态
-  signals = await collectLoginSignals(page, targetUrl);
-  state = detectLoginState(signals);
-  if (ownsPage) await page.close();
-  return { state, signals };
 }
 
 /**

@@ -120,6 +120,25 @@ function requireVaultPath(value: unknown): asserts value is string {
 }
 
 /**
+ * I25: 校验正整数毫秒值（如 intervalMs）。GUI 输入框键入非数字时 parseInt 得 NaN，
+ * setTimeout(NaN) 等同 0 → 以最快速率轰炸头条接口 → 触发风控/封号。
+ * 信任边界必须校验：非有限数或 ≤0 直接拒绝。
+ */
+function requirePositiveMs(value: unknown, field: string): asserts value is number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    throw new Error(`${field} 必须是正数（毫秒），收到：${String(value)}`);
+  }
+}
+
+/** I25: 校验正整数（如 maxItems），undefined 时跳过（可选参数）。 */
+function requirePositiveIntIfDefined(value: unknown, field: string): asserts value is number | undefined {
+  if (value === undefined) return;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || !Number.isInteger(value)) {
+    throw new Error(`${field} 必须是正整数，收到：${String(value)}`);
+  }
+}
+
+/**
  * 计算适配器配置的稳定哈希，用于 source/target_instances.config_hash 审计列。
  * 配置变更（vaultPath、importSubdir 等）会改变哈希，使系统能识别"配置已变"
  * 而非误用旧 Job 的路径假设。复用 core 的 sha256 算法。
@@ -142,7 +161,7 @@ import {
   sendNotification,
   logToStderr,
 } from './transport.js';
-import { requestCancel, isCancelledFlag, resetCancel } from './cancellation.js';
+import { requestCancel, isCancelledFlag, beginTask, endTask } from './cancellation.js';
 import type {
   AuthLoginParams,
   AuthLoginResult,
@@ -272,9 +291,10 @@ async function handleScanStart(params: ScanStartParams | undefined): Promise<Sca
   if (typeof params.favoritesUrl !== 'string' || params.favoritesUrl.length === 0) {
     throw new Error('favoritesUrl 不能为空');
   }
-  resetCancel(); // 新任务前清除旧的取消状态
+  beginTask('scan'); // C10: 占用活跃任务槽位（拒绝并发长任务，避免 resetCancel 互踩取消请求）
   const profileDir = profilePath(params.stateDir, params.source);
   if (!profileExists(params.stateDir, params.source)) {
+    endTask();
     throw new Error(`Profile 不存在：${profileDir}，请先 auth.login`);
   }
 
@@ -339,6 +359,7 @@ async function handleScanStart(params: ScanStartParams | undefined): Promise<Sca
     };
   } finally {
     await session.close();
+    endTask(); // C10: 释放活跃任务槽位
   }
 }
 
@@ -447,7 +468,6 @@ async function runMigrateJob(
     requireId((params as MigrateStartParams).target, 'target');
   }
 
-  resetCancel(); // 新任务前清除旧的取消状态
   // 动态导入避免顶层依赖循环
   const { runMigrationJob } = await import('@inkmigrate/core');
 
@@ -458,6 +478,7 @@ async function runMigrateJob(
   // 易引入悬挂连接；当前访问模式下重开的代价可忽略，故优先正确性与简单性。
   const db: DB = openDatabase({ path: join(params.stateDir, 'inkmigrate.sqlite') });
 
+  beginTask('migrate'); // C10: 占用活跃任务槽位（拒绝并发长任务）
   try {
     let sourceInstanceId: string;
     let targetInstanceId: string;
@@ -474,6 +495,9 @@ async function runMigrateJob(
       const startParams = params as MigrateStartParams;
       sourceInstanceId = startParams.source;
       targetInstanceId = startParams.target;
+      // I25: 信任边界校验速率/上限数值，防 NaN/0 触发风控封号
+      if (startParams.intervalMs !== undefined) requirePositiveMs(startParams.intervalMs, 'intervalMs');
+      requirePositiveIntIfDefined(startParams.maxItems, 'maxItems');
     }
 
     // 构造 source adapter（profileDir 在 ensureInstance 之前计算，用于 config_hash）
@@ -590,6 +614,7 @@ async function runMigrateJob(
     };
   } finally {
     db.close();
+    endTask(); // C10: 释放活跃任务槽位
   }
 }
 
@@ -601,8 +626,11 @@ async function handleCleanupUnfavorite(
   if (params === undefined) throw new Error('missing params');
   requireStateDir(params.stateDir);
   requireId(params.source, 'source');
-  resetCancel(); // 新任务前清除旧的取消状态
+  // I25: 信任边界校验速率/上限数值
+  if (params.intervalMs !== undefined) requirePositiveMs(params.intervalMs, 'intervalMs');
+  requirePositiveIntIfDefined(params.maxItems, 'maxItems');
   const db: DB = openDatabase({ path: join(params.stateDir, 'inkmigrate.sqlite') });
+  beginTask('cleanup'); // C10: 占用活跃任务槽位（拒绝并发长任务）
   try {
     const profileDir = profilePath(params.stateDir, params.source);
     if (!profileExists(params.stateDir, params.source)) {
@@ -653,6 +681,7 @@ async function handleCleanupUnfavorite(
     }
   } finally {
     db.close();
+    endTask(); // C10: 释放活跃任务槽位
   }
 }
 
@@ -697,6 +726,9 @@ async function handleStatusQuery(
   const db: DB = openDatabase({ path: join(params.stateDir, 'inkmigrate.sqlite') });
   try {
     const job = new MigrationJobs(db).get(params.job);
+    if (job === undefined) {
+      throw new Error(`Job 不存在：${params.job}`);
+    }
     return {
       status: job.status,
       currentStage: job.currentStage,

@@ -21,6 +21,14 @@ describe('escapeCsvField (RFC 4180)', () => {
   it('quotes fields with newline', () => {
     expect(escapeCsvField('line1\nline2')).toBe('"line1\nline2"');
   });
+  it('prefixes formula-injection cells with single quote (CWE-1236)', () => {
+    // I21: = + - @ Tab CR 开头的单元格会被表格软件当公式执行
+    expect(escapeCsvField('=cmd|\'/c calc\'!A1')).toBe("'=cmd|'/c calc'!A1");
+    expect(escapeCsvField('+1+1')).toBe("'+1+1");
+    expect(escapeCsvField('@SUM(A1)')).toBe("'@SUM(A1)");
+    // 公式注入字符 + 含逗号：先加单引号前缀，再加引号后字段含逗号 → RFC4180 引号转义
+    expect(escapeCsvField('=HYPERLINK("a","b,c")')).toBe("\"'=HYPERLINK(\"\"a\"\",\"\"b,c\"\")\"");
+  });
 });
 
 describe('writeCsv', () => {

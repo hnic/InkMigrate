@@ -13,6 +13,10 @@ export function createStatusCommand(): Command {
         const db = openDatabase({ path: dbPath });
         const job = new MigrationJobs(db).get(opts.job);
         db.close();
+        if (job === undefined) {
+          console.error(`Job ${opts.job} 不存在`);
+          process.exit(1);
+        }
         console.log(`Job ${opts.job}:`);
         console.log(`  status: ${job.status}`);
         console.log(`  current_stage: ${job.currentStage}`);

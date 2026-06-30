@@ -113,22 +113,39 @@ export function acquireLock(opts: AcquireOptions): HeldLock {
 
   acquireAtomically();
   const interval = opts.heartbeatMs ?? 1000;
-  const beat = setInterval(() => {
+  // I9: 心跳连续写失败计数。磁盘满/权限问题致心跳持续写失败时，锁会被误判陈旧并被
+  // 另一进程接管，而本进程仍以为持锁 → 两进程并发写同一 (source,target)，破坏唯一约束。
+  // 连续失败达阈值时主动抛出（让 Job fail），而非静默继续。
+  let heartbeatFailures = 0;
+  const HEARTBEAT_FAILURE_THRESHOLD = 3;
+  let released = false;
+  const beat = (): void => {
+    // I10: release() 后排队中的 beat 可能重建已释放锁文件，首行检查 released。
+    if (released) return;
     content.heartbeatAt = new Date().toISOString();
     try {
       writeFileSync(path, JSON.stringify(content, null, 2));
+      heartbeatFailures = 0;
     } catch {
-      // 心跳写入失败（磁盘满、被外部删除等）：忽略；下次 acquire 会识别陈旧。
+      heartbeatFailures++;
+      if (heartbeatFailures >= HEARTBEAT_FAILURE_THRESHOLD) {
+        // 心跳持续写失败：主动释放并抛错，避免被误判陈旧后双进程并发。
+        released = true;
+        throw new Error(
+          `锁心跳连续 ${heartbeatFailures} 次写入失败（${path}），可能磁盘满或权限问题；` +
+            `为避免双进程并发写入，主动放弃锁。`,
+        );
+      }
     }
-  }, interval);
+  };
+  const timer = setInterval(beat, interval);
 
-  let released = false;
   return {
     path,
     release: () => {
       if (released) return;
       released = true;
-      clearInterval(beat);
+      clearInterval(timer);
       // 竞态防护：只删除自己持有的锁。如果锁已被其他进程接管（jobId 不同），不删除。
       if (existsSync(path)) {
         try {

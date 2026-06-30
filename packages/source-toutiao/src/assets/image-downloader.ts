@@ -1,3 +1,5 @@
+import { lookup } from 'node:dns/promises';
+
 export interface DownloadInput {
   url: string;
   /** §12.10 单张大小上限；写入前和流式下载过程中都检查。 */
@@ -6,6 +8,13 @@ export interface DownloadInput {
   maxRetries?: number;
   /** 可选 Referer（§12.10 使用当前浏览器会话和正常 Referer）。 */
   referer?: string;
+  /** C7: 总下载超时毫秒（含连接 + 流式读取），默认 30000。防止慢/挂图片服务器永久阻塞。 */
+  timeoutMs?: number;
+  /**
+   * C7: 是否允许回环/私网目标。生产环境恒为 false（防 SSRF）；
+   * 仅测试用例连接本地 mock 服务器时显式传 true。生产调用方不得设置。
+   */
+  allowPrivateTargets?: boolean;
 }
 
 export type DownloadResult =
@@ -76,10 +85,101 @@ export async function downloadImage(i: DownloadInput): Promise<DownloadResult> {
   return lastError;
 }
 
+/**
+ * C7: SSRF 防护。文章正文里的图片 URL 由来源内容控制（半可信甚至不可信），
+ * 直接 fetch 会暴露内网：`http://169.254.169.254/latest/meta-data/...`（云元数据）、
+ * `http://127.0.0.1:port/...`、`http://10.x/192.168.x/...`（内网扫描）。
+ * Magic Bytes 校验限制了数据回显，但请求本身仍被发出（盲打时序/端口扫描/触发内部 endpoint）。
+ *
+ * 这里在 fetch 前校验：协议仅 https/http；DNS 解析后拒绝私网/回环/链路本地/云元数据地址。
+ * 注意：DNS 解析与实际连接之间存在 rebinding 窗口，但对 local-first 工具威胁较低；
+ * 拒绝解析到内网 IP 已能挡住绝大多数静态 SSRF payload。
+ */
+async function assertSafeImageUrl(urlStr: string): Promise<void> {
+  let parsed: URL;
+  try {
+    parsed = new URL(urlStr);
+  } catch {
+    throw new Error(`invalid image url: ${urlStr}`);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`image url scheme not allowed: ${parsed.protocol}`);
+  }
+  const host = parsed.hostname;
+  // 云元数据主机名（AWS/GCP/Azure）直接拒绝
+  const META_HOSTS = new Set([
+    '169.254.169.254', // AWS/GCP
+    'metadata.google.internal', // GCP
+    'metadata.azure.com', // Azure
+    '100.100.100.200', // 阿里云
+  ]);
+  if (META_HOSTS.has(host)) {
+    throw new Error(`image url points to cloud metadata endpoint: ${host}`);
+  }
+  // DNS 解析后逐个校验 IP（hostname 可能解析到多个 A 记录）
+  let addrs: { address: string }[];
+  try {
+    const result = await lookup(host, { all: true });
+    addrs = result;
+  } catch {
+    throw new Error(`image url host unresolvable: ${host}`);
+  }
+  for (const a of addrs) {
+    if (isPrivateOrLoopback(a.address)) {
+      throw new Error(
+        `image url resolves to private/loopback address ${a.address} (SSRF blocked)`,
+      );
+    }
+  }
+}
+
+/** 判断 IP 是否为私网/回环/链路本地/保留地址。 */
+function isPrivateOrLoopback(ip: string): boolean {
+  // IPv4
+  const v4 = ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    if (a === 10) return true; // 10.0.0.0/8
+    if (a === 127) return true; // 127.0.0.0/8 loopback
+    if (a === 0) return true; // 0.0.0.0/8
+    if (a === 169 && b === 254) return true; // 169.254.0.0/16 link-local
+    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+    if (a === 192 && b === 168) return true; // 192.168.0.0/16
+    if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10 CGNAT
+    return false;
+  }
+  // IPv6
+  const lower = ip.toLowerCase();
+  if (lower === '::1' || lower === '::') return true; // loopback / unspecified
+  if (lower.startsWith('fc') || lower.startsWith('fd')) return true; // unique local fc00::/7
+  if (lower.startsWith('fe80')) return true; // link-local
+  if (lower.startsWith('::ffff:')) {
+    // IPv4-mapped IPv6，复用 IPv4 判定
+    const v4part = lower.slice('::ffff:'.length);
+    return isPrivateOrLoopback(v4part);
+  }
+  return false;
+}
+
 async function tryDownloadOnce(i: DownloadInput): Promise<DownloadResult> {
+  // C7: SSRF 防护——fetch 前校验 URL 不指向内网/元数据（生产环境强制）。
+  // allowPrivateTargets 仅测试用例连接本地 mock 服务器时使用，生产调用方不得设置。
+  if (!i.allowPrivateTargets) {
+    try {
+      await assertSafeImageUrl(i.url);
+    } catch (e) {
+      return { ok: false, reason: `ssrf blocked: ${(e as Error).message}` };
+    }
+  }
+
   let response: Response;
   try {
-    const fetchOpts: RequestInit = { redirect: 'follow' };
+    // I3: 总超时（连接 + 读取），防止慢/挂图片服务器永久阻塞 extract。
+    const timeoutMs = i.timeoutMs ?? 30000;
+    const fetchOpts: RequestInit = {
+      redirect: 'follow',
+      signal: AbortSignal.timeout(timeoutMs),
+    };
     if (i.referer !== undefined) {
       fetchOpts.headers = { referer: i.referer };
     }

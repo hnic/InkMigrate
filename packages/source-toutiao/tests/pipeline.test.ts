@@ -49,8 +49,10 @@ describe('runSafetyPipeline (§12.9 fixed 9-stage)', () => {
       { baseUrl: 'https://www.toutiao.com/article/1/' },
     );
     expect(out.lazyLoadImages.length).toBeGreaterThan(0);
+    // I-B: data-original 优先级最高（高清原图），高于 data-src。
+    // 此前 srcset 先解析、data-* 后覆盖会颠倒优先级；现 data-original 胜出。
     expect(out.lazyLoadImages).toContain(
-      'https://www.toutiao.com/article/1/lazy.webp',
+      'https://www.toutiao.com/article/1/orig.jpg',
     );
   });
 

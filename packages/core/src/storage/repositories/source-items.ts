@@ -101,6 +101,35 @@ export class SourceItems {
   }
 
   /**
+   * 按 external_id 查询（走 uq_source_items_ext 部分唯一索引）。
+   *
+   * 用于 persistSourceItemRef 的幂等兜底：DB 有 UNIQUE(source_instance_id, external_id)
+   * 约束，但 fingerprint 算法变更或同文章不同 URL（相同数字 ID 不同 canonicalUrl）时，
+   * 两条 ref 的 fingerprint 可能不同——仅按 fingerprint 查重会放过第二条，随后被
+   * external_id 唯一约束拒绝（UNIQUE constraint failed）。命中 external_id 即视为
+   * 已扫描，跳过插入，保持幂等。
+   */
+  findByExternalId(
+    sourceInstanceId: string,
+    externalId: string,
+  ): SourceItemRow | undefined {
+    return this.db
+      .prepare(
+        `SELECT id, source_instance_id AS sourceInstanceId, external_id AS externalId,
+                fingerprint, stable_key AS stableKey, item_key AS itemKey,
+                stable_short_id AS stableShortId, canonical_url AS canonicalUrl,
+                original_url AS originalUrl, title, content_kind AS contentKind,
+                source_position AS sourcePosition, discovered_at AS discoveredAt,
+                status, quality, degradations_json AS degradationsJson,
+                source_content_hash AS sourceContentHash,
+                source_metadata_json AS sourceMetadataJson
+         FROM source_items
+         WHERE source_instance_id=? AND external_id=?`,
+      )
+      .get(sourceInstanceId, externalId) as SourceItemRow | undefined;
+  }
+
+  /**
    * §11.5 / §16.4 在目标写入和验证成功后，把候选 quality/degradations/hash
    * 提交为本表的最新已验证结果。
    */

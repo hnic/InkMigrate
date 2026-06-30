@@ -85,7 +85,7 @@ describe('detectContentKind (§12.7)', () => {
 });
 
 describe('deriveFingerprintInput (§12.6 4-level priority)', () => {
-  it('level 1: uses contentId when present', () => {
+  it('level 1: uses contentId when present (I2: 上层有值则不混入 canonicalUrl)', () => {
     const input = deriveFingerprintInput({
       contentId: '7428193012345678901',
       canonicalUrl: 'https://www.toutiao.com/article/7428193012345678901/',
@@ -95,9 +95,9 @@ describe('deriveFingerprintInput (§12.6 4-level priority)', () => {
       originalUrl: 'https://www.toutiao.com/article/7428193012345678901/?utm=x',
     });
     expect(input.externalId).toBe('7428193012345678901');
-    expect(input.canonicalUrl).toBe(
-      'https://www.toutiao.com/article/7428193012345678901/',
-    );
+    // I2: contentId 存在时指纹只用 contentId，不再混入 canonicalUrl，
+    // 避免同一文章（一次扫到 externalId、一次没扫到）产生不同指纹 → 重复迁移。
+    expect(input.canonicalUrl).toBeUndefined();
   });
   it('level 2: falls back to canonicalUrl when no contentId', () => {
     const input = deriveFingerprintInput({

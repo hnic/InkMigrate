@@ -3,7 +3,14 @@ import { dirname } from 'node:path';
 
 /** RFC 4180 CSV 字段转义。 */
 export function escapeCsvField(value: unknown): string {
-  const s = value === null || value === undefined ? '' : String(value);
+  let s = value === null || value === undefined ? '' : String(value);
+  // I21: CSV 公式注入防护（CWE-1236）。Excel/LibreOffice/WPS 会把以 = + - @ Tab CR
+  // 开头的单元格当公式执行。迁移报告的 title/url 等来自外部不可信来源，操作员双击
+  // 打开时 `=cmd|'/c calc'!A1` 等可触发。前缀单引号使表格软件按文本处理（OWASP 推荐做法）。
+  // 注意：`-` 前缀的合法负数也会被前缀，但报告字段多为文本，可接受；数值字段需调用方保证。
+  if (/^[=+\-@\t\r]/.test(s)) {
+    s = `'${s}`;
+  }
   if (/[",\n\r]/.test(s)) {
     return `"${s.replace(/"/g, '""')}"`;
   }

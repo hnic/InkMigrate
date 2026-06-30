@@ -11,12 +11,16 @@ export function useSidecar() {
    * "是不是我自己发起的任务在跑"，避免 A 任务跑时 B 页面误显示"运行中"。 */
   const [activePhase, setActivePhase] = useState<string | null>(null);
   const unlistenRefs = useRef<UnlistenFn[]>([]);
+  /** I30: 进度条 2 秒清除定时器，避免与新任务进度条竞态。 */
+  const progressClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    // I9: listen() 在权限缺失或 event 系统异常时会 reject，补 .catch 避免未处理 rejection。
     listen<ProgressEvent>('sidecar://progress', (e) => {
       setProgress(e.payload);
-    }).then((fn) => { if (cancelled) fn(); else unlistenRefs.current.push(fn); });
+    }).then((fn) => { if (cancelled) fn(); else unlistenRefs.current.push(fn); })
+      .catch((e) => console.error('progress listen 失败', e));
 
     listen<{ level: string; message: string }>('sidecar://log', (e) => {
       setLogs((prev) => [
@@ -27,7 +31,8 @@ export function useSidecar() {
           timestamp: Date.now(),
         },
       ]);
-    }).then((fn) => { if (cancelled) fn(); else unlistenRefs.current.push(fn); });
+    }).then((fn) => { if (cancelled) fn(); else unlistenRefs.current.push(fn); })
+      .catch((e) => console.error('log listen 失败', e));
 
     listen<{ message: string }>('sidecar://crashed', (e) => {
       setLogs((prev) => [
@@ -35,7 +40,8 @@ export function useSidecar() {
         { level: 'error', message: `⚠️ ${e.payload.message}`, timestamp: Date.now() },
       ]);
       setBusy(false);
-    }).then((fn) => { if (cancelled) fn(); else unlistenRefs.current.push(fn); });
+    }).then((fn) => { if (cancelled) fn(); else unlistenRefs.current.push(fn); })
+      .catch((e) => console.error('crashed listen 失败', e));
 
     return () => {
       cancelled = true;
@@ -60,10 +66,18 @@ export function useSidecar() {
     setBusy(true);
     setProgress(null);
     setActivePhase(METHOD_PHASE[method] ?? null);
+    // I30: 清掉上一轮残留的清进度定时器，避免它在 2 秒后清掉新任务的进度条。
+    if (progressClearTimer.current !== null) {
+      clearTimeout(progressClearTimer.current);
+      progressClearTimer.current = null;
+    }
     try {
       const result = await invoke('send_rpc', { method, params });
       // 延迟 2 秒清除进度条，让用户看到 100% 完成状态
-      setTimeout(() => setProgress(null), 2000);
+      progressClearTimer.current = setTimeout(() => {
+        setProgress(null);
+        progressClearTimer.current = null;
+      }, 2000);
       return result;
     } finally {
       setBusy(false);
