@@ -476,21 +476,38 @@ export async function runMigrationJob(
           ...(knownIndexArtifacts.length > 0 ? { knownIndexArtifacts } : {}),
         };
         const indexResults = await i.targetAdapter.renderIndex(indexCtx);
-        // 落库为 artifact_kind='index'（job 级，sourceItemId 留空）
+        // 落库为 artifact_kind='index'（job 级，sourceItemId 留空）。
+        // 同 note artifact：重跑时索引路径稳定（_索引/<shard>.md），UNIQUE(target,path)
+        // 跨 Job 约束会与上一轮 index artifact 冲突。命中即 updateCommitted，幂等刷新。
         const idxTs = now();
         for (const r of indexResults) {
-          targetArtifacts.create({
-            migrationJobId: i.jobId,
-            artifactKind: 'index',
-            targetInstanceId: i.targetInstanceId,
-            relativePath: r.relativePath,
-            targetContentHash: r.targetContentHash,
-            writtenFileHash: r.writtenFileHash,
-            status: 'verified',
-            verifiedAt: idxTs,
-            createdAt: idxTs,
-            updatedAt: idxTs,
-          });
+          const existingIdx = targetArtifacts.findByTargetPath(
+            i.targetInstanceId,
+            r.relativePath,
+          );
+          if (existingIdx !== undefined) {
+            targetArtifacts.updateCommitted(existingIdx.id, {
+              migrationJobId: i.jobId,
+              ...(r.targetContentHash !== undefined ? { targetContentHash: r.targetContentHash } : {}),
+              ...(r.writtenFileHash !== undefined ? { writtenFileHash: r.writtenFileHash } : {}),
+              status: 'verified',
+              verifiedAt: idxTs,
+              updatedAt: idxTs,
+            });
+          } else {
+            targetArtifacts.create({
+              migrationJobId: i.jobId,
+              artifactKind: 'index',
+              targetInstanceId: i.targetInstanceId,
+              relativePath: r.relativePath,
+              targetContentHash: r.targetContentHash,
+              writtenFileHash: r.writtenFileHash,
+              status: 'verified',
+              verifiedAt: idxTs,
+              createdAt: idxTs,
+              updatedAt: idxTs,
+            });
+          }
         }
       } catch (e) {
         // 索引生成失败不阻断迁移（索引非发布门槛）
@@ -759,7 +776,15 @@ async function processOneItem(
         });
       }
 
-      // 2. 创建 target_artifacts
+      // 2. 创建 target_artifacts（重跑幂等：同一路径已有 artifact 则 UPDATE）
+      // UNIQUE(target_instance_id, relative_path) 是跨 Job 约束。重跑/续跑/跨 Job
+      // 重处理同一文章时，该路径的 artifact 可能已存在（上一轮已写入）。无条件 INSERT
+      // 会触发 UNIQUE constraint failed。命中即 UPDATE 既有记录（刷新 job/source/哈希/状态），
+      // 使重跑幂等；真正的不同文章路径冲突由 stableShortId 后缀从根上避免。
+      const existingArtifact = i.targetArtifacts.findByTargetPath(
+        i.targetInstanceId,
+        writeResult.relativePath,
+      );
       const artifactInput: Parameters<TargetArtifacts['create']>[0] = {
         migrationJobId: i.jobId,
         artifactKind: plan.artifactKind,
@@ -779,7 +804,23 @@ async function processOneItem(
         ).targetContentHash;
       }
       artifactInput.writtenFileHash = writeResult.writtenFileHash;
-      i.targetArtifacts.create(artifactInput);
+      if (existingArtifact !== undefined) {
+        i.targetArtifacts.updateCommitted(existingArtifact.id, {
+          migrationJobId: i.jobId,
+          ...(existingItem?.id !== undefined ? { sourceItemId: existingItem.id } : {}),
+          ...(artifactInput.targetContentHash !== undefined
+            ? { targetContentHash: artifactInput.targetContentHash }
+            : {}),
+          ...(writeResult.writtenFileHash !== undefined
+            ? { writtenFileHash: writeResult.writtenFileHash }
+            : {}),
+          status: 'verified',
+          verifiedAt: now(),
+          updatedAt: now(),
+        });
+      } else {
+        i.targetArtifacts.create(artifactInput);
+      }
 
       // 3. 更新 source_items 状态为 verified/degraded + source_content_hash
       if (existingItem !== undefined) {

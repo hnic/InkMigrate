@@ -614,4 +614,95 @@ describe('runMigrationJob (§11 端到端)', () => {
     expect(result.status).toBe('completed');
     expect(result.reconciliationOk).toBe(true);
   });
+
+  it('target_artifacts 重跑幂等：同路径已有 artifact 时 UPDATE 而非 UNIQUE 冲突', async () => {
+    // 回归场景：UNIQUE(target_instance_id, relative_path) 是跨 Job 约束。
+    // 上一轮 migrate 已写入某文章（artifact 落库），但因中途失败/中断该 source_item
+    // 状态未置为 verified，重跑时 processOneItem 不跳过、走到 commitTxn 的 create →
+    // 撞 UNIQUE 约束，被误判为 conflict（日志：路径并发冲突 UNIQUE constraint failed）。
+    // 修复：create 前用 findByTargetPath 探测，命中即 updateCommitted 刷新既有记录。
+    new SourceInstances(db).create({
+      id: 's1', adapterKind: 'toutiao', adapterVersion: '1.0.0',
+      adapterApiVersion: '1.0.0', configHash: 'h', createdAt: 't', updatedAt: 't',
+    });
+    new TargetInstances(db).create({
+      id: 't1', adapterKind: 'obsidian', adapterVersion: '1.0.0',
+      adapterApiVersion: '1.0.0', configHash: 'h', createdAt: 't', updatedAt: 't',
+    });
+    new MigrationJobs(db).create({
+      id: 'j-first', sourceInstanceId: 's1', targetInstanceId: 't1',
+      status: 'created', currentStage: 'preflight', createdAt: 't', updatedAt: 't',
+    });
+    new MigrationJobs(db).create({
+      id: 'j-reup', sourceInstanceId: 's1', targetInstanceId: 't1',
+      status: 'created', currentStage: 'preflight', createdAt: 't2', updatedAt: 't2',
+    });
+
+    const fp = computeFingerprint(deriveFingerprintInput({ contentId: '9990001112223' }));
+    const makeAdapter = (): SourceAdapter => ({
+      ...createToutiaoSource(),
+      async *scan() {
+        const ref: SourceItemRef = {
+          sourceInstanceId: 's1',
+          externalId: '9990001112223',
+          canonicalUrl: 'https://www.toutiao.com/article/9990001112223/',
+          title: '999 title',
+          contentKind: 'article',
+          discoveredAt: new Date().toISOString(),
+          fingerprint: fp,
+          sourceMetadata: {},
+        };
+        yield ref;
+      },
+      async extract(ref) {
+        const item: SourceItem = {
+          ref, title: '999 title',
+          tags: [], collections: [], assets: [], links: [],
+          quality: 'full', degradations: [],
+          extractionMethod: 'fixture', extractionWarnings: [], sourceMetadata: {},
+        };
+        return item;
+      },
+    });
+    const targetCtx: TargetContext = {
+      config: {},
+      workspaceDir: dbDir, vaultPath: vaultDir,
+      targetConfig: {
+        vaultPath: vaultDir, importSubdir: '', attachmentsSubdir: 'Attachments',
+        linkStyle: 'wikilink', overwritePolicy: 'preserve',
+        collectionMapping: { toTags: false, toFolders: false }, maxFilenameLength: 100,
+      } as Record<string, unknown>,
+    };
+
+    // 第一轮：正常迁移，source_item 落 verified + artifact 落库
+    const r1 = await runMigrationJob({
+      db, jobId: 'j-first',
+      sourceAdapter: makeAdapter(), targetAdapter: createObsidianTarget(),
+      sourceInstanceId: 's1', targetInstanceId: 't1',
+      targetContext: targetCtx, workspaceDir: dbDir, reportsDir: join(dbDir, 'reports'),
+    });
+    expect(r1.status).toBe('completed');
+    const arts1 = new TargetArtifacts(db).listByJob('j-first').filter((a) => a.artifactKind === 'note');
+    expect(arts1.length).toBe(1);
+    const notePath = arts1[0]!.relativePath;
+
+    // 模拟"上轮未完成提交"：把 source_item 状态退回 discovered（artifact 保留）。
+    // 这样第二轮 processOneItem 不会因 status='verified' 跳过，会走到 commitTxn 的 create。
+    db.prepare(`UPDATE source_items SET status='discovered' WHERE fingerprint=?`).run(fp);
+
+    // 第二轮：同路径已有 artifact。修复前 → UNIQUE constraint failed → conflict；
+    // 修复后 → findByTargetPath 命中 → updateCommitted 刷新 → 正常 verified。
+    const r2 = await runMigrationJob({
+      db, jobId: 'j-reup',
+      sourceAdapter: makeAdapter(), targetAdapter: createObsidianTarget(),
+      sourceInstanceId: 's1', targetInstanceId: 't1',
+      targetContext: targetCtx, workspaceDir: dbDir, reportsDir: join(dbDir, 'reports'),
+    });
+    expect(r2.status).toBe('completed');
+    expect((r2.finalStateCounts as Record<string, number>).conflict ?? 0).toBe(0);
+    // artifact 被刷新到本轮 job（迁移归属更新），仍是同一条记录（无 UNIQUE 冲突）
+    const refreshed = new TargetArtifacts(db).findByTargetPath('t1', notePath);
+    expect(refreshed).toBeDefined();
+    expect(refreshed!.migrationJobId).toBe('j-reup');
+  });
 });
