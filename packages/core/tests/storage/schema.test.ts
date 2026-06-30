@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { makeMemoryDb } from '../helpers/db.js';
+import { migrate, getCurrentSchemaVersion, SCHEMA_VERSION } from '../../src/storage/database.js';
 import type { DB } from '../../src/index.js';
 
 let db: DB;
@@ -356,6 +357,40 @@ describe('schema enforcement (§16.12, §24.5)', () => {
         db.prepare(`SELECT COUNT(*) c FROM source_items`).get() as { c: number }
       ).c;
       expect(after).toBe(before); // first insert rolled back too
+    });
+  });
+
+  describe('schema migration framework (§16 multi-version)', () => {
+    it('fresh database migrates to current SCHEMA_VERSION', () => {
+      // makeMemoryDb 已在 openDatabase 内调用 migrate；直接校验版本号
+      expect(getCurrentSchemaVersion(db)).toBe(SCHEMA_VERSION);
+    });
+
+    it('migrate is idempotent: re-running on an up-to-date db is a no-op', () => {
+      const before = getCurrentSchemaVersion(db);
+      migrate(db); // 已是最新版本，不应报错也不应重复写入
+      expect(getCurrentSchemaVersion(db)).toBe(before);
+      // schema_version 表里每个版本只有一行
+      const rows = db
+        .prepare(`SELECT version FROM schema_version WHERE version = ?`)
+        .all(SCHEMA_VERSION) as Array<{ version: number }>;
+      expect(rows.length).toBe(1);
+    });
+
+    it('rejects downgrade: db version newer than supported throws', () => {
+      // 手动插入一个高于 SCHEMA_VERSION 的假版本，模拟"用旧代码打开新库"
+      db.prepare(
+        `INSERT INTO schema_version(version, applied_at) VALUES (?, ?)`,
+      ).run(SCHEMA_VERSION + 5, new Date().toISOString());
+      expect(() => migrate(db)).toThrow(/newer than supported.*downgrade/i);
+    });
+
+    it('getCurrentSchemaVersion returns 0 for a db without schema_version rows', () => {
+      const fresh = makeMemoryDb();
+      // 清空 schema_version 模拟极端情况（表存在但无行）
+      fresh.exec(`DELETE FROM schema_version`);
+      expect(getCurrentSchemaVersion(fresh)).toBe(0);
+      fresh.close();
     });
   });
 });

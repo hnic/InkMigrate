@@ -27,6 +27,19 @@ pub struct RpcResponse {
     pub params: Option<serde_json::Value>,
 }
 
+/// 单次 RPC 等待响应的默认超时（秒）。长任务（全量扫描/迁移/清理）可能持续数小时，
+/// 24h 上限足以覆盖最大单任务时长，同时防止 sidecar 永久挂起时前端 busy 不复位。
+/// 可通过环境变量 `INKMIGRATE_RPC_TIMEOUT_SECS` 覆盖（调试/特殊场景）。
+const DEFAULT_RPC_TIMEOUT_SECS: u64 = 24 * 3600;
+
+/// 解析 RPC 超时：优先环境变量，回退默认值。
+fn rpc_timeout_secs() -> u64 {
+    std::env::var("INKMIGRATE_RPC_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_RPC_TIMEOUT_SECS)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RpcError {
     pub code: i64,
@@ -150,7 +163,7 @@ impl SidecarManager {
 
         // 5. 锁外等待响应（长任务如全量扫描/迁移可能需要数小时）
         let response = tokio::time::timeout(
-            std::time::Duration::from_secs(24 * 3600), // 24 小时
+            std::time::Duration::from_secs(rpc_timeout_secs()),
             rx,
         )
         .await

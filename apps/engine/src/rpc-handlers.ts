@@ -519,15 +519,11 @@ async function runMigrateJob(
     }
     const sourceAdapter = createToutiaoSource(adapterConfig);
 
-    // 构造 target
-    // intervalMs 放在 config（job-runner 从 config 读取），不能放 targetConfig（ObsidianTargetConfigSchema strict 会拒绝）
+    // 构造 target。intervalMs 不能放 targetConfig（ObsidianTargetConfigSchema strict
+    // 会拒绝），现作为 runMigrationJob 的一级字段传入（类型化契约，不再塞 config bag）。
     const targetAdapter = createObsidianTarget();
     const targetContext: TargetContext = {
-      config: {
-        ...(startParams.intervalMs !== undefined
-          ? { intervalMs: startParams.intervalMs }
-          : {}),
-      },
+      config: {},
       workspaceDir: params.stateDir,
       vaultPath: params.vaultPath,
       targetConfig: {
@@ -553,6 +549,8 @@ async function runMigrateJob(
       targetContext,
       workspaceDir: params.stateDir,
       reportsDir: join(params.stateDir, 'reports'),
+      // intervalMs 作为一级字段传入（§18.1 类型化速率控制契约）
+      ...(startParams.intervalMs !== undefined ? { intervalMs: startParams.intervalMs } : {}),
       isCancelled: isCancelledFlag,
       onProgress: (progress) => {
         // 把 job-runner 进度转发为 JSON-RPC notification

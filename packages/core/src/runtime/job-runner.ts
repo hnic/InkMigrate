@@ -38,6 +38,12 @@ export interface JobRunnerInput {
   workspaceDir: string;
   reportsDir: string;
   /**
+   * §18.1 条目间基准等待毫秒（叠加 ±40% 抖动，防风控）。默认 1500。
+   * 作为 JobRunnerInput 的一级字段而非塞进 targetContext.config bag——后者是
+   * Record<string,unknown>，强转读取无类型保障、易踩坑。CLI/engine 显式传入。
+   */
+  intervalMs?: number;
+  /**
    * 进度回调（可选）。在扫描完成、每条提取完成时触发。
    * 用于 GUI/CLI 实时显示进度。
    */
@@ -210,8 +216,11 @@ export async function runMigrationJob(
     // 逐条 extract → write → verify
     // §18.1 条目间速率控制：默认每条之间等待 1500ms，避免触发风控
     // §18.2 限流（429/503）时 Job 进入 paused
+    // intervalMs 优先读 JobRunnerInput 一级字段（类型化契约）；历史调用方若仍
+    // 塞进 targetContext.config bag 则回退读取，保持向后兼容。
     const configRecord = i.targetContext.config as Record<string, unknown>;
-    const intervalMs = (configRecord['intervalMs'] as number | undefined) ?? 1500;
+    const intervalMs =
+      i.intervalMs ?? (configRecord['intervalMs'] as number | undefined) ?? 1500;
     // itemStates 同时持有完成终态（ItemFinalState，进等式）与可恢复态
     // （interrupted/retryable_failed，不进等式，仅用于 recoverableCount 统计）。
     // 规格 §11.1：限流未处理条目归 interrupted（可恢复），不另设终态。
@@ -261,8 +270,11 @@ export async function runMigrationJob(
           log('warn', `限流检测 (${rlErr.httpStatus})，Job 进入 paused`);
           throw e; // 向上传播到 runMigrationJob 的 try 块
         }
-        // 其他错误：processOneItem 内部 catch 已返回 ItemFinalState，不会到这里
-        // 但防御性处理
+        // 契约上 processOneItem 内部 catch 已返回 ItemFinalState，不应走到这里。
+        // 若到达此分支，说明 processOneItem 的错误契约被违反（开始抛出未被内部
+        // catch 覆盖的非限流错误）。用 error 级别记录让该"不该发生"的路径可见，
+        // 便于诊断；归为 permanent_failed 保证 resume 时跳过、不卡在同一条。
+        log('error', `processOneItem 未被内部 catch 覆盖的错误（归为 permanent_failed）：${(e as Error).message ?? e}`);
         return 'permanent_failed';
       });
       itemStates.push(state);

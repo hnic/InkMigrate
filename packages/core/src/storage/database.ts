@@ -28,8 +28,29 @@ export function openDatabase(opts: OpenDbOptions): DB {
 }
 
 /**
- * §16 应用 Schema Migration。当前仅 v1；后续版本按 SCHEMA_VERSION 递增。
- * 失败必须回滚并停止（better-sqlite3 是同步 API，事务回滚由调用方包裹）。
+ * §16 版本化迁移注册表。
+ *
+ * 每个版本 N 对应一个把 schema 从 N-1 升级到 N 的迁移函数。新增版本时只需在此
+ * 追加一项，migrate() 会从当前版本逐版本应用到目标版本——不再需要每次手动改
+ * migrate() 的分支逻辑（旧实现只支持 v1→v1，SCHEMA_VERSION 升到 2 时会静默失败）。
+ *
+ * 迁移函数必须幂等（CREATE 语句用 IF NOT EXISTS）且包裹在事务中执行。
+ * key=1 对应 applySchemaV1（创建全部 v1 表，兼容全新库与已存在库）。
+ */
+const MIGRATIONS: ReadonlyArray<{ version: number; apply: (db: DB) => void }> = [
+  { version: 1, apply: applySchemaV1 },
+  // 版本 2 起在此追加：{ version: 2, apply: applySchemaV2 }, ...
+];
+
+/**
+ * §16 应用 Schema Migration。从当前版本逐版本应用到 SCHEMA_VERSION。
+ *
+ * 逐版本而非单步：确保从任意旧版本（含跳版本场景）都能正确升级到目标版本。
+ * 每个迁移在独立事务中执行；失败时事务回滚，schema_version 不递增，下次启动
+ * 从断点续跑。better-sqlite3 是同步 API，事务回滚由 db.transaction 保证。
+ *
+ * 校验：注册表必须连续覆盖 1..SCHEMA_VERSION，缺失或乱序会抛错（fail-fast，
+ * 避免生产库因迁移表配置错误而部分升级到不一致状态）。
  */
 export function migrate(db: DB): void {
   // 先确保 schema_version 表存在，便于读取当前版本。
@@ -37,9 +58,35 @@ export function migrate(db: DB): void {
     version INTEGER PRIMARY KEY,
     applied_at TEXT NOT NULL
   );`);
+
+  // 校验注册表完整性：连续覆盖 1..SCHEMA_VERSION
+  for (let v = 1; v <= SCHEMA_VERSION; v++) {
+    if (!MIGRATIONS.some((m) => m.version === v)) {
+      throw new Error(
+        `migrate: missing migration for version ${v} (MIGRATIONS must cover 1..${SCHEMA_VERSION})`,
+      );
+    }
+  }
+
   const current = getCurrentSchemaVersion(db);
-  if (current < SCHEMA_VERSION) {
-    applySchemaV1(db);
+  // 当前版本高于目标（降级场景）→ 拒绝，避免静默使用新库于旧代码。
+  if (current > SCHEMA_VERSION) {
+    throw new Error(
+      `migrate: database schema version ${current} is newer than supported ${SCHEMA_VERSION} (downgrade not supported)`,
+    );
+  }
+
+  // 逐版本应用从 current+1 到 SCHEMA_VERSION 的迁移
+  for (const m of MIGRATIONS) {
+    if (m.version <= current) continue;
+    const txn = db.transaction(() => {
+      m.apply(db);
+      db.prepare(
+        `INSERT INTO schema_version(version, applied_at) VALUES (?, ?)
+         ON CONFLICT(version) DO NOTHING`,
+      ).run(m.version, new Date().toISOString());
+    });
+    txn();
   }
 }
 

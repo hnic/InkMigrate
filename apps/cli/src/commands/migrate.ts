@@ -104,13 +104,11 @@ export function createMigrateCommand(): Command {
             })();
 
         // 构造 target adapter + context
+        // intervalMs 作为 runMigrationJob 一级字段传入（§18.1 类型化速率控制契约），
+        // 不再塞 config bag（后者是 Record<string,unknown>，强转读取无类型保障）。
         const targetAdapter = createObsidianTarget();
         const targetContext: TargetContext = {
-          config: {
-            ...(opts.interval !== undefined
-              ? { intervalMs: parseInt(opts.interval, 10) }
-              : {}),
-          },
+          config: {},
           workspaceDir: opts.stateDir,
           vaultPath: opts.vaultPath,
           targetConfig: {
@@ -136,6 +134,7 @@ export function createMigrateCommand(): Command {
           targetContext,
           workspaceDir: opts.stateDir,
           reportsDir: join(opts.stateDir, 'reports'),
+          ...(opts.interval !== undefined ? { intervalMs: parseInt(opts.interval, 10) } : {}),
         });
 
         console.log(`\n迁移完成：`);
