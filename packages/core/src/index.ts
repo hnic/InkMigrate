@@ -50,6 +50,7 @@ export {
   rejectsTraversal,
   isPathInside,
   assertSymlinkSafe,
+  assertWriteDirSafe,
 } from './security/paths.js';
 export { sanitizeFilename } from './security/filenames.js';
 export type { SanitizeOptions } from './security/filenames.js';

@@ -2,8 +2,6 @@ import { Command } from 'commander';
 import {
   openDatabase,
   runMigrationJob,
-  SourceInstances,
-  TargetInstances,
   MigrationJobs,
   computeFingerprint,
   validateSourceItemQuality,
@@ -22,7 +20,7 @@ import {
   profileExists,
 } from '@inkmigrate/source-toutiao';
 import { createObsidianTarget } from '@inkmigrate/target-obsidian';
-import { readFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**

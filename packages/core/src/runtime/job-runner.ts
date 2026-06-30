@@ -5,7 +5,7 @@ import type {
   TargetContext,
   IndexEntryInput,
 } from '../adapters/adapter.js';
-import type { SourceItem, SourceItemRef } from '../domain/models.js';
+import type { SourceItemRef } from '../domain/models.js';
 import type { ItemFinalState, ItemRecoverableState, FinalStateCounts } from '../domain/states.js';
 import { MigrationJobs } from '../storage/repositories/migration-jobs.js';
 import { SourceItems } from '../storage/repositories/source-items.js';
@@ -133,6 +133,10 @@ export async function runMigrationJob(
       interrupted = true;
     },
     onSecondInterrupt: () => {
+      // 第二次中断：立即退出。finally 不会执行，故此处同步释放锁，
+      // 否则锁文件心跳时间戳可能仍很新（默认 1s 刷新），下次启动 isStaleLock
+      //（60s 阈值）会判定非陈旧而抛 LockConflictError，锁被永久卡住。
+      lock.release();
       process.exit(130);
     },
   });
@@ -571,23 +575,9 @@ async function processOneItem(
     return 'verified';
   }
 
-  // §16.7 创建 migration_attempts 记录
-  const attemptInput: Parameters<MigrationAttempts['createItem']>[0] = {
-    migrationJobId: i.jobId,
-    sourceItemId: existingItem?.id ?? 0,
-    stage: 'extracting',
-    actionCode: 'stage_attempt',
-    attemptNo: 1,
-    startedAt: now(),
-    createdAt: now(),
-  };
-  // 如果 existingItem.id 是 undefined（尚未持久化），用 fallback
-  // 实际上 persistSourceItemRef 在 scan 阶段已经创建了行，
-  // 所以 existingItem 应该总是存在
-  let attemptId: number | undefined;
-
   try {
     // §18.1/§18.2 retry-wrapped extract
+    // migration_attempts 记录在下方成功/失败分支内联创建（携带准确的 stage/actionCode）。
     const item = await withRetry(
       () =>
         i.sourceAdapter.extract(i.ref, {
@@ -766,6 +756,15 @@ async function processOneItem(
     const disposition = err.itemDisposition;
     if (disposition === 'unsupported') return 'unsupported';
     if (disposition === 'blocked') return 'blocked';
+
+    // §13.9 / H1 跨 Job 并发路径冲突：target_artifacts 的 UNIQUE(target_instance_id,
+    // relative_path) 约束被触发——另一并发 Job 已占用该路径。归为 conflict
+    //（与用户修改导致的冲突同语义：保护已有数据，不静默覆盖），交由续跑/人工处理。
+    // better-sqlite3 在违反唯一约束时 errCode 形如 'SQLITE_CONSTRAINT_UNIQUE'。
+    if (typeof err.code === 'string' && err.code.includes('CONSTRAINT')) {
+      log('warn', `路径并发冲突（UNIQUE 约束），标记为 conflict：${errMsg}`);
+      return 'conflict';
+    }
 
     // §18.2 检测限流信号（429/503），向上抛出以触发 Job paused
     const httpStatus = (e as { httpStatus?: number }).httpStatus;

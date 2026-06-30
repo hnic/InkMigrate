@@ -5,7 +5,7 @@ import {
   rejectsTraversal,
   assertSymlinkSafe,
 } from './paths.js';
-import { mkdtempSync, mkdirSync, symlinkSync, rmSync, writeFileSync, realpathSync } from 'node:fs';
+import { mkdtempSync, symlinkSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 

@@ -17,6 +17,12 @@ export interface UnfavoriteDriverOptions {
    * - 'none'：不模拟（仅测试或已确认无风控时用）。
    */
   readingSimulation?: 'heavy' | 'none';
+  /**
+   * 可注入的随机数生成器 [0,1)（默认 Math.random）。供 simulateReading 的
+   * 停留时长/滚动段数/鼠标移动等随机行为用，使这条最复杂的反检测逻辑在测试中
+   * 可确定性断言（固定种子），而非全靠不可控的 Math.random。
+   */
+  rng?: () => number;
 }
 
 export interface UnfavoriteDriverResult {
@@ -47,9 +53,12 @@ const STATE_READ_PARAMS: StateReadParams = {
   collectedClass: UNFAVORITE_SELECTORS.collectedClass,
 };
 
+/** 默认 RNG（Math.random）。可被 options.rng 注入替换以便测试。 */
+const defaultRng = Math.random;
+
 /** 区间 [min, max] 内的随机整数毫秒。 */
-function randMs(min: number, max: number): number {
-  return Math.round(min + Math.random() * (max - min));
+function randMs(min: number, max: number, rng: () => number): number {
+  return Math.round(min + rng() * (max - min));
 }
 
 /**
@@ -64,10 +73,13 @@ function randMs(min: number, max: number): number {
  * 5. 最后把视口滚回顶部附近（收藏按钮多在顶部/正文区）。
  *
  * 全程使用真实 wheel/mousemove 事件（非 JS scrollTo），让风控能观测到滚动交互。
+ *
+ * rng 可注入：默认 Math.random；测试传入固定种子 PRNG 可对段数/停留/鼠标轨迹
+ * 做确定性断言，让这条最复杂的反检测逻辑从"完全无测试覆盖"变为可测。
  */
-async function simulateReading(page: Page): Promise<void> {
+async function simulateReading(page: Page, rng: () => number = defaultRng): Promise<void> {
   // 先在页面顶部随机停留（"读标题/开头"）
-  await page.waitForTimeout(randMs(1500, 3500));
+  await page.waitForTimeout(randMs(1500, 3500, rng));
 
   // 测量可滚动高度与视口高度，决定滚动段数
   const dims = await page.evaluate(() => ({
@@ -77,35 +89,35 @@ async function simulateReading(page: Page): Promise<void> {
   const viewport = dims.clientHeight > 0 ? dims.clientHeight : 800;
   const totalScrollable = Math.max(0, dims.scrollHeight - viewport);
   // 每段滚动约 0.6-1.0 个视口；总段数随内容长度增长，上限避免过长文章耗时失控
-  const stepPx = Math.round(viewport * (0.6 + Math.random() * 0.4));
+  const stepPx = Math.round(viewport * (0.6 + rng() * 0.4));
   const maxSteps = 8;
   const steps = Math.min(maxSteps, Math.ceil(totalScrollable / stepPx));
 
   let scrolled = 0;
   for (let i = 0; i < steps; i++) {
     // 随机移动鼠标到视口内某处（人类阅读时鼠标会动）
-    const moveX = Math.round(100 + Math.random() * (viewport * 0.6));
-    const moveY = Math.round(100 + Math.random() * 400);
-    await page.mouse.move(moveX, moveY, { steps: 5 + Math.floor(Math.random() * 10) });
+    const moveX = Math.round(100 + rng() * (viewport * 0.6));
+    const moveY = Math.round(100 + rng() * 400);
+    await page.mouse.move(moveX, moveY, { steps: 5 + Math.floor(rng() * 10) });
 
     // 真实 wheel 向下滚动一段
     await page.mouse.wheel(0, stepPx);
     scrolled += stepPx;
 
     // 每段停留（"读完这一段"），1.5-4 秒
-    await page.waitForTimeout(randMs(1500, 4000));
+    await page.waitForTimeout(randMs(1500, 4000, rng));
   }
 
   // 偶尔（约 40%）回滚一段（"往回扫一眼"）
-  if (Math.random() < 0.4 && steps > 0) {
+  if (rng() < 0.4 && steps > 0) {
     await page.mouse.wheel(0, -stepPx);
-    await page.waitForTimeout(randMs(800, 2000));
+    await page.waitForTimeout(randMs(800, 2000, rng));
   }
 
   // 滚回顶部附近（收藏按钮通常在正文区/顶部）
   await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior }));
   // 点击前再停留一瞬（"决定要取消收藏"）
-  await page.waitForTimeout(randMs(800, 2000));
+  await page.waitForTimeout(randMs(800, 2000, rng));
 }
 
 /**
@@ -179,7 +191,7 @@ export async function driveUnfavorite(
   // 模拟人类阅读（heavy 默认）：模拟"打开→浏览→读完才取消"的行为指纹，降低风控识别。
   // 仅对将要操作的已收藏条目模拟，未收藏跳过项不模拟以节省时间。
   if (opts.readingSimulation !== 'none') {
-    await simulateReading(opts.page);
+    await simulateReading(opts.page, opts.rng ?? defaultRng);
   }
 
   // 点击取消收藏

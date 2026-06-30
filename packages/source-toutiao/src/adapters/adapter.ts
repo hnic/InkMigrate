@@ -4,10 +4,6 @@ import {
   type SourceAdapter,
   type SourceContentKind,
   type SourceItemRef,
-  type SourceRefState,
-  type CleanupActionState,
-  type CleanupActionReceipt,
-  type CleanupVerification,
 } from '@inkmigrate/core';
 import { TOUTIAO_CAPABILITIES } from '../capabilities.js';
 import { deriveFingerprintInput } from '../normalize/fingerprint.js';

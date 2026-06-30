@@ -190,8 +190,15 @@ describe('driveUnfavorite', () => {
       route.fulfill({ contentType: 'text/html; charset=utf-8', body: html }),
     );
 
-    const result = await driveUnfavorite({ page, ref: makeRef(), waitAfterClickMs: 2000 });
-    // 默认 readingSimulation='heavy'，应触发阅读模拟
+    const result = await driveUnfavorite({
+      page,
+      ref: makeRef(),
+      waitAfterClickMs: 2000,
+      // 默认 readingSimulation='heavy'，应触发阅读模拟。
+      // 注入确定性 RNG（恒返回 0.5）：让停留时长/滚动段数/鼠标轨迹可复现，
+      // 既验证 rng 注入生效，又消除 Math.random 导致的测试时长抖动（M7）。
+      rng: () => 0.5,
+    });
 
     // heavy 模式应让页面滚动到正文深处（__maxScrollY 显著 > 0），证明发生了浏览行为
     const maxScrollY = await page.evaluate(() => (window as unknown as { __maxScrollY: number }).__maxScrollY);

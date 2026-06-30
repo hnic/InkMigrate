@@ -8,6 +8,8 @@
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
     "noImplicitOverride": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
     "noPropertyAccessFromIndexSignature": false,
     "isolatedModules": true,

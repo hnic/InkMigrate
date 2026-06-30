@@ -34,6 +34,13 @@ export function computeFingerprint(input: FingerprintInput): string {
     input.publishedAt ?? '',
     input.raw ?? '',
   ];
+  // 防御：所有身份字段皆空时产出固定指纹，多个此类条目会指纹碰撞被当作同一条
+  // 去重。core 作为通用库应在调用方漏传身份字段时显式报错，而非静默产出常量。
+  if (parts.every((p) => p === '')) {
+    throw new Error(
+      'computeFingerprint: all identity fields are empty (supply at least one of externalId/canonicalUrl/originalUrl/title/author/publishedAt/raw)',
+    );
+  }
   const h = createHash('sha256').update(parts.join(SEP)).digest('hex');
   return `sha256:${h}`;
 }

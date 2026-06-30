@@ -8,6 +8,7 @@ import {
   ACTION_STATUS_ALREADY_UNFAVORITED,
   withJitter,
   ITEM_INTERVAL_JITTER,
+  sourceContentHash,
 } from '@inkmigrate/core';
 import { type PreActionState } from './cleanup-state-machine.js';
 import { generateCleanupPlan } from './plan-generator.js';
@@ -138,6 +139,8 @@ export async function runCleanupUnfavorite(
 
   const now = () => new Date().toISOString();
   const ts = now();
+  const sleep = opts.sleepFn ?? defaultSleep;
+  const intervalBase = opts.intervalMs ?? DEFAULT_CLEANUP_INTERVAL_MS;
 
   // 2. 建 plan + job。§5-part2 调用 generateCleanupPlan 生成不可变计划并落地
   // reports/cleanup 下的 JSON/CSV/MD 审计报告（此前为死代码，编排器手写 planId）。
@@ -159,7 +162,11 @@ export async function runCleanupUnfavorite(
     candidates,
     excluded,
     databaseSnapshotVersion: Date.now(),
-    configHash: `ch-${workspaceDir.length}`,
+    // config_hash 反映本次清理的运行配置（节流参数 + 工作区），用于审计：
+    // 配置变更（如用户调了 intervalMs/maxItems）会改变哈希，便于识别。
+    configHash: sourceContentHash(
+      JSON.stringify({ workspaceDir, intervalMs: intervalBase, maxItems: limit }),
+    ),
   });
   const planId = plan.planId;
   const jobId = `cleanup-${Date.now()}`;
@@ -169,7 +176,9 @@ export async function runCleanupUnfavorite(
     migrationJobId,
     action: 'unfavorite',
     planHash: plan.planHash,
-    configHash: `ch-${workspaceDir.length}`,
+    configHash: sourceContentHash(
+      JSON.stringify({ workspaceDir, intervalMs: intervalBase, maxItems: limit }),
+    ),
     candidateCount: rows.length,
     excludedCount: alreadyDone.size,
     status: 'created',
@@ -210,8 +219,6 @@ export async function runCleanupUnfavorite(
   let pauseReason: string | undefined;
   const itemsRepo = new CleanupItems(db);
   const attemptsRepo = new CleanupAttempts(db);
-  const sleep = opts.sleepFn ?? defaultSleep;
-  const intervalBase = opts.intervalMs ?? DEFAULT_CLEANUP_INTERVAL_MS;
 
   for (let i = 0; i < rows.length; i++) {
     // 取消检查（GUI 终止按钮）：在处理新条目前退出，已处理的落库不丢
@@ -244,92 +251,155 @@ export async function runCleanupUnfavorite(
     const actionStartedAt = now();
     // executeAction 内部一次导航完成：等待渲染 → 读状态 → 点击 → 轮询复核。
     // precheckStatus 由 receipt.wasCollected 反推，落库语义与原 inspect 路径一致。
-    let precheckStatus: PreActionState = 'unknown';
-    let actionStatus = 'unknown';
-    let lastErrorCode: string | null = null;
-    let lastErrorMessage: string | null = null;
 
-    /** 单次执行 + 四类映射。返回是否为"真正失败"（需触发等待重试）+ 检测到的特殊状态。 */
-    const attemptOnce = async (): Promise<{ hardFailed: boolean; detectedState?: 'login_required' | 'challenge_required' | 'content_unavailable' }> => {
+    /**
+     * 单次尝试的纯结果描述符（不含副作用：不修改计数器、不写日志、不触碰闭包状态）。
+     *
+     * 重构说明（M4）：此前 attemptOnce 直接修改 successCount/skippedCount/... 等闭包
+     * 计数器，重试时需在外部 failedCount-- 回退——计数器在函数内外双向修改极易漏，
+     * 且新增分支时回退会失配。现 attemptOnce 只产出结果，由 applyResult 统一应用计数，
+     * 重试时用最新结果覆盖即可，无需回退。
+     */
+    interface AttemptOutcome {
+      precheckStatus: PreActionState;
+      actionStatus: string;
+      lastErrorCode: string | null;
+      lastErrorMessage: string | null;
+      /** 计数类别：决定累加哪个计数器。 */
+      countBucket: 'success' | 'skipped' | 'failed' | 'unknown' | 'none';
+      /** 是否为"真正失败"（需触发等待重试）。 */
+      hardFailed: boolean;
+      /** §5/§14.12 检测到的特殊页面状态。 */
+      detectedState?: 'login_required' | 'challenge_required' | 'content_unavailable';
+      /** 失败/未知原因（用于 recordReason 聚合）。undefined 表示不聚合理由。 */
+      reasonForLog?: { reason: string; bucket: 'fail' | 'unknown' };
+    }
+
+    /** 单次执行 + 四类映射，产出纯结果描述符。 */
+    const attemptOnce = async (): Promise<AttemptOutcome> => {
       try {
         const receipt = await cleanup.executeAction(ref, 'unfavorite', ctx);
 
         // §5/§14.12 特殊页面检测：登录墙/风控挑战 → 受控中断（不硬等、不重试）
         if (receipt.detectedState === 'login_required' || receipt.detectedState === 'challenge_required') {
-          precheckStatus = receipt.detectedState;
-          actionStatus = receipt.detectedState;
-          lastErrorCode = receipt.detectedState;
-          lastErrorMessage = receipt.detectedState === 'login_required' ? '需要重新登录' : '触发风控验证';
-          return { hardFailed: false, detectedState: receipt.detectedState };
+          return {
+            precheckStatus: receipt.detectedState,
+            actionStatus: receipt.detectedState,
+            lastErrorCode: receipt.detectedState,
+            lastErrorMessage: receipt.detectedState === 'login_required' ? '需要重新登录' : '触发风控验证',
+            countBucket: 'none',
+            hardFailed: false,
+            detectedState: receipt.detectedState,
+          };
         }
         // 内容不可用（删除等）→ 跳过，继续处理后续。action_status 同样落 already_unfavorited
         //（对取消收藏目标已是终态），以便重跑时被 findUnfavoritedSourceItemIds 排除。
         if (receipt.detectedState === 'content_unavailable') {
-          precheckStatus = 'content_unavailable';
-          actionStatus = ACTION_STATUS_ALREADY_UNFAVORITED;
-          skippedCount++;
-          lastErrorCode = 'content_unavailable';
-          lastErrorMessage = '内容不可用（已删除）';
-          return { hardFailed: false, detectedState: 'content_unavailable' };
+          return {
+            precheckStatus: 'content_unavailable',
+            actionStatus: ACTION_STATUS_ALREADY_UNFAVORITED,
+            lastErrorCode: 'content_unavailable',
+            lastErrorMessage: '内容不可用（已删除）',
+            countBucket: 'skipped',
+            hardFailed: false,
+            detectedState: 'content_unavailable',
+          };
         }
 
-        precheckStatus = receipt.wasCollected ? 'favorited' : 'not_favorited';
-
+        const wasCollected = receipt.wasCollected;
         if (receipt.success && receipt.isCollected === false) {
           // 成功取消（含本来就未收藏）
-          if (receipt.wasCollected) {
-            actionStatus = ACTION_STATUS_UNFAVORITED;
-            successCount++;
-          } else {
-            actionStatus = ACTION_STATUS_ALREADY_UNFAVORITED;
-            skippedCount++;
-          }
-          return { hardFailed: false };
-        } else if (receipt.reason === 'collect button not found' || receipt.reason === 'no canonicalUrl') {
-          // 状态判定失败（按钮未渲染/找不到）→ 未知。页面问题，重试无效，不触发等待。
-          actionStatus = 'state_unknown';
-          unknownCount++;
-          lastErrorCode = receipt.reason;
-          lastErrorMessage = receipt.reason;
-          recordReason(unknownReasons, receipt.reason, row.title, opts.onLog, '未知');
-          return { hardFailed: false };
-        } else {
-          // 点击后仍收藏（含 still collected，风控信号）或其它失败 → 真正失败，触发等待重试
-          actionStatus = 'verification_failed';
-          failedCount++;
-          const reason = receipt.reason ?? 'still collected after click';
-          lastErrorCode = reason;
-          lastErrorMessage = reason;
-          recordReason(failReasons, reason, row.title, opts.onLog);
-          return { hardFailed: true };
+          return {
+            precheckStatus: wasCollected ? 'favorited' : 'not_favorited',
+            actionStatus: wasCollected ? ACTION_STATUS_UNFAVORITED : ACTION_STATUS_ALREADY_UNFAVORITED,
+            lastErrorCode: null,
+            lastErrorMessage: null,
+            countBucket: wasCollected ? 'success' : 'skipped',
+            hardFailed: false,
+          };
         }
+        if (receipt.reason === 'collect button not found' || receipt.reason === 'no canonicalUrl') {
+          // 状态判定失败（按钮未渲染/找不到）→ 未知。页面问题，重试无效，不触发等待。
+          return {
+            precheckStatus: wasCollected ? 'favorited' : 'not_favorited',
+            actionStatus: 'state_unknown',
+            lastErrorCode: receipt.reason,
+            lastErrorMessage: receipt.reason,
+            countBucket: 'unknown',
+            hardFailed: false,
+            reasonForLog: { reason: receipt.reason, bucket: 'unknown' },
+          };
+        }
+        // 点击后仍收藏（含 still collected，风控信号）或其它失败 → 真正失败，触发等待重试
+        const reason = receipt.reason ?? 'still collected after click';
+        return {
+          precheckStatus: wasCollected ? 'favorited' : 'not_favorited',
+          actionStatus: 'verification_failed',
+          lastErrorCode: reason,
+          lastErrorMessage: reason,
+          countBucket: 'failed',
+          hardFailed: true,
+          reasonForLog: { reason, bucket: 'fail' },
+        };
       } catch (e) {
-        actionStatus = 'permanent_failed';
-        failedCount++;
         const reason = `exception: ${e instanceof Error ? e.message : String(e)}`;
-        lastErrorCode = reason;
-        lastErrorMessage = reason;
-        recordReason(failReasons, reason, row.title, opts.onLog);
-        return { hardFailed: true };
+        return {
+          precheckStatus: 'unknown',
+          actionStatus: 'permanent_failed',
+          lastErrorCode: reason,
+          lastErrorMessage: reason,
+          countBucket: 'failed',
+          hardFailed: true,
+          reasonForLog: { reason, bucket: 'fail' },
+        };
+      }
+    };
+
+    /** 当前条目的最新尝试结果（闭包变量，供 persistItem 读取最终态）。 */
+    let latestOutcome: AttemptOutcome | undefined;
+
+    /**
+     * 记录一次尝试的可观测信号（失败/未知原因聚合 + 采样日志）并更新 latestOutcome。
+     * 每次 attemptOnce 后调用——即便后续重试转成功，本次失败的日志仍保留（可观测性）。
+     * 计数器不在此时累加：重试会改变最终归属，计数只在 persistItem 前按最终结果应用一次。
+     */
+    const observeAttempt = (outcome: AttemptOutcome): void => {
+      latestOutcome = outcome;
+      if (outcome.reasonForLog !== undefined) {
+        const map = outcome.reasonForLog.bucket === 'unknown' ? unknownReasons : failReasons;
+        const label = outcome.reasonForLog.bucket === 'unknown' ? '未知' : '失败';
+        recordReason(map, outcome.reasonForLog.reason, row.title, opts.onLog, label);
+      }
+    };
+
+    /** 按【最终】结果累加一次计数器（每条仅调用一次，避免重试期间重复计数）。 */
+    const applyFinalCount = (outcome: AttemptOutcome): void => {
+      switch (outcome.countBucket) {
+        case 'success': successCount++; break;
+        case 'skipped': skippedCount++; break;
+        case 'failed': failedCount++; break;
+        case 'unknown': unknownCount++; break;
+        // 'none'（登录墙/风控挑战）不计入四类计数
       }
     };
 
     // d. 落库（UPSERT 支持断点续跑）。抽成函数：重试终止分支也需先落库当前条再 break。
     const persistItem = () => {
       processedCount++; // 每条落库计一次实际处理数（§缺陷2 对账准确性）
+      const o = latestOutcome!;
       const actionFinishedAt = now();
       itemsRepo.upsert({
         jobId,
         sourceItemId: row.id,
-        precheckStatus,
-        preActionState: precheckStatus,
-        actionStatus,
-        postActionState: actionStatus,
+        precheckStatus: o.precheckStatus,
+        preActionState: o.precheckStatus,
+        actionStatus: o.actionStatus,
+        postActionState: o.actionStatus,
         actionStartedAt,
         actionFinishedAt,
-        verifiedAt: actionStatus === ACTION_STATUS_UNFAVORITED ? actionFinishedAt : null,
-        lastErrorCode,
-        lastErrorMessage,
+        verifiedAt: o.actionStatus === ACTION_STATUS_UNFAVORITED ? actionFinishedAt : null,
+        lastErrorCode: o.lastErrorCode,
+        lastErrorMessage: o.lastErrorMessage,
         createdAt: ts,
         updatedAt: actionFinishedAt,
       });
@@ -339,32 +409,34 @@ export async function runCleanupUnfavorite(
         attemptsRepo.create({
           cleanupItemId: itemRow.id,
           attemptNo: 1,
-          preActionState: precheckStatus,
-          actionResult: actionStatus,
-          postActionState: actionStatus,
+          preActionState: o.precheckStatus,
+          actionResult: o.actionStatus,
+          postActionState: o.actionStatus,
           startedAt: actionStartedAt,
           finishedAt: actionFinishedAt,
-          errorCode: lastErrorCode,
-          errorMessage: lastErrorMessage,
+          errorCode: o.lastErrorCode,
+          errorMessage: o.lastErrorMessage,
           createdAt: actionFinishedAt,
         });
       }
     };
 
-    let { hardFailed, detectedState } = await attemptOnce();
+    const first = await attemptOnce();
+    observeAttempt(first);
 
     // §5/§14.12 受控中断：检测到登录墙/风控挑战 → 立即落库当前条并终止任务，
     // 不走 15 分钟硬等（风控期重试无意义，且延长无登录状态的操作会加剧指纹风险）。
     // 提示用户重新登录后重跑（已处理的成功项由 cleanup_items 续跑排除）。
-    if (detectedState === 'login_required' || detectedState === 'challenge_required') {
+    if (first.detectedState === 'login_required' || first.detectedState === 'challenge_required') {
       loginPauseCount++;
+      applyFinalCount(first); // countBucket='none'，实际不累加，但保持契约一致
       persistItem();
       terminated = true;
-      pauseReason = detectedState;
+      pauseReason = first.detectedState;
       opts.onLog?.({
         level: 'warn',
         message:
-          detectedState === 'login_required'
+          first.detectedState === 'login_required'
             ? '检测到登录失效，受控中断任务（请重新登录后重跑）'
             : '检测到风控验证挑战，受控中断任务（稍后重跑）',
       });
@@ -374,13 +446,14 @@ export async function runCleanupUnfavorite(
     // §18.1 失败递增等待 + 有限重试：出现真正失败（风控等）时，原地等待冷却后重试当前条。
     // 等待时长逐轮递增（15→30→45 分钟），给累积风控信号更长冷却窗口；达 MAX_RETRY_ATTEMPTS
     // 仍失败则放弃该条（标记失败、继续下一条），而非终止整个任务——仅取消/登录墙才终止任务。
-    if (hardFailed && !opts.isCancelled?.()) {
+    if (first.hardFailed && !opts.isCancelled?.()) {
+      let stillFailed = true;
       for (let attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
         if (opts.isCancelled?.()) break;
         const waitMs = RETRY_BACKOFF_BASE_MS * attempt; // 15/30/45 分钟
         opts.onLog?.({
           level: 'warn',
-          message: `取消收藏失败（${lastErrorMessage}），原地等待 ${Math.round(waitMs / 60000)} 分钟后重试当前条（第 ${attempt}/${MAX_RETRY_ATTEMPTS} 次）...`,
+          message: `取消收藏失败（${latestOutcome!.lastErrorMessage}），原地等待 ${Math.round(waitMs / 60000)} 分钟后重试当前条（第 ${attempt}/${MAX_RETRY_ATTEMPTS} 次）...`,
         });
         // 分段等待，每段检查取消，支持中途终止。用固定段数（而非 Date.now 截止），
         // 使注入 sleepFn 的测试不依赖真实时间流逝即可跑完等待。
@@ -390,16 +463,15 @@ export async function runCleanupUnfavorite(
           await sleep(BACKOFF_POLL_INTERVAL_MS);
         }
         if (opts.isCancelled?.()) break;
-        // 重试前重置本次计数的临时状态（attemptOnce 失败时 failedCount+1，重试需回退）
-        if (actionStatus === 'verification_failed' || actionStatus === 'permanent_failed') {
-          failedCount--;
-        }
+        // 重试：observeAttempt 记录本次尝试的可观测信号；计数只在最终落库前应用一次，
+        // 避免重试期间"先 failed++ 后 success++"的重复计数（M4 修复）。
         const retry = await attemptOnce();
-        if (!retry.hardFailed) break; // 重试转成功/非失败态，跳出重试循环
+        observeAttempt(retry);
+        if (!retry.hardFailed) { stillFailed = false; break; }
         // 仍失败 → 进入下一轮更长等待
       }
       // 重试循环结束后仍处于失败态 → 放弃该条，继续下一条（不置 terminated，外层 for 继续推进）
-      if (!opts.isCancelled?.() && (actionStatus === 'verification_failed' || actionStatus === 'permanent_failed')) {
+      if (!opts.isCancelled?.() && stillFailed) {
         opts.onLog?.({
           level: 'error',
           message: `已达重试上限（${MAX_RETRY_ATTEMPTS} 次），放弃该条，继续下一条：已处理 ${i + 1}/${rows.length} 条`,
@@ -407,7 +479,8 @@ export async function runCleanupUnfavorite(
       }
     }
 
-    // d. 落库（UPSERT 支持断点续跑）。
+    // d. 落库（UPSERT 支持断点续跑）。计数按最终结果累加一次（含重试转成功）。
+    applyFinalCount(latestOutcome!);
     persistItem();
 
     // §18.1 条目间等待（防风控）：非最后一条、且未被取消时，按 intervalMs±40% 抖动等待。

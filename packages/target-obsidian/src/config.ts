@@ -38,11 +38,15 @@ export const ObsidianTargetConfigSchema = z
     maxFilenameLength: z.number().int().positive().default(100),
     /**
      * §13.8 分片索引分组维度（有序数组）。默认 `['month', 'content-type']`。
-     * 可组合 `month`、`content-type`、`collection`、`notebook`。空数组 = 单一分片。
+     * 可组合 `month`、`content-type`、`collection`。空数组 = 单一分片。
      * 供 Obsidian 适配器的 renderIndex 生成分片索引用。
+     *
+     * `notebook` 维度此前在枚举中声明但 buildShardKey 未实现（IndexEntry 无
+     * notebook 字段），配置后所有条目静默落入单一分片。现从枚举移除以保持
+     * 配置契约与实现一致；待阶段 4 notebook 数据源接入后再补回。
      */
     indexGroupBy: z
-      .array(z.enum(['month', 'content-type', 'collection', 'notebook']))
+      .array(z.enum(['month', 'content-type', 'collection']))
       .default(['month', 'content-type']),
     /**
      * 内部注入键（非用户配置）：Job Runner 注入的 migration_job_id，

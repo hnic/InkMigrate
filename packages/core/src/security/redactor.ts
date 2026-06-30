@@ -8,6 +8,8 @@ const COOKIE_RE = /(\bcookie\s*[:=]\s*)([^\n\r]+)/gi;
 // Authorization 头：整个剩余值。
 const AUTH_RE = /(\bauthorization\s*[:=]\s*)([^\n\r]+)/gi;
 // 任意 `*_token` 或单独 `token` 的赋值。
+// 注意：`[\w-]*` 含下划线，故 `access_token_count: 5` 也会匹配——这是【有意的
+// 过度脱敏】（false positive 优于泄漏真实 token）。安全工具宁多脱敏勿少脱敏。
 const TOKEN_RE = /(\b[\w-]*token\s*[:=]\s*)(\S+)/gi;
 // 中英文验证码：保留前缀冒号或等号。
 const VERIFYCODE_RE =

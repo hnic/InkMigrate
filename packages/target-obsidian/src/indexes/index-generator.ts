@@ -1,6 +1,6 @@
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
-import { join, dirname, relative } from 'node:path';
-import { assertSymlinkSafe, writtenFileHash, resolveWithin, sanitizeFilename } from '@inkmigrate/core';
+import { dirname, relative } from 'node:path';
+import { assertWriteDirSafe, writtenFileHash, resolveWithin, sanitizeFilename } from '@inkmigrate/core';
 import type { ObsidianTargetConfig } from '../config.js';
 
 export interface IndexEntry {
@@ -119,6 +119,12 @@ function buildShardKey(
       parts.push(entry.contentKind);
     } else if (dim === 'collection') {
       parts.push(entry.collections[0] ?? '未分组');
+    } else {
+      // 防御：config schema 已限制枚举，新增维度必须在此实现，
+      // 否则该维度会被静默忽略，所有条目落入错误分片。
+      throw new Error(
+        `buildShardKey: unsupported groupBy dimension "${dim}" (add implementation or extend schema)`,
+      );
     }
   }
   return parts.join('-') || '全部';
@@ -195,10 +201,10 @@ function writeShard(
   }
 
   // §13.2 符号链接逃逸防护：先建目录链，再对【父目录】解引用确认位于 Vault 内。
-  // 目标文件可能尚不存在（realpathSync 会 ENOENT），符号链接攻击面在父目录链，
-  // 故校验父目录即可；与 atomicWrite 对 tmpPath 父目录的校验等价。
-  mkdirSync(join(abs, '..'), { recursive: true });
-  assertSymlinkSafe(vaultPath, join(abs, '..'));
+  // 用 core 的统一 assertWriteDirSafe，与其它写入点保持一致语义（L3）。
+  const parentDir = dirname(abs);
+  mkdirSync(parentDir, { recursive: true });
+  assertWriteDirSafe(vaultPath, abs);
   writeFileSync(abs, content, 'utf8');
   return { hash: writtenFileHash(Buffer.from(content, 'utf8')), skipped: false };
 }

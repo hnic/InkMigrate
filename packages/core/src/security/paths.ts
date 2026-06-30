@@ -44,3 +44,17 @@ export function assertSymlinkSafe(root: string, target: string): void {
     );
   }
 }
+
+/**
+ * §13.2 写入前的统一符号链接防护：对【父目录】解引用确认位于 `root` 内。
+ *
+ * 目标文件可能尚不存在（realpathSync 会 ENOENT），符号链接攻击面在父目录链，
+ * 故校验父目录即可。这是 atomic-write / writeShard / 后续新增写入点应共用的
+ * 一致语义，避免每处各自处理 ENOENT 与目录创建的细节差异。
+ *
+ * 调用方应在 mkdirSync(parentDir, { recursive: true }) 之后、writeFileSync 之前调用。
+ */
+export function assertWriteDirSafe(root: string, targetAbsPath: string): void {
+  const parentDir = resolve(targetAbsPath, '..');
+  assertSymlinkSafe(root, parentDir);
+}

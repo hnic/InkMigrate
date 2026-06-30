@@ -34,6 +34,9 @@ describe('stable-keys (§4, §13.4)', () => {
     it('supports raw fingerprint input for sources without structured id', () => {
       expect(computeFingerprint({ raw: 'whatever' })).toMatch(/^sha256:[0-9a-f]{64}$/);
     });
+    it('throws when all identity fields are empty (avoid fixed-hash collision)', () => {
+      expect(() => computeFingerprint({})).toThrow(/all identity fields are empty/);
+    });
   });
 
   describe('computeStableKey', () => {

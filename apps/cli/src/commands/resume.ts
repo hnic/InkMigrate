@@ -3,7 +3,6 @@ import {
   openDatabase,
   runMigrationJob,
   MigrationJobs,
-  type SourceAdapter,
   type TargetContext,
   type DB,
 } from '@inkmigrate/core';

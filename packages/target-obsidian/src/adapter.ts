@@ -24,7 +24,6 @@ import {
 } from './indexes/index-generator.js';
 import type { ObsidianWriteResult } from './result.js';
 import { existsSync, readFileSync } from 'node:fs';
-import { stat } from 'node:fs/promises';
 
 export const OBSIDIAN_TARGET_KIND = 'obsidian' as const;
 export const OBSIDIAN_TARGET_VERSION = '1.0.0' as const;
@@ -108,31 +107,19 @@ async function planNote(
     stableShortId,
   });
 
-  // 文件名冲突解决：使用异步 stat 检查文件是否存在（不阻塞事件循环）
-  async function fileExists(p: string): Promise<boolean> {
-    try {
-      await stat(p);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  // 文件名冲突解决：检查磁盘文件 + 当前 Job 内已分配路径（防止并发穿透）
-  async function pathInUse(p: string): Promise<boolean> {
-    if (assignedPaths.has(p)) return true;
-    return fileExists(noteAbsolutePath(config.vaultPath, p));
-  }
-
-  if (await pathInUse(relativePath)) {
-    const baseName = relativePath.replace(/\.md$/, '');
-    let suffix = 2;
-    let candidate = relativePath;
-    while (await pathInUse(candidate)) {
-      candidate = `${baseName}-${suffix}.md`;
-      suffix++;
-    }
-    relativePath = candidate;
+  // 文件名冲突解决：stableShortId 后缀已保证不同指纹落到不同稳定路径（§13.4），
+  // 同一指纹重跑幂等地落到同一路径。故不再用 stat 检查磁盘文件——stat 预检
+  // 既存在 TOCTOU 竞态（stat 与 atomicWrite 之间另一并发 Job 可能抢先写入），
+  // 又会破坏幂等性（重跑时把已存在的幂等文件误判为冲突，生成 -2/-3 冗余副本）。
+  //
+  // 仅保留 assignedPaths（同 Job 内去重 Set，同步操作无竞态）作为防御：
+  // 处理同 Job 内两个不同指纹因 sanitize 后 title + shortId 恰好同形的极端情况。
+  // 真正的跨 Job 并发冲突由 DB 的 UNIQUE(target_instance_id, relative_path) 约束
+  // 兜底——writeNote 落库时若撞约束会抛错，由上层标记为 conflict，不静默覆盖。
+  let suffix = 2;
+  while (assignedPaths.has(relativePath)) {
+    relativePath = `${relativePath.replace(/\.md$/, '')}-${suffix}.md`;
+    suffix++;
   }
   assignedPaths.add(relativePath);
 

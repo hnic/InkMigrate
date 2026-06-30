@@ -10,6 +10,7 @@ import {
   type TargetContext,
   type JobStatus,
   canResumeFrom,
+  sourceContentHash,
 } from '@inkmigrate/core';
 import { MigrationJobs } from '@inkmigrate/core';
 import {
@@ -24,27 +25,51 @@ import {
   type ToutiaoBrowserAdapterConfig,
 } from '@inkmigrate/source-toutiao';
 import { createObsidianTarget } from '@inkmigrate/target-obsidian';
-import { rmSync, existsSync, mkdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { rmSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { homedir } from 'node:os';
 
-/** 展开路径中的 ~ 为用户主目录。 */
+/**
+ * 展开路径中的 ~ 为用户主目录。
+ * 兼容 POSIX（~/）与 Windows（~\）分隔符。注意 Windows 上 ~ 并非 shell 默认
+ * 展开形式，但 GUI/用户可能手填；homedir() 在各平台都返回正确主目录。
+ */
 function expandHome(p: string): string {
   if (p.startsWith('~/')) return join(homedir(), p.slice(2));
+  if (p.startsWith('~\\')) return join(homedir(), p.slice(2));
   if (p === '~') return homedir();
   return p;
 }
 
-/** 确保实例记录存在（FK 约束要求）。只插入对应角色的表。 */
-function ensureInstance(db: DB, id: string, adapterKind: string, role: 'source' | 'target'): void {
+/**
+ * 确保实例记录存在（FK 约束要求）。只插入对应角色的表。
+ * config_hash 反映该实例的配置指纹；若实例已存在但配置哈希变化（用户改了
+ * vaultPath/importSubdir 等关键配置），更新 config_hash 以便后续审计/续跑
+ * 能识别"配置已变"，而非误用旧 Job 的路径假设。
+ */
+function ensureInstance(
+  db: DB,
+  id: string,
+  adapterKind: string,
+  role: 'source' | 'target',
+  config: Record<string, unknown>,
+): void {
   const table = role === 'source' ? 'source_instances' : 'target_instances';
-  const existing = db.prepare(`SELECT id FROM ${table} WHERE id = ?`).get(id);
-  if (!existing) {
-    const nowTs = new Date().toISOString();
+  const configHash = computeConfigHash(config);
+  const existing = db
+    .prepare(`SELECT config_hash AS configHash FROM ${table} WHERE id = ?`)
+    .get(id) as { configHash: string } | undefined;
+  const nowTs = new Date().toISOString();
+  if (existing === undefined) {
     db.prepare(
       `INSERT INTO ${table}(id,adapter_kind,adapter_version,adapter_api_version,config_hash,created_at,updated_at)
        VALUES(?,?,?,?,?,?,?)`,
-    ).run(id, adapterKind, '1.0.0', '1.0.0', 'h', nowTs, nowTs);
+    ).run(id, adapterKind, '1.0.0', '1.0.0', configHash, nowTs, nowTs);
+  } else if (existing.configHash !== configHash) {
+    // 配置已变：更新 config_hash + updated_at（审计语义）
+    db.prepare(
+      `UPDATE ${table} SET config_hash = ?, updated_at = ? WHERE id = ?`,
+    ).run(configHash, nowTs, id);
   }
 }
 
@@ -61,6 +86,56 @@ function expandPaths<T>(
     }
   }
   return result as T;
+}
+
+/**
+ * 实例 ID / Job ID 合法字符集：字母、数字、下划线、连字符，且非空。
+ * RPC 是信任边界（GUI 表单校验不可信赖），必须显式校验，否则空串或含
+ * 路径分隔符的值会污染后续路径/锁名/JobId 构造。
+ */
+const ID_RE = /^[A-Za-z0-9_-]+$/;
+
+/** 校验实例 ID / Job ID：非空且仅含合法字符。失败抛错。 */
+function requireId(value: unknown, field: string): asserts value is string {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`${field} 不能为空`);
+  }
+  if (!ID_RE.test(value)) {
+    throw new Error(`${field} 含非法字符（仅允许字母、数字、下划线、连字符）：${value}`);
+  }
+}
+
+/** 校验 stateDir 非空字符串（路径展开后）。 */
+function requireStateDir(value: unknown): asserts value is string {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error('stateDir 不能为空');
+  }
+}
+
+/** 校验 vaultPath 非空字符串。 */
+function requireVaultPath(value: unknown): asserts value is string {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error('vaultPath 不能为空');
+  }
+}
+
+/**
+ * 计算适配器配置的稳定哈希，用于 source/target_instances.config_hash 审计列。
+ * 配置变更（vaultPath、importSubdir 等）会改变哈希，使系统能识别"配置已变"
+ * 而非误用旧 Job 的路径假设。复用 core 的 sha256 算法。
+ */
+function computeConfigHash(config: Record<string, unknown>): string {
+  return sourceContentHash(JSON.stringify(stableStringify(config)));
+}
+
+/** 稳定序列化：按 key 排序，消除对象键顺序对哈希的影响。 */
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const entries = Object.keys(value as Record<string, unknown>)
+    .sort()
+    .map((k) => `${JSON.stringify(k)}:${stableStringify((value as Record<string, unknown>)[k])}`);
+  return `{${entries.join(',')}}`;
 }
 import {
   registerMethod,
@@ -109,6 +184,8 @@ export function registerAllHandlers(): void {
 
 async function handleAuthLogin(params: AuthLoginParams | undefined): Promise<AuthLoginResult> {
   if (params === undefined) throw new Error('missing params');
+  requireStateDir(params.stateDir);
+  requireId(params.source, 'source');
   const profileDir = ensureProfileDir(params.stateDir, params.source);
   const session = new ToutiaoBrowserSession({ profileDir, headless: false });
   try {
@@ -165,6 +242,8 @@ async function handleAuthLogin(params: AuthLoginParams | undefined): Promise<Aut
 
 async function handleAuthStatus(params: AuthStatusParams | undefined): Promise<AuthStatusResult> {
   if (params === undefined) throw new Error('missing params');
+  requireStateDir(params.stateDir);
+  requireId(params.source, 'source');
   const pPath = profilePath(params.stateDir, params.source);
   return {
     profileExists: profileExists(params.stateDir, params.source),
@@ -174,6 +253,8 @@ async function handleAuthStatus(params: AuthStatusParams | undefined): Promise<A
 
 async function handleAuthClear(params: AuthStatusParams | undefined): Promise<{ cleared: boolean }> {
   if (params === undefined) throw new Error('missing params');
+  requireStateDir(params.stateDir);
+  requireId(params.source, 'source');
   const pPath = profilePath(params.stateDir, params.source);
   if (!profileExists(params.stateDir, params.source)) {
     return { cleared: false };
@@ -186,6 +267,11 @@ async function handleAuthClear(params: AuthStatusParams | undefined): Promise<{ 
 
 async function handleScanStart(params: ScanStartParams | undefined): Promise<ScanStartResult> {
   if (params === undefined) throw new Error('missing params');
+  requireStateDir(params.stateDir);
+  requireId(params.source, 'source');
+  if (typeof params.favoritesUrl !== 'string' || params.favoritesUrl.length === 0) {
+    throw new Error('favoritesUrl 不能为空');
+  }
   resetCancel(); // 新任务前清除旧的取消状态
   const profileDir = profilePath(params.stateDir, params.source);
   if (!profileExists(params.stateDir, params.source)) {
@@ -281,6 +367,8 @@ async function handleMigrateResumable(
   params: MigrateResumableParams | undefined,
 ): Promise<MigrateResumableResult> {
   if (params === undefined) throw new Error('missing params');
+  requireStateDir(params.stateDir);
+  requireId(params.source, 'source');
   const db: DB = openDatabase({ path: join(params.stateDir, 'inkmigrate.sqlite') });
   try {
     const job = resolveResumableJob(db, params.source);
@@ -349,11 +437,25 @@ async function runMigrateJob(
   params: MigrateStartParams | MigrateResumeParams,
   isResume: boolean,
 ): Promise<MigrateResult> {
+  // M2 输入校验（信任边界）：在打开 DB 前先拒绝非法参数
+  requireStateDir(params.stateDir);
+  requireVaultPath(params.vaultPath);
+  if (isResume) {
+    requireId((params as MigrateResumeParams).job, 'job');
+  } else {
+    requireId((params as MigrateStartParams).source, 'source');
+    requireId((params as MigrateStartParams).target, 'target');
+  }
+
   resetCancel(); // 新任务前清除旧的取消状态
   // 动态导入避免顶层依赖循环
   const { runMigrationJob } = await import('@inkmigrate/core');
 
   mkdirSync(params.stateDir, { recursive: true });
+  // 每个 RPC 各自 open/close 连接：better-sqlite3 在 WAL 模式下连接打开很轻量，
+  // 且长任务（migrate）与瞬时查询（status）用各自连接读到的都是已提交快照（WAL 隔离），
+  // 不会读到半提交状态。未做进程级连接复用——多 stateDir 场景下连接生命周期管理复杂，
+  // 易引入悬挂连接；当前访问模式下重开的代价可忽略，故优先正确性与简单性。
   const db: DB = openDatabase({ path: join(params.stateDir, 'inkmigrate.sqlite') });
 
   try {
@@ -374,9 +476,17 @@ async function runMigrateJob(
       targetInstanceId = startParams.target;
     }
 
-    // 确保实例存在（FK 约束要求）
-    ensureInstance(db, sourceInstanceId, 'toutiao', 'source');
-    ensureInstance(db, targetInstanceId, 'obsidian', 'target');
+    // 构造 source adapter（profileDir 在 ensureInstance 之前计算，用于 config_hash）
+    const profileDir = profilePath(params.stateDir, sourceInstanceId);
+    if (!profileExists(params.stateDir, sourceInstanceId)) {
+      throw new Error(`Profile 不存在：${profileDir}，请先 auth.login`);
+    }
+
+    // 确保实例存在（FK 约束要求）。config_hash 反映各实例配置指纹。
+    const sourceConfig: Record<string, unknown> = { sourceInstanceId, profileDir, headless: false };
+    const targetConfig: Record<string, unknown> = { vaultPath: params.vaultPath };
+    ensureInstance(db, sourceInstanceId, 'toutiao', 'source', sourceConfig);
+    ensureInstance(db, targetInstanceId, 'obsidian', 'target', targetConfig);
 
     sendNotification('log', { level: 'info', message: isResume ? `续跑 Job ${(params as MigrateResumeParams).job}...` : '正在创建迁移任务...' });
 
@@ -393,11 +503,7 @@ async function runMigrateJob(
       updatedAt: now,
     });
 
-    // 构造 source adapter
-    const profileDir = profilePath(params.stateDir, sourceInstanceId);
-    if (!profileExists(params.stateDir, sourceInstanceId)) {
-      throw new Error(`Profile 不存在：${profileDir}，请先 auth.login`);
-    }
+    // 构造 source adapter（adapterConfig 用已计算的 profileDir）
     const adapterConfig: ToutiaoBrowserAdapterConfig = {
       sourceInstanceId,
       profileDir,
@@ -495,6 +601,8 @@ async function handleCleanupUnfavorite(
   params: CleanupUnfavoriteParams | undefined,
 ): Promise<CleanupResult> {
   if (params === undefined) throw new Error('missing params');
+  requireStateDir(params.stateDir);
+  requireId(params.source, 'source');
   resetCancel(); // 新任务前清除旧的取消状态
   const db: DB = openDatabase({ path: join(params.stateDir, 'inkmigrate.sqlite') });
   try {
@@ -586,6 +694,8 @@ async function handleStatusQuery(
   params: StatusQueryParams | undefined,
 ): Promise<StatusQueryResult> {
   if (params === undefined) throw new Error('missing params');
+  requireStateDir(params.stateDir);
+  requireId(params.job, 'job');
   const db: DB = openDatabase({ path: join(params.stateDir, 'inkmigrate.sqlite') });
   try {
     const job = new MigrationJobs(db).get(params.job);

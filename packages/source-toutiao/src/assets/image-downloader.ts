@@ -66,11 +66,10 @@ export async function downloadImage(i: DownloadInput): Promise<DownloadResult> {
     const result = await tryDownloadOnce(i);
     if (result.ok) return result;
     lastError = result;
-    // 指数退避（仅对网络错误，不对 4xx）
-    if (
-      attempt < maxRetries &&
-      !/status|4\d\d|5\d\d/i.test(result.reason)
-    ) {
+    // 指数退避（仅对网络错误，不对 HTTP 状态码错误——4xx/5xx 重试无意义）。
+    // 用结构化 httpStatus 判定而非字符串正则：后者依赖 reason 文案，本地化/重构会失效。
+    const isHttpError = !result.ok && result.httpStatus !== undefined;
+    if (attempt < maxRetries && !isHttpError) {
       await sleep(1000 * Math.pow(2, attempt - 1));
     }
   }

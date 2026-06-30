@@ -55,7 +55,7 @@ export function postCleanMarkdown(md: string): string {
   // 折叠异常嵌套链接（多次扫描，处理三层以上嵌套）
   for (let i = 0; i < 3; i++) {
     const before = s;
-    s = s.replace(NESTED_LINK, (match, text: string, url: string) => {
+    s = s.replace(NESTED_LINK, (match, text: string, _url: string) => {
       if (/\]\([^)]*\)/.test(text)) {
         const inner = /\[([^\]]*)\]\(([^)]*)\)/.exec(text);
         if (inner) {
