@@ -63,25 +63,35 @@ export function useSidecar() {
   };
 
   const rpcCall = useCallback(async (method: string, params: Record<string, unknown>) => {
-    setBusy(true);
-    setProgress(null);
-    setActivePhase(METHOD_PHASE[method] ?? null);
-    // I30: 清掉上一轮残留的清进度定时器，避免它在 2 秒后清掉新任务的进度条。
-    if (progressClearTimer.current !== null) {
-      clearTimeout(progressClearTimer.current);
-      progressClearTimer.current = null;
+    // R11: 只有长任务（在 METHOD_PHASE 中有声明的）才翻转 busy/progress/activePhase。
+    // 读操作（status.query / migrate.resumable 等）不应影响全局 busy，否则查询报告时
+    // 顶栏误显示「处理中」且清空进度条。
+    const isLongTask = method in METHOD_PHASE;
+    if (isLongTask) {
+      setBusy(true);
+      setProgress(null);
+      setActivePhase(METHOD_PHASE[method] ?? null);
+      // I30: 清掉上一轮残留的清进度定时器，避免它在 2 秒后清掉新任务的进度条。
+      if (progressClearTimer.current !== null) {
+        clearTimeout(progressClearTimer.current);
+        progressClearTimer.current = null;
+      }
     }
     try {
       const result = await invoke('send_rpc', { method, params });
-      // 延迟 2 秒清除进度条，让用户看到 100% 完成状态
-      progressClearTimer.current = setTimeout(() => {
-        setProgress(null);
-        progressClearTimer.current = null;
-      }, 2000);
+      if (isLongTask) {
+        // 延迟 2 秒清除进度条，让用户看到 100% 完成状态
+        progressClearTimer.current = setTimeout(() => {
+          setProgress(null);
+          progressClearTimer.current = null;
+        }, 2000);
+      }
       return result;
     } finally {
-      setBusy(false);
-      setActivePhase(null);
+      if (isLongTask) {
+        setBusy(false);
+        setActivePhase(null);
+      }
     }
   }, []);
 
