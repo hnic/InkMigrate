@@ -23,19 +23,7 @@ import {
 import { createObsidianTarget } from '@inkmigrate/target-obsidian';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-
-/**
- * L17: 把字符串选项解析为正整数，NaN/非正数时抛错。
- * 防止 parseInt(非数字) 产生 NaN 直达速率控制（I25 封号风险）。
- */
-function parsePositiveInt(raw: string, field: string): number {
-  const n = parseInt(raw, 10);
-  if (!Number.isFinite(n) || n <= 0) {
-    console.error(`无效的 ${field} 值："${raw}"，必须是正整数`);
-    process.exit(1);
-  }
-  return n;
-}
+import { parsePositiveInt } from '../util.js';
 
 /**
  * §22 `inkmigrate migrate` 命令。
@@ -96,7 +84,7 @@ export function createMigrateCommand(): Command {
                   ? { favoritesUrl: opts.favoritesUrl }
                   : {}),
                 ...(opts.maxItems !== undefined
-                  ? { maxScanItems: parseInt(opts.maxItems, 10) }
+                  ? { maxScanItems: parsePositiveInt(opts.maxItems, 'max-items') }
                   : {}),
               });
             })();

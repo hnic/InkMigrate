@@ -7,6 +7,7 @@ import {
   ToutiaoBrowserSession,
 } from '@inkmigrate/source-toutiao';
 import { rmSync } from 'node:fs';
+import { parsePositiveInt } from '../util.js';
 
 /**
  * §12.2 `inkmigrate auth login/clear` 命令。
@@ -57,7 +58,7 @@ export function createAuthCommand(): Command {
           session,
           favoritesUrl:
             opts.favoritesUrl ?? 'https://www.toutiao.com/favorites',
-          loginTimeoutMs: parseInt(opts.timeout, 10),
+          loginTimeoutMs: parsePositiveInt(opts.timeout, 'timeout'),
         });
 
         if (result.state === 'logged-in') {

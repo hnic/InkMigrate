@@ -14,6 +14,7 @@ import {
 import { createObsidianTarget } from '@inkmigrate/target-obsidian';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { parsePositiveInt } from '../util.js';
 
 /**
  * §22 `inkmigrate resume` 命令。
@@ -105,7 +106,9 @@ export function createResumeCommand(): Command {
           profileDir,
           headless: false, // 有头：头条反爬会拦截 headless
           ...(opts.favoritesUrl !== undefined ? { favoritesUrl: opts.favoritesUrl } : {}),
-          ...(opts.maxItems !== undefined ? { maxScanItems: parseInt(opts.maxItems, 10) } : {}),
+          ...(opts.maxItems !== undefined
+            ? { maxScanItems: parsePositiveInt(opts.maxItems, 'max-items') }
+            : {}),
         });
 
         const targetAdapter = createObsidianTarget();
@@ -126,26 +129,39 @@ export function createResumeCommand(): Command {
 
         console.log(`\n开始恢复迁移 Job ${jobId}（跳过 ${verifiedItems} 条已完成）...`);
 
-        const result = await runMigrationJob({
-          db,
-          jobId,
-          sourceAdapter,
-          targetAdapter,
-          sourceInstanceId,
-          targetInstanceId,
-          targetContext,
-          workspaceDir: opts.stateDir,
-          reportsDir: join(opts.stateDir, 'reports'),
-        });
+        // R2: SIGINT 协作取消（与 migrate 命令一致，L16 漏了 resume）。
+        let cancelled = false;
+        const onSigInt = () => {
+          cancelled = true;
+          console.log('\n收到终止信号，正在停止当前任务（已处理项已落库，可再次 resume）...');
+        };
+        process.on('SIGINT', onSigInt);
 
-        console.log(`\n迁移完成：`);
-        console.log(`  status: ${result.status}`);
-        console.log(`  scan_count: ${result.scanCount}`);
-        console.log(`  reconciliation: ${result.reconciliationOk ? '通过' : '失败'}`);
-        if (result.reconciliationReason) {
-          console.log(`  reason: ${result.reconciliationReason}`);
+        try {
+          const result = await runMigrationJob({
+            db,
+            jobId,
+            sourceAdapter,
+            targetAdapter,
+            sourceInstanceId,
+            targetInstanceId,
+            targetContext,
+            workspaceDir: opts.stateDir,
+            reportsDir: join(opts.stateDir, 'reports'),
+            isCancelled: () => cancelled,
+          });
+
+          console.log(`\n迁移完成：`);
+          console.log(`  status: ${result.status}`);
+          console.log(`  scan_count: ${result.scanCount}`);
+          console.log(`  reconciliation: ${result.reconciliationOk ? '通过' : '失败'}`);
+          if (result.reconciliationReason) {
+            console.log(`  reason: ${result.reconciliationReason}`);
+          }
+          console.log(`\n报告：${join(opts.stateDir, 'reports', jobId, 'summary.md')}`);
+        } finally {
+          process.off('SIGINT', onSigInt);
         }
-        console.log(`\n报告：${join(opts.stateDir, 'reports', jobId, 'summary.md')}`);
       } finally {
         db.close();
       }
