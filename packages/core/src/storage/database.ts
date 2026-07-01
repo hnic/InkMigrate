@@ -22,8 +22,26 @@ export function openDatabase(opts: OpenDbOptions): DB {
   if (opts.wal !== false && opts.path !== ':memory:') {
     db.pragma('journal_mode = WAL');
   }
-  db.pragma('foreign_keys = ON');
-  migrate(db);
+  // 迁移期间临时关闭 FK 检查：v3 的表重建（DROP+RENAME）在 foreign_keys=ON 下
+  // 会因子表引用而失败（FOREIGN KEY constraint failed）。SQLite 的标准做法是
+  // 表重建迁移在 FK 关闭时执行（见 SQLite docs "Making Other Kinds Of Table Schema Changes"）。
+  // 迁移完成后重新开启 FK（migrate 内每个迁移各自在事务中保证原子性）。
+  // 仅当 schema_version 表已存在且有未应用的迁移时才需要关 FK（全新库无需）。
+  const hasSchemaTable = db
+    .prepare("SELECT COUNT(*) c FROM sqlite_master WHERE type='table' AND name='schema_version'")
+    .get() as { c: number };
+  if (hasSchemaTable.c > 0 && getCurrentSchemaVersion(db) < SCHEMA_VERSION) {
+    db.pragma('foreign_keys = OFF');
+    try {
+      migrate(db);
+    } finally {
+      db.pragma('foreign_keys = ON');
+    }
+  } else {
+    // 全新库或已是最新版本：FK 保持开启，migrate 安全（CREATE IF NOT EXISTS 不重建表）
+    migrate(db);
+    db.pragma('foreign_keys = ON');
+  }
   return db;
 }
 
