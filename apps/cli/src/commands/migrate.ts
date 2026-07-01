@@ -25,6 +25,19 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
+ * L17: 把字符串选项解析为正整数，NaN/非正数时抛错。
+ * 防止 parseInt(非数字) 产生 NaN 直达速率控制（I25 封号风险）。
+ */
+function parsePositiveInt(raw: string, field: string): number {
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n <= 0) {
+    console.error(`无效的 ${field} 值："${raw}"，必须是正整数`);
+    process.exit(1);
+  }
+  return n;
+}
+
+/**
  * §22 `inkmigrate migrate` 命令。
  *
  * 驱动完整的 scan→extract→write→verify→reconcile→report 闭环。
@@ -139,7 +152,11 @@ export function createMigrateCommand(): Command {
           targetContext,
           workspaceDir: opts.stateDir,
           reportsDir: join(opts.stateDir, 'reports'),
-          ...(opts.interval !== undefined ? { intervalMs: parseInt(opts.interval, 10) } : {}),
+          // L17: parseInt 可能产生 NaN（用户传非数字），校验后再传入，避免 NaN 直达
+          // 速率控制（I25：NaN interval → 最快速率 → 封号）。
+          ...(opts.interval !== undefined
+            ? { intervalMs: parsePositiveInt(opts.interval, 'interval') }
+            : {}),
         });
 
         console.log(`\n迁移完成：`);

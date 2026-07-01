@@ -82,6 +82,28 @@ function redactValue(v: unknown, r: Redactor): unknown {
   if (typeof v === 'string') return r(v);
   if (Array.isArray(v)) return v.map((x) => redactValue(x, r));
   if (typeof v === 'object') {
+    // L3: Map/Set/Error.cause 等非普通对象，Object.entries 不遍历其内部条目，
+    // 需显式处理避免泄漏。Error 的 message/stack 是可枚举的（已被上面分支覆盖），
+    // 但 Error.cause 需递归；Map/Set 转 entry 处理。
+    if (v instanceof Map) {
+      const out = new Map();
+      for (const [k, val] of v) out.set(redactValue(k, r), redactValue(val, r));
+      return out;
+    }
+    if (v instanceof Set) {
+      return new Set([...v].map((x) => redactValue(x, r)));
+    }
+    if (v instanceof Error) {
+      const out: Record<string, unknown> = {};
+      for (const [k, val] of Object.entries(v)) {
+        out[k] = redactValue(val, r);
+      }
+      // Error.cause 可能是嵌套 Error 或含敏感信息，递归处理
+      if (v.cause !== undefined) {
+        out.cause = redactValue(v.cause, r);
+      }
+      return out;
+    }
     const out: Record<string, unknown> = {};
     for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
       out[k] = redactValue(val, r);

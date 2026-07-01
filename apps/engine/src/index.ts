@@ -22,7 +22,10 @@ function main(): void {
     logToStderr('error', `未处理的 Promise 拒绝：${String(reason)}`);
   });
   process.on('uncaughtException', (err) => {
-    logToStderr('error', `未捕获异常：${err.message}\n${err.stack ?? ''}`);
+    // L12: Node 官方文档警告 uncaughtException 后进程状态可能已损坏，继续运行不安全。
+    // 记录后退出（非零码），让宿主重启一个干净的 sidecar，而非带着未知状态继续服务。
+    logToStderr('error', `未捕获异常，进程将退出以避免损坏状态：${err.message}\n${err.stack ?? ''}`);
+    process.exit(1);
   });
 
   // 检查堆大小是否足够（全量迁移数千条需要大量内存）

@@ -9,8 +9,17 @@ export function createStatusCommand(): Command {
     .requiredOption('--state-dir <path>', 'workspace stateDir')
     .action((opts: { job: string; stateDir: string }) => {
       const dbPath = join(opts.stateDir, 'inkmigrate.sqlite');
+      let db;
       try {
-        const db = openDatabase({ path: dbPath });
+        db = openDatabase({ path: dbPath });
+      } catch (e) {
+        // L18: 区分「DB 不可读」与「Job 不存在」（原 catch 混淆两者）。
+        console.error(
+          `无法打开数据库 ${dbPath}：${e instanceof Error ? e.message : String(e)}`,
+        );
+        process.exit(1);
+      }
+      try {
         const job = new MigrationJobs(db).get(opts.job);
         db.close();
         if (job === undefined) {
@@ -26,8 +35,10 @@ export function createStatusCommand(): Command {
         console.log(`  failed: ${job.failedCount}`);
         console.log(`  conflict: ${job.conflictCount}`);
         console.log(`  skipped: ${job.skippedCount}`);
-      } catch {
-        console.error(`无法读取数据库或 Job ${opts.job} 不存在`);
+      } catch (e) {
+        console.error(
+          `读取 Job ${opts.job} 失败：${e instanceof Error ? e.message : String(e)}`,
+        );
         process.exit(1);
       }
     });

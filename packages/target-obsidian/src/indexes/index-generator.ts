@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, relative } from 'node:path';
 import { assertWriteDirSafe, writtenFileHash, resolveWithin, sanitizeFilename } from '@inkmigrate/core';
 import { atomicWriteRaw } from '../atomic-write.js';
+import { sanitizePathSegment } from '../paths.js';
 import type { ObsidianTargetConfig } from '../config.js';
 
 export interface IndexEntry {
@@ -56,9 +57,12 @@ export interface GenerateIndexInput {
  * 总入口只链接分片，不直接列出条目。
  */
 export function generateShardIndexes(i: GenerateIndexInput): GenerateIndexResult {
+  // L10: sourceInstanceId 走 sanitizePathSegment 清洗（与 paths.ts 的 note/asset
+  // 路径一致），避免含 / 的 sourceInstanceId 注入额外路径段。原直接拼接，不一致。
+  const safeSourceId = sanitizePathSegment(i.sourceInstanceId);
   // 路径段用数组 + filter(Boolean).join('/') 拼接：importSubdir 为空时自动跳过该段，
   // 绝不产生以 '/' 开头的绝对路径（否则 resolveWithin 判定 escapes root）。
-  const indexDir = [i.config.importSubdir, i.sourceInstanceId, '_索引']
+  const indexDir = [i.config.importSubdir, safeSourceId, '_索引']
     .filter(Boolean)
     .join('/');
   const knownByPath = new Map((i.knownArtifacts ?? []).map((a) => [a.relativePath, a.writtenFileHash]));
@@ -104,7 +108,8 @@ export function generateShardIndexes(i: GenerateIndexInput): GenerateIndexResult
   }
 
   // 同 indexDir：数组拼接避免空 importSubdir 产生绝对路径
-  const entryIndexRel = [i.config.importSubdir, i.sourceInstanceId, `${i.sourceInstanceId}收藏索引.md`]
+  // L10: 用 safeSourceId 保持一致
+  const entryIndexRel = [i.config.importSubdir, safeSourceId, `${sanitizeFilename(safeSourceId)}收藏索引.md`]
     .filter(Boolean)
     .join('/');
   const entryContent = renderEntryIndex(shards, i.sourceInstanceId);

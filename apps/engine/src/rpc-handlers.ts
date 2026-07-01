@@ -652,11 +652,21 @@ async function handleCleanupUnfavorite(
  */
 async function closeAdapterSafely(adapter: { close(): Promise<void> }): Promise<void> {
   const CLOSE_TIMEOUT_MS = 20_000; // 略大于 BrowserSession 内层的 15s，给第一层先兜
+  let timed = false;
+  const timer = new Promise<void>((resolve) => {
+    setTimeout(() => {
+      timed = true;
+      resolve();
+    }, CLOSE_TIMEOUT_MS);
+  });
   try {
-    await Promise.race([
-      adapter.close(),
-      new Promise<void>((resolve) => setTimeout(resolve, CLOSE_TIMEOUT_MS)),
-    ]);
+    await Promise.race([adapter.close(), timer]);
+    if (timed) {
+      // L13: 超时后 adapter.close()（losing 分支）仍在后台运行，可能泄漏 Chromium 进程。
+      // Node 无法真正取消 promise，此处仅记录告警供运维诊断（真正强制终止需 adapter
+      // 提供 force-close 能力，留作后续增强）。
+      logToStderr('warn', 'adapter.close() 超时，后台 close 仍在运行，可能泄漏浏览器进程');
+    }
   } catch (e) {
     logToStderr('warn', `adapter.close() 异常（已忽略）：${e instanceof Error ? e.message : String(e)}`);
   }
