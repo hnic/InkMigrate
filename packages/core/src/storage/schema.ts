@@ -367,6 +367,8 @@ const CLEANUP_ITEM_PRECHECK_STATUSES = [
 const CLEANUP_ITEM_ACTION_STATUSES = [
   'unfavorited_verified', 'already_unfavorited', 'state_unknown',
   'verification_failed', 'skipped',
+  // 特殊中断态（来自 detectedState / 异常路径）
+  'login_required', 'challenge_required', 'permanent_failed',
 ];
 
 function sqlList(values: readonly string[]): string {
