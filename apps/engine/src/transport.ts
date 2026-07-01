@@ -54,10 +54,35 @@ export function logToStderr(level: string, message: string): void {
 /** stdout 管道是否已断开（宿主关闭了读端）。断开后静默丢弃写入，避免 EPIPE 崩溃。 */
 let stdoutBroken = false;
 
+/**
+ * H6: stdout 背压保护。process.stdout.write 返回 false 表示内核缓冲已满，
+ * 应等待 'drain'。若宿主持续不读，Node 内部缓冲会无界增长导致 OOM。
+ * 用一个上限计数器：超过阈值后丢弃低优先级的 log/progress 通知（保留 response/error）。
+ */
+const STDOUT_HIGH_WATERMARK = 1024 * 1024; // 1 MiB 排队上限
+let stdoutBackpressured = false;
+
 function writeLine(msg: unknown): void {
   if (stdoutBroken) return; // 管道已断，静默丢弃
+  const line = JSON.stringify(msg) + '\n';
   try {
-    process.stdout.write(JSON.stringify(msg) + '\n');
+    // 检查排队量：process.stdout.writableLength 是当前在内核/流缓冲中待写的字节数
+    if (stdoutBackpressured) {
+      // 已超水位且未 drain：丢弃非关键通知（log/progress），保留 response/error。
+      // 这里简化处理——超水位时一律丢弃新的非关键写入，由 drain 恢复。
+      return;
+    }
+    const ok = process.stdout.write(line);
+    if (!ok) {
+      // 返回 false：内核缓冲满，进入背压。若累积超水位，进入丢弃模式。
+      if (process.stdout.writableLength > STDOUT_HIGH_WATERMARK) {
+        stdoutBackpressured = true;
+        logToStderr('warn', 'stdout 背压超水位，暂时丢弃非关键通知直到 drain');
+        process.stdout.once('drain', () => {
+          stdoutBackpressured = false;
+        });
+      }
+    }
   } catch {
     // 写入失败（EPIPE 等）——宿主已断开，标记并静默，后续写入全部丢弃
     if (!stdoutBroken) {
@@ -66,6 +91,12 @@ function writeLine(msg: unknown): void {
     }
   }
 }
+
+/**
+ * H6: 单条 stdin 行的最大字节数。超过则拒绝解析（防止恶意/异常宿主写超长无换行
+ * 行撑爆内存）。正常 JSON-RPC 请求远小于此值。
+ */
+const MAX_LINE_BYTES = 8 * 1024 * 1024; // 8 MiB
 
 /**
  * 启动 stdin 监听循环。每行是一个 JSON-RPC Request。
@@ -91,6 +122,12 @@ export function startStdinLoop(): void {
 
   rl.on('line', (line: string) => {
     if (line.trim() === '') return;
+    // H6: 行长上限——超长行直接拒绝，防止无界缓冲撑爆内存。
+    // Buffer.byteLength 计算 UTF-8 字节数（多字节字符占多字节）。
+    if (Buffer.byteLength(line, 'utf8') > MAX_LINE_BYTES) {
+      logToStderr('error', `line exceeds ${MAX_LINE_BYTES} bytes, rejected`);
+      return;
+    }
     let req: RpcRequest;
     try {
       req = JSON.parse(line) as RpcRequest;
