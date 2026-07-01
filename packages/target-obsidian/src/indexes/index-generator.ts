@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, relative } from 'node:path';
 import { assertWriteDirSafe, writtenFileHash, resolveWithin, sanitizeFilename } from '@inkmigrate/core';
 import { atomicWriteRaw } from '../atomic-write.js';
+import { sanitizePathSegment } from '../paths.js';
 import type { ObsidianTargetConfig } from '../config.js';
 
 export interface IndexEntry {
@@ -56,9 +57,12 @@ export interface GenerateIndexInput {
  * 总入口只链接分片，不直接列出条目。
  */
 export function generateShardIndexes(i: GenerateIndexInput): GenerateIndexResult {
+  // L10: sourceInstanceId 走 sanitizePathSegment 清洗（与 paths.ts 的 note/asset
+  // 路径一致），避免含 / 的 sourceInstanceId 注入额外路径段。原直接拼接，不一致。
+  const safeSourceId = sanitizePathSegment(i.sourceInstanceId);
   // 路径段用数组 + filter(Boolean).join('/') 拼接：importSubdir 为空时自动跳过该段，
   // 绝不产生以 '/' 开头的绝对路径（否则 resolveWithin 判定 escapes root）。
-  const indexDir = [i.config.importSubdir, i.sourceInstanceId, '_索引']
+  const indexDir = [i.config.importSubdir, safeSourceId, '_索引']
     .filter(Boolean)
     .join('/');
   const knownByPath = new Map((i.knownArtifacts ?? []).map((a) => [a.relativePath, a.writtenFileHash]));
@@ -104,10 +108,12 @@ export function generateShardIndexes(i: GenerateIndexInput): GenerateIndexResult
   }
 
   // 同 indexDir：数组拼接避免空 importSubdir 产生绝对路径
-  const entryIndexRel = [i.config.importSubdir, i.sourceInstanceId, `${i.sourceInstanceId}收藏索引.md`]
+  // L10: 用 safeSourceId 保持一致
+  const entryIndexRel = [i.config.importSubdir, safeSourceId, `${sanitizeFilename(safeSourceId)}收藏索引.md`]
     .filter(Boolean)
     .join('/');
-  const entryContent = renderEntryIndex(shards, i.sourceInstanceId);
+  // R7: renderEntryIndex 尊重 linkStyle（原始终终用 wikilink，与 shard 渲染不一致）
+  const entryContent = renderEntryIndex(shards, safeSourceId, i.config.linkStyle, indexDir);
   const entryWritten = writeShard(i.vaultPath, entryIndexRel, entryContent, knownByPath.get(entryIndexRel));
 
   return {
@@ -128,8 +134,18 @@ function buildShardKey(
   for (const dim of groupBy) {
     if (dim === 'month') {
       const date = entry.favoritedAt ?? entry.publishedAt ?? '';
-      const m = /^(\d{4}-\d{2})/.exec(date);
-      parts.push(m?.[1] ?? '未知日期');
+      // R10: 校验月份合法性（01-12），避免源数据异常（如 2025-13）产出非法分片名
+      const m = /^(\d{4})-(\d{2})/.exec(date);
+      if (m) {
+        const month = parseInt(m[2]!, 10);
+        if (month >= 1 && month <= 12) {
+          parts.push(`${m[1]}-${m[2]}`);
+        } else {
+          parts.push('未知日期');
+        }
+      } else {
+        parts.push('未知日期');
+      }
     } else if (dim === 'content-type') {
       parts.push(entry.contentKind);
     } else if (dim === 'collection') {
@@ -171,6 +187,9 @@ function renderShardMarkdown(
 function renderEntryIndex(
   shards: readonly ShardResult[],
   sourceInstanceId: string,
+  linkStyle: 'wikilink' | 'markdown',
+  /** entry index 文件所在目录（相对 Vault 根），用于 markdown 链接的相对路径计算。 */
+  entryDir: string,
 ): string {
   const lines: string[] = [
     `# ${sourceInstanceId} 收藏索引`,
@@ -179,8 +198,15 @@ function renderEntryIndex(
     '',
   ];
   for (const shard of shards) {
-    const link = shard.relativePath.replace(/\.md$/, '');
-    lines.push(`- [[${link}|${shard.shardKey}]]`);
+    if (linkStyle === 'wikilink') {
+      const link = shard.relativePath.replace(/\.md$/, '');
+      lines.push(`- [[${link}|${shard.shardKey}]]`);
+    } else {
+      // R7: markdown 模式用相对路径（entry 文件与 shard 文件的相对位置），
+      // 与 renderShardMarkdown 一致，归一化正斜杠。
+      const rel = relative(entryDir, shard.relativePath).split('\\').join('/');
+      lines.push(`- [${shard.shardKey}](${rel})`);
+    }
   }
   lines.push('');
   return lines.join('\n');
@@ -195,6 +221,10 @@ function renderEntryIndex(
  * 2. **重跑保护**（§13.8 "可重复生成且不覆盖用户笔记"）：若调用方传入上一轮的
  *    recordedHash，且磁盘文件已被用户修改（on-disk 哈希 ≠ recordedHash），则**跳过
  *    覆写**，保留用户文件并返回磁盘原哈希 + skipped=true。
+ *
+ *    R8（契约约束）：重跑保护仅在 recordedHash 非 null 时生效。调用方（job-runner）
+ *    必须从 listIndexArtifacts 正确传入 knownIndexArtifacts（R6 已修正其 != null 过滤）。
+ *    若未来新增调用方未传入，首次写入会跳过用户修改检测——新增调用方务必传入。
  *
  * 返回 { hash, skipped } 供 artifact 追踪。
  */

@@ -1,24 +1,15 @@
 import type { DB } from '../database.js';
-import { isJobStatus, type JobStatus } from '../../domain/states.js';
+import { isJobStatus, canJobTransition, type JobStatus } from '../../domain/states.js';
 
 /**
- * §11.1 Job status 合法转换矩阵的本地副本（与 runtime/job-state.ts 的 TRANSITIONS 保持一致）。
- * 内联在仓储层以避免 storage → runtime 的反向分层依赖；状态机变更时两处需同步。
+ * §11.1 跨状态转换 + 自环（同 status 内推进 current_stage）。
+ * M9: 矩阵改为引用 domain/states.ts 的单一真相源，消除本地副本漂移。
  */
-const JOB_TRANSITIONS: Readonly<Record<JobStatus, ReadonlySet<JobStatus>>> = {
-  created: new Set<JobStatus>(['running', 'failed']),
-  running: new Set<JobStatus>(['paused', 'interrupted', 'completed', 'failed']),
-  paused: new Set<JobStatus>(['running', 'failed']),
-  interrupted: new Set<JobStatus>(['running', 'failed']),
-  completed: new Set<JobStatus>(),
-  failed: new Set<JobStatus>(),
-};
-
 function canTransitionTo(from: JobStatus, to: JobStatus): boolean {
   // 自环（to === from）总是允许：current_stage 在同一 status 内推进（如 running→running
   // 从 scanning 到 extracting）不是状态转换，矩阵只约束跨状态转换。
   if (to === from) return true;
-  return JOB_TRANSITIONS[from].has(to);
+  return canJobTransition(from, to);
 }
 
 export interface MigrationJobInput {
@@ -136,43 +127,57 @@ export class MigrationJobs {
    * §11.1 状态转换守卫：读取当前 status，按 JOB_TRANSITIONS 校验目标 status 合法性。
    * 终态（completed/failed）的 Job 无法再被改写，断点续跑只能从 paused/interrupted 恢复。
    * 这把规格里的转换矩阵从"纸上规则"升级为运行期强制约束，防止并发/误操作写出非法状态。
+   *
+   * M1: 未知 status（拼写错误等）直接抛错，而非原实现那样静默跳过守卫直写 DB。
+   * 读-校验-写包入事务，消除单连接内的 TOCTOU 窗口。
    */
   updateStatus(id: string, u: UpdateStatusInput): void {
-    if (isJobStatus(u.status)) {
+    // M1: 未知 status 直接拒绝——原实现仅在 isJobStatus 为真时校验，非法状态会
+    // 绕过守卫直写 DB（配合 schema 缺 CHECK，拼写错误被静默持久化）。
+    if (!isJobStatus(u.status)) {
+      throw new Error(
+        `非法 Job status 值："${u.status}"（id=${id}）；合法值：created/running/paused/interrupted/completed/failed`,
+      );
+    }
+    // 守卫后固化为 JobStatus，供事务闭包内使用（闭包会丢失类型收窄）。
+    const targetStatus: JobStatus = u.status;
+    // 读-校验-写包入事务，消除 TOCTOU（M1）。
+    const txn = this.db.transaction(() => {
       const current = this.db
         .prepare('SELECT status FROM migration_jobs WHERE id=?')
         .get(id) as { status: string } | undefined;
       if (current !== undefined && isJobStatus(current.status)) {
-        if (!canTransitionTo(current.status, u.status)) {
+        if (!canTransitionTo(current.status, targetStatus)) {
           throw new Error(
-            `非法 Job 状态转换：${current.status} → ${u.status}（id=${id}）。` +
+            `非法 Job 状态转换：${current.status} → ${targetStatus}（id=${id}）。` +
               `终态（completed/failed）不可再转换；resume 只能从 paused/interrupted 恢复。`,
           );
         }
       }
-    }
-    this.db
-      .prepare(
-        `UPDATE migration_jobs
-         SET status=@status,
-             current_stage=COALESCE(@currentStage, current_stage),
-             pause_reason_code=@pauseReasonCode,
-             paused_at=@pausedAt,
-             started_at=COALESCE(@startedAt, started_at),
-             finished_at=COALESCE(@finishedAt, finished_at),
-             updated_at=@updatedAt
-         WHERE id=@id`,
-      )
-      .run({
-        id,
-        status: u.status,
-        currentStage: u.currentStage ?? null,
-        pauseReasonCode: u.pauseReasonCode ?? null,
-        pausedAt: u.pausedAt ?? null,
-        startedAt: u.startedAt ?? null,
-        finishedAt: u.finishedAt ?? null,
-        updatedAt: u.updatedAt,
-      });
+      this.db
+        .prepare(
+          `UPDATE migration_jobs
+           SET status=@status,
+               current_stage=COALESCE(@currentStage, current_stage),
+               pause_reason_code=@pauseReasonCode,
+               paused_at=@pausedAt,
+               started_at=COALESCE(@startedAt, started_at),
+               finished_at=COALESCE(@finishedAt, finished_at),
+               updated_at=@updatedAt
+           WHERE id=@id`,
+        )
+        .run({
+          id,
+          status: u.status,
+          currentStage: u.currentStage ?? null,
+          pauseReasonCode: u.pauseReasonCode ?? null,
+          pausedAt: u.pausedAt ?? null,
+          startedAt: u.startedAt ?? null,
+          finishedAt: u.finishedAt ?? null,
+          updatedAt: u.updatedAt,
+        });
+    });
+    txn();
   }
 }
 

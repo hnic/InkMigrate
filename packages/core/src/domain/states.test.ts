@@ -15,6 +15,7 @@ import {
   aggregateFailedCount,
   isItemFinalState,
   isItemRecoverableState,
+  canJobTransition,
 } from './states.js';
 
 describe('states (§11.1, §16.6)', () => {
@@ -204,6 +205,25 @@ describe('states (§11.1, §16.6)', () => {
       expect(isItemRecoverableState('retryable_failed')).toBe(true);
       expect(isItemRecoverableState('interrupted')).toBe(true);
       expect(isItemRecoverableState('verified')).toBe(false);
+    });
+  });
+
+  describe('JOB_TRANSITIONS / canJobTransition (§11.1, M9 单一真相源)', () => {
+    it('terminal states have no outgoing transitions', () => {
+      expect(canJobTransition('completed', 'running')).toBe(false);
+      expect(canJobTransition('failed', 'running')).toBe(false);
+      expect(canJobTransition('completed', 'failed')).toBe(false);
+    });
+    it('created → running/failed allowed; paused/interrupted recoverable', () => {
+      expect(canJobTransition('created', 'running')).toBe(true);
+      expect(canJobTransition('created', 'failed')).toBe(true);
+      expect(canJobTransition('paused', 'running')).toBe(true);
+      expect(canJobTransition('interrupted', 'running')).toBe(true);
+    });
+    it('running can reach all non-created states', () => {
+      expect(canJobTransition('running', 'paused')).toBe(true);
+      expect(canJobTransition('running', 'completed')).toBe(true);
+      expect(canJobTransition('running', 'interrupted')).toBe(true);
     });
   });
 });

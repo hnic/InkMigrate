@@ -3,7 +3,7 @@ import type { Database } from 'better-sqlite3';
 /**
  * §16 当前 Schema 版本。每次 Migration 递增；本常量代表 v1.0 阶段 1 的初始 schema。
  */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 /**
  * §16 全部表的最小字段契约 + CHECK 约束 + 部分唯一索引。
@@ -287,5 +287,64 @@ CREATE TABLE IF NOT EXISTS cleanup_action_attempts (
     `INSERT INTO schema_version(version, applied_at)
      VALUES (?, ?)
      ON CONFLICT(version) DO NOTHING`,
-  ).run(SCHEMA_VERSION, new Date().toISOString());
+  ).run(1, new Date().toISOString());
+}
+
+/**
+ * §16 Schema v2 迁移（M2）：为关键状态列补 CHECK 约束，匹配 target_artifacts.status
+ * 已有的严谨度。SQLite 不支持 ALTER TABLE ADD CONSTRAINT，故用标准「重建表」模式：
+ * 建新表（带 CHECK）→ 复制数据 → DROP 旧表 → RENAME。
+ *
+ * 仅对 migration_jobs.status 加 CHECK（最关键的状态机列）。现有数据均为合法值
+ * （运行时守卫已强制），重建安全。索引/触发器在 IF NOT EXISTS 下保持幂等。
+ */
+export function applySchemaV2(db: Database): void {
+  // migration_jobs: 重建以加 status CHECK
+  db.exec(`
+CREATE TABLE IF NOT EXISTS migration_jobs_v2 (
+  id TEXT PRIMARY KEY,
+  source_instance_id TEXT NOT NULL
+    REFERENCES source_instances(id) ON DELETE RESTRICT,
+  target_instance_id TEXT NOT NULL
+    REFERENCES target_instances(id) ON DELETE RESTRICT,
+  plan_id TEXT,
+  status TEXT NOT NULL CHECK(status IN ('created','running','paused','interrupted','completed','failed')),
+  current_stage TEXT NOT NULL DEFAULT 'preflight',
+  pause_reason_code TEXT,
+  paused_at TEXT,
+  scan_count INTEGER NOT NULL DEFAULT 0,
+  candidate_count INTEGER NOT NULL DEFAULT 0,
+  verified_count INTEGER NOT NULL DEFAULT 0,
+  degraded_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  conflict_count INTEGER NOT NULL DEFAULT 0,
+  skipped_count INTEGER NOT NULL DEFAULT 0,
+  started_at TEXT,
+  finished_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+INSERT INTO migration_jobs_v2 SELECT * FROM migration_jobs;
+DROP TABLE migration_jobs;
+ALTER TABLE migration_jobs_v2 RENAME TO migration_jobs;
+`);
+
+  // 重建后索引丢失，重新创建（IF NOT EXISTS 幂等）
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_migration_jobs_source ON migration_jobs(source_instance_id);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_migration_jobs_target ON migration_jobs(target_instance_id);`);
+
+  // L6: 补 FK 子列索引——SQLite 不自动索引 FK 子列，以下查询原为全表扫：
+  // - migration_attempts 按 job/item 列表（listByJob/listByItem）
+  // - target_artifacts 按 source_item 查最近 verified（findBySourceItem）
+  // - cleanup_items 按 job+source_item 精确查（findByJobAndSourceItem）
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_migration_attempts_job ON migration_attempts(migration_job_id);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_target_artifacts_source_item ON target_artifacts(source_item_id);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_cleanup_items_job_source ON cleanup_items(job_id, source_item_id);`);
+
+  db.prepare(
+    `INSERT INTO schema_version(version, applied_at)
+     VALUES (?, ?)
+     ON CONFLICT(version) DO NOTHING`,
+  ).run(2, new Date().toISOString());
 }

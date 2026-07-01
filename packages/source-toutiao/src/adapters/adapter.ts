@@ -65,6 +65,27 @@ export function createToutiaoSource(
   // 防止 OOM：每处理 100 条重启浏览器上下文
   let extractCount = 0;
   const RECYCLE_THRESHOLD = 100;
+  // M11: recycle 互斥锁。config 允许 concurrency 到 3，但共享 session 的
+  // close()/launch() 非并发安全——并发 extract B 的在飞 page 会被 recycle 杀掉。
+  // 用 promise 锁串行化 recycle：recycle 期间其他 extract 等待，完成后用新 session。
+  let recycleChain: Promise<void> = Promise.resolve();
+
+  /** 串行化执行可能触发 recycle 的 extract，避免 close/launch 与并发 page 互踩。 */
+  async function withRecycleLock<T>(fn: () => Promise<T>): Promise<T> {
+    // 把本次执行接到 recycleChain 末尾，保证串行
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const prev = recycleChain;
+    recycleChain = gate;
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
 
   return {
     kind: SOURCE_TOUTIAO_KIND,
@@ -179,33 +200,41 @@ export function createToutiaoSource(
         await page.close();
       }
     },
-    extract: async (ref, _ctx) => {
-      void _ctx;
+    extract: async (ref, ctx) => {
       if (session === undefined || browserConfig === undefined) {
         throw new Error(
           'createToutiaoSource().extract requires a real browser session; use fixture-driven wrapper for tests',
         );
       }
-      // 定期重启浏览器上下文释放内存（防止 Playwright 累积 OOM）
-      extractCount++;
-      if (extractCount > RECYCLE_THRESHOLD) {
-        extractCount = 0;
-        await session.close();
-        await session.launch();
+      // H7: 若调用方传入已 abort 的 signal，在启动浏览器导航前快速失败，
+      // 避免取消后仍发起一次完整 extract。进行中的导航由 navigationTimeoutMs 兜底。
+      if (ctx.signal?.aborted) {
+        throw new Error('aborted');
       }
-      const page = await session.newPage();
-      try {
-        const extractOpts: Parameters<typeof driveExtractDetail>[0] = { page, ref };
-        if (browserConfig.navigationTimeoutMs !== undefined) {
-          extractOpts.navigationTimeoutMs = browserConfig.navigationTimeoutMs;
+      // M11: 包入 withRecycleLock 串行化，避免并发 extract 时 recycle 的 close/launch
+      // 杀掉其他在飞 page（共享 context）。
+      return withRecycleLock(async () => {
+        // 定期重启浏览器上下文释放内存（防止 Playwright 累积 OOM）
+        extractCount++;
+        if (extractCount > RECYCLE_THRESHOLD) {
+          extractCount = 0;
+          await session!.close();
+          await session!.launch();
         }
-        if (browserConfig.maxImageBytes !== undefined) {
-          extractOpts.maxImageBytes = browserConfig.maxImageBytes;
+        const page = await session!.newPage();
+        try {
+          const extractOpts: Parameters<typeof driveExtractDetail>[0] = { page, ref };
+          if (browserConfig!.navigationTimeoutMs !== undefined) {
+            extractOpts.navigationTimeoutMs = browserConfig!.navigationTimeoutMs;
+          }
+          if (browserConfig!.maxImageBytes !== undefined) {
+            extractOpts.maxImageBytes = browserConfig!.maxImageBytes;
+          }
+          return await driveExtractDetail(extractOpts);
+        } finally {
+          await page.close();
         }
-        return await driveExtractDetail(extractOpts);
-      } finally {
-        await page.close();
-      }
+      });
     },
     verifySourceRef: async (ref, _ctx) => {
       void _ctx;
@@ -228,9 +257,9 @@ export function createToutiaoSource(
         if (currentUrl.includes('login') || currentUrl.includes('passport')) {
           return { resolvable: false, availability: 'login_required' as const };
         }
-        // 检查删除标记
+        // 检查删除标记（L8: 用全部选择器 join，而非仅 [0]，与 unfavorite-driver 一致）
         const hasDeletedMarker = await page
-          .locator(SPECIAL_PAGE_SELECTORS.contentDeleted[0])
+          .locator(SPECIAL_PAGE_SELECTORS.contentDeleted.join(', '))
           .count()
           .catch(() => 0);
         if (hasDeletedMarker > 0) {

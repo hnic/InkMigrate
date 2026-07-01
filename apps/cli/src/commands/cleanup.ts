@@ -11,6 +11,7 @@ import {
 } from '@inkmigrate/source-toutiao';
 import { join } from 'node:path';
 import * as readline from 'node:readline/promises';
+import { parsePositiveInt, parseOptionalPositiveInt } from '../util.js';
 import { stdin as input, stdout as output } from 'node:process';
 
 /**
@@ -104,7 +105,7 @@ export function createCleanupCommand(): Command {
         }
 
         console.log(`找到 ${candidateCount} 条已迁移条目（已成功取消的会自动跳过）。`);
-        const effectiveMax = opts.maxItems ? parseInt(opts.maxItems, 10) : 200;
+        const effectiveMax = opts.maxItems ? parsePositiveInt(opts.maxItems, 'max-items') : 200;
         if (candidateCount > effectiveMax) {
           console.log(`⚠️ 防风控：本次将处理前 ${effectiveMax} 条，剩余可分多次运行（已成功项自动跳过）。`);
         }
@@ -162,8 +163,8 @@ export function createCleanupCommand(): Command {
         process.on('SIGINT', onSigInt);
 
         try {
-          const limit = opts.maxItems ? parseInt(opts.maxItems, 10) : undefined;
-          const intervalMs = opts.intervalMs ? parseInt(opts.intervalMs, 10) : undefined;
+          const limit = parseOptionalPositiveInt(opts.maxItems, 'max-items');
+          const intervalMs = parseOptionalPositiveInt(opts.intervalMs, 'interval-ms');
           const result = await runCleanupUnfavorite({
             db,
             sourceAdapter: adapter,

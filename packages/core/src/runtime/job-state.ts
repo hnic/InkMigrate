@@ -1,28 +1,10 @@
-import type { JobStatus, JobPauseReason } from '../domain/states.js';
+import { canJobTransition, type JobStatus, type JobPauseReason } from '../domain/states.js';
 
 /**
- * §11.1 Job status 合法转换矩阵。
- *
- * paused 不是终态；从 paused 恢复必须先复核暂停原因。
- * interrupted 恢复前必须重检悬挂状态。
- * completed/failed 是终态，不可再转换。
+ * §11.1 Job status 合法转换（委托给 domain 层单一真相源，M9）。
  */
-const TRANSITIONS: Readonly<Record<JobStatus, ReadonlySet<JobStatus>>> = {
-  created: new Set<JobStatus>(['running', 'failed']),
-  running: new Set<JobStatus>([
-    'paused',
-    'interrupted',
-    'completed',
-    'failed',
-  ]),
-  paused: new Set<JobStatus>(['running', 'failed']),
-  interrupted: new Set<JobStatus>(['running', 'failed']),
-  completed: new Set<JobStatus>(),
-  failed: new Set<JobStatus>(),
-};
-
 export function canTransitionTo(from: JobStatus, to: JobStatus): boolean {
-  return TRANSITIONS[from].has(to);
+  return canJobTransition(from, to);
 }
 
 /** §11.1 受控 paused 的允许触发条件。 */

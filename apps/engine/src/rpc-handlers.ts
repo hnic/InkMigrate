@@ -10,7 +10,7 @@ import {
   type TargetContext,
   type JobStatus,
   canResumeFrom,
-  sourceContentHash,
+  ensureInstance,
 } from '@inkmigrate/core';
 import { MigrationJobs } from '@inkmigrate/core';
 import {
@@ -28,6 +28,29 @@ import { createObsidianTarget } from '@inkmigrate/target-obsidian';
 import { rmSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import {
+  registerMethod,
+  sendNotification,
+  logToStderr,
+} from './transport.js';
+import { requestCancel, isCancelledFlag, beginTask, endTask } from './cancellation.js';
+import type {
+  AuthLoginParams,
+  AuthLoginResult,
+  AuthStatusParams,
+  AuthStatusResult,
+  ScanStartParams,
+  ScanStartResult,
+  MigrateStartParams,
+  MigrateResumeParams,
+  MigrateResumableParams,
+  MigrateResumableResult,
+  MigrateResult,
+  CleanupUnfavoriteParams,
+  CleanupResult,
+  StatusQueryParams,
+  StatusQueryResult,
+} from './protocol.js';
 
 /**
  * 展开路径中的 ~ 为用户主目录。
@@ -39,38 +62,6 @@ function expandHome(p: string): string {
   if (p.startsWith('~\\')) return join(homedir(), p.slice(2));
   if (p === '~') return homedir();
   return p;
-}
-
-/**
- * 确保实例记录存在（FK 约束要求）。只插入对应角色的表。
- * config_hash 反映该实例的配置指纹；若实例已存在但配置哈希变化（用户改了
- * vaultPath/importSubdir 等关键配置），更新 config_hash 以便后续审计/续跑
- * 能识别"配置已变"，而非误用旧 Job 的路径假设。
- */
-function ensureInstance(
-  db: DB,
-  id: string,
-  adapterKind: string,
-  role: 'source' | 'target',
-  config: Record<string, unknown>,
-): void {
-  const table = role === 'source' ? 'source_instances' : 'target_instances';
-  const configHash = computeConfigHash(config);
-  const existing = db
-    .prepare(`SELECT config_hash AS configHash FROM ${table} WHERE id = ?`)
-    .get(id) as { configHash: string } | undefined;
-  const nowTs = new Date().toISOString();
-  if (existing === undefined) {
-    db.prepare(
-      `INSERT INTO ${table}(id,adapter_kind,adapter_version,adapter_api_version,config_hash,created_at,updated_at)
-       VALUES(?,?,?,?,?,?,?)`,
-    ).run(id, adapterKind, '1.0.0', '1.0.0', configHash, nowTs, nowTs);
-  } else if (existing.configHash !== configHash) {
-    // 配置已变：更新 config_hash + updated_at（审计语义）
-    db.prepare(
-      `UPDATE ${table} SET config_hash = ?, updated_at = ? WHERE id = ?`,
-    ).run(configHash, nowTs, id);
-  }
 }
 
 /** 对 params 对象中的路径字段做 ~ 展开。 */
@@ -137,48 +128,6 @@ function requirePositiveIntIfDefined(value: unknown, field: string): asserts val
     throw new Error(`${field} 必须是正整数，收到：${String(value)}`);
   }
 }
-
-/**
- * 计算适配器配置的稳定哈希，用于 source/target_instances.config_hash 审计列。
- * 配置变更（vaultPath、importSubdir 等）会改变哈希，使系统能识别"配置已变"
- * 而非误用旧 Job 的路径假设。复用 core 的 sha256 算法。
- */
-function computeConfigHash(config: Record<string, unknown>): string {
-  return sourceContentHash(JSON.stringify(stableStringify(config)));
-}
-
-/** 稳定序列化：按 key 排序，消除对象键顺序对哈希的影响。 */
-function stableStringify(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
-  const entries = Object.keys(value as Record<string, unknown>)
-    .sort()
-    .map((k) => `${JSON.stringify(k)}:${stableStringify((value as Record<string, unknown>)[k])}`);
-  return `{${entries.join(',')}}`;
-}
-import {
-  registerMethod,
-  sendNotification,
-  logToStderr,
-} from './transport.js';
-import { requestCancel, isCancelledFlag, beginTask, endTask } from './cancellation.js';
-import type {
-  AuthLoginParams,
-  AuthLoginResult,
-  AuthStatusParams,
-  AuthStatusResult,
-  ScanStartParams,
-  ScanStartResult,
-  MigrateStartParams,
-  MigrateResumeParams,
-  MigrateResumableParams,
-  MigrateResumableResult,
-  MigrateResult,
-  CleanupUnfavoriteParams,
-  CleanupResult,
-  StatusQueryParams,
-  StatusQueryResult,
-} from './protocol.js';
 
 /** 注册所有 RPC 方法。 */
 export function registerAllHandlers(): void {
@@ -291,6 +240,9 @@ async function handleScanStart(params: ScanStartParams | undefined): Promise<Sca
   if (typeof params.favoritesUrl !== 'string' || params.favoritesUrl.length === 0) {
     throw new Error('favoritesUrl 不能为空');
   }
+  // M5: scan.start 路径补 maxItems 校验，与 migrate.start/cleanup.unfavorite 一致，
+  // 拒绝 GUI parseInt 产生的 NaN（I25：非法数值不应直达抓取层）。
+  requirePositiveIntIfDefined(params.maxItems, 'maxItems');
   beginTask('scan'); // C10: 占用活跃任务槽位（拒绝并发长任务，避免 resetCancel 互踩取消请求）
   const profileDir = profilePath(params.stateDir, params.source);
   if (!profileExists(params.stateDir, params.source)) {
@@ -495,10 +447,13 @@ async function runMigrateJob(
       const startParams = params as MigrateStartParams;
       sourceInstanceId = startParams.source;
       targetInstanceId = startParams.target;
-      // I25: 信任边界校验速率/上限数值，防 NaN/0 触发风控封号
-      if (startParams.intervalMs !== undefined) requirePositiveMs(startParams.intervalMs, 'intervalMs');
-      requirePositiveIntIfDefined(startParams.maxItems, 'maxItems');
     }
+    // M5: maxItems/intervalMs 校验对 start 和 resume 两路径统一生效（原仅 start 校验，
+    // resume 路径漏校验，GUI parseInt 产生的 NaN 可直达抓取层，I25 封号风险）。
+    if ('intervalMs' in params && params.intervalMs !== undefined) {
+      requirePositiveMs(params.intervalMs, 'intervalMs');
+    }
+    requirePositiveIntIfDefined(params.maxItems, 'maxItems');
 
     // 构造 source adapter（profileDir 在 ensureInstance 之前计算，用于 config_hash）
     const profileDir = profilePath(params.stateDir, sourceInstanceId);
@@ -626,6 +581,11 @@ async function handleCleanupUnfavorite(
   if (params === undefined) throw new Error('missing params');
   requireStateDir(params.stateDir);
   requireId(params.source, 'source');
+  // M6: 取消收藏是不可逆的源端写操作，要求显式确认令牌（与 CLI 的 UNFAVORITE 短语
+  // 或 --force 对齐）。缺令牌即拒，防止 sidecar 被非信任调用方触发破坏性操作。
+  if (params.confirmed !== true) {
+    throw new Error('取消收藏是破坏性操作，需显式确认：传 confirmed:true（GUI 用户确认后设置）');
+  }
   // I25: 信任边界校验速率/上限数值
   if (params.intervalMs !== undefined) requirePositiveMs(params.intervalMs, 'intervalMs');
   requirePositiveIntIfDefined(params.maxItems, 'maxItems');
@@ -692,11 +652,21 @@ async function handleCleanupUnfavorite(
  */
 async function closeAdapterSafely(adapter: { close(): Promise<void> }): Promise<void> {
   const CLOSE_TIMEOUT_MS = 20_000; // 略大于 BrowserSession 内层的 15s，给第一层先兜
+  let timed = false;
+  const timer = new Promise<void>((resolve) => {
+    setTimeout(() => {
+      timed = true;
+      resolve();
+    }, CLOSE_TIMEOUT_MS);
+  });
   try {
-    await Promise.race([
-      adapter.close(),
-      new Promise<void>((resolve) => setTimeout(resolve, CLOSE_TIMEOUT_MS)),
-    ]);
+    await Promise.race([adapter.close(), timer]);
+    if (timed) {
+      // L13: 超时后 adapter.close()（losing 分支）仍在后台运行，可能泄漏 Chromium 进程。
+      // Node 无法真正取消 promise，此处仅记录告警供运维诊断（真正强制终止需 adapter
+      // 提供 force-close 能力，留作后续增强）。
+      logToStderr('warn', 'adapter.close() 超时，后台 close 仍在运行，可能泄漏浏览器进程');
+    }
   } catch (e) {
     logToStderr('warn', `adapter.close() 异常（已忽略）：${e instanceof Error ? e.message : String(e)}`);
   }

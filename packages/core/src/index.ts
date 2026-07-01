@@ -67,7 +67,11 @@ export {
 export { writeCsv, escapeCsvField } from './reports/csv-writer.js';
 
 // runtime
-export { acquireLock, LockConflictError } from './runtime/locks.js';
+export {
+  acquireLock,
+  LockConflictError,
+  LockHeartbeatError,
+} from './runtime/locks.js';
 export type { AcquireOptions, HeldLock } from './runtime/locks.js';
 export {
   isStaleLock,
@@ -77,7 +81,7 @@ export { installSignalHandlers } from './runtime/signals.js';
 export type { GracefulShutdownHandlers } from './runtime/signals.js';
 export { runMigrationJob } from './runtime/job-runner.js';
 export type { JobRunnerInput, JobRunnerResult, JobProgress } from './runtime/job-runner.js';
-export { withRetry, DEFAULT_RETRY_POLICY } from './runtime/retry.js';
+export { withRetry, DEFAULT_RETRY_POLICY, shouldPauseForRateLimit, RateLimitedError, isRateLimitedError } from './runtime/retry.js';
 export type { RetryPolicy } from './runtime/retry.js';
 export { withJitter, ITEM_INTERVAL_JITTER, RETRY_BACKOFF_JITTER } from './runtime/jitter.js';
 export {
@@ -87,3 +91,4 @@ export {
   canResumeFrom,
 } from './runtime/job-state.js';
 export { reconcileJob, deriveFinalStateCounts } from './runtime/reconciliation.js';
+export { ensureInstance, computeConfigHash, stableStringify } from './runtime/instance-helpers.js';

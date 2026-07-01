@@ -8,6 +8,7 @@ import {
 } from '@inkmigrate/source-toutiao';
 import { join, resolve } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { parsePositiveInt } from '../util.js';
 
 /**
  * §22 `inkmigrate scan` 命令。
@@ -50,7 +51,7 @@ export function createScanCommand(): Command {
         ...(opts.headless !== undefined ? { headless: opts.headless } : {}),
         favoritesUrl: opts.favoritesUrl,
         ...(opts.maxItems !== undefined
-          ? { maxItems: parseInt(opts.maxItems, 10) }
+          ? { maxItems: parsePositiveInt(opts.maxItems, 'max-items') }
           : {}),
       });
     });

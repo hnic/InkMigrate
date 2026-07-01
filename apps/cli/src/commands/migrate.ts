@@ -5,6 +5,7 @@ import {
   MigrationJobs,
   computeFingerprint,
   validateSourceItemQuality,
+  ensureInstance,
   type SourceAdapter,
   type SourceItem,
   type SourceItemRef,
@@ -22,6 +23,7 @@ import {
 import { createObsidianTarget } from '@inkmigrate/target-obsidian';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { parsePositiveInt } from '../util.js';
 
 /**
  * §22 `inkmigrate migrate` 命令。
@@ -62,20 +64,6 @@ export function createMigrateCommand(): Command {
         const jobId = `mig-${Date.now()}`;
         const now = new Date().toISOString();
 
-        // 确保实例记录存在
-        ensureInstance(db, opts.source, 'toutiao', 'source');
-        ensureInstance(db, opts.target, 'obsidian', 'target');
-
-        new MigrationJobs(db).create({
-          id: jobId,
-          sourceInstanceId: opts.source,
-          targetInstanceId: opts.target,
-          status: 'created',
-          currentStage: 'preflight',
-          createdAt: now,
-          updatedAt: now,
-        });
-
         // 构造 source adapter
         const sourceAdapter = opts.fixtureDir
           ? createFixtureSource(opts.fixtureDir, opts.source)
@@ -96,7 +84,7 @@ export function createMigrateCommand(): Command {
                   ? { favoritesUrl: opts.favoritesUrl }
                   : {}),
                 ...(opts.maxItems !== undefined
-                  ? { maxScanItems: parseInt(opts.maxItems, 10) }
+                  ? { maxScanItems: parsePositiveInt(opts.maxItems, 'max-items') }
                   : {}),
               });
             })();
@@ -120,49 +108,72 @@ export function createMigrateCommand(): Command {
           } as Record<string, unknown>,
         };
 
-        console.log(`开始迁移 Job ${jobId}...`);
+        // H5: 确保实例记录存在——移到 config 构造后，传入实际 config 以计算真实
+        // config_hash（原硬编码 'h' 与 Engine 的真实哈希分叉，导致 CLI 创建的 instance
+        // 随后被 GUI 迁移看到哈希「变化」触发虚假 UPDATE）。
+        ensureInstance(db, opts.source, 'toutiao', 'source', {
+          sourceInstanceId: opts.source,
+          profileDir: profilePath(opts.stateDir, opts.source),
+          headless: false,
+        });
+        ensureInstance(db, opts.target, 'obsidian', 'target', targetContext.targetConfig);
 
-        const result = await runMigrationJob({
-          db,
-          jobId,
-          sourceAdapter,
-          targetAdapter,
+        new MigrationJobs(db).create({
+          id: jobId,
           sourceInstanceId: opts.source,
           targetInstanceId: opts.target,
-          targetContext,
-          workspaceDir: opts.stateDir,
-          reportsDir: join(opts.stateDir, 'reports'),
-          ...(opts.interval !== undefined ? { intervalMs: parseInt(opts.interval, 10) } : {}),
+          status: 'created',
+          currentStage: 'preflight',
+          createdAt: now,
+          updatedAt: now,
         });
 
-        console.log(`\n迁移完成：`);
-        console.log(`  status: ${result.status}`);
-        console.log(`  scan_count: ${result.scanCount}`);
-        console.log(`  reconciliation: ${result.reconciliationOk ? '通过' : '失败'}`);
-        if (result.reconciliationReason) {
-          console.log(`  reason: ${result.reconciliationReason}`);
+        console.log(`开始迁移 Job ${jobId}...`);
+
+        // L16: SIGINT 协作取消（与 cleanup 命令一致）。原 migrate/resume 无 SIGINT 处理，
+        // Ctrl+C 硬杀会留 Job 状态 running 直到 stale-running 兜底。改为置标志，让
+        // runMigrationJob 在条目间优雅终止并落库已处理项。
+        let cancelled = false;
+        const onSigInt = () => {
+          cancelled = true;
+          console.log('\n收到终止信号，正在停止当前任务（已处理项已落库，可 resume 续跑）...');
+        };
+        process.on('SIGINT', onSigInt);
+
+        try {
+          const result = await runMigrationJob({
+            db,
+            jobId,
+            sourceAdapter,
+            targetAdapter,
+            sourceInstanceId: opts.source,
+            targetInstanceId: opts.target,
+            targetContext,
+            workspaceDir: opts.stateDir,
+            reportsDir: join(opts.stateDir, 'reports'),
+            isCancelled: () => cancelled,
+            // L17: parseInt 可能产生 NaN（用户传非数字），校验后再传入，避免 NaN 直达
+            // 速率控制（I25：NaN interval → 最快速率 → 封号）。
+            ...(opts.interval !== undefined
+              ? { intervalMs: parsePositiveInt(opts.interval, 'interval') }
+              : {}),
+          });
+
+          console.log(`\n迁移完成：`);
+          console.log(`  status: ${result.status}`);
+          console.log(`  scan_count: ${result.scanCount}`);
+          console.log(`  reconciliation: ${result.reconciliationOk ? '通过' : '失败'}`);
+          if (result.reconciliationReason) {
+            console.log(`  reason: ${result.reconciliationReason}`);
+          }
+          console.log(`\n报告：${join(opts.stateDir, 'reports', jobId, 'summary.md')}`);
+        } finally {
+          process.off('SIGINT', onSigInt);
         }
-        console.log(`\n报告：${join(opts.stateDir, 'reports', jobId, 'summary.md')}`);
       } finally {
         db.close();
       }
     });
-}
-
-function ensureInstance(
-  db: DB,
-  id: string,
-  adapterKind: string,
-  role: 'source' | 'target',
-): void {
-  const table = role === 'source' ? 'source_instances' : 'target_instances';
-  const existing = db.prepare(`SELECT id FROM ${table} WHERE id = ?`).get(id);
-  if (!existing) {
-    db.prepare(
-      `INSERT INTO ${table}(id,adapter_kind,adapter_version,adapter_api_version,config_hash,created_at,updated_at)
-       VALUES(?,?,?,?,?,?,?)`,
-    ).run(id, adapterKind, '1.0.0', '1.0.0', 'h', new Date().toISOString(), new Date().toISOString());
-  }
 }
 
 function createFixtureSource(

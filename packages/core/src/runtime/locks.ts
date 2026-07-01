@@ -22,10 +22,29 @@ export interface AcquireOptions {
   heartbeatMs?: number;
 }
 
+/**
+ * 心跳持续写入失败时由 {@link HeldLock.checkHealth} 抛出，供持锁方在主循环中
+ * （而非 setInterval 回调中）轮询，避免回调内抛错变成未捕获异常。
+ */
+export class LockHeartbeatError extends Error {
+  constructor(
+    public readonly path: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'LockHeartbeatError';
+  }
+}
+
 export interface HeldLock {
   path: string;
   /** 释放锁并停止心跳。多次调用幂等。 */
   release: () => void;
+  /**
+   * 心跳健康检查。心跳连续写入失败达阈值时抛出 {@link LockHeartbeatError}，
+   * 否则正常返回。持锁方应在主循环（而非信号/定时器回调）中周期性调用。
+   */
+  checkHealth: () => void;
 }
 
 /**
@@ -115,13 +134,16 @@ export function acquireLock(opts: AcquireOptions): HeldLock {
   const interval = opts.heartbeatMs ?? 1000;
   // I9: 心跳连续写失败计数。磁盘满/权限问题致心跳持续写失败时，锁会被误判陈旧并被
   // 另一进程接管，而本进程仍以为持锁 → 两进程并发写同一 (source,target)，破坏唯一约束。
-  // 连续失败达阈值时主动抛出（让 Job fail），而非静默继续。
+  // 连续失败达阈值时标记失败（不再在 setInterval 回调里抛错——那会变成未捕获异常，
+  // 既不触发持锁方 finally，也不释放锁文件，导致进程崩溃 + 锁残留）。
+  // 改为设置 failed 标志，由持锁方在主循环中调用 checkHealth() 轮询并优雅失败。
   let heartbeatFailures = 0;
   const HEARTBEAT_FAILURE_THRESHOLD = 3;
   let released = false;
+  let heartbeatFailureMessage: string | undefined;
   const beat = (): void => {
     // I10: release() 后排队中的 beat 可能重建已释放锁文件，首行检查 released。
-    if (released) return;
+    if (released || heartbeatFailureMessage !== undefined) return;
     content.heartbeatAt = new Date().toISOString();
     try {
       writeFileSync(path, JSON.stringify(content, null, 2));
@@ -129,12 +151,13 @@ export function acquireLock(opts: AcquireOptions): HeldLock {
     } catch {
       heartbeatFailures++;
       if (heartbeatFailures >= HEARTBEAT_FAILURE_THRESHOLD) {
-        // 心跳持续写失败：主动释放并抛错，避免被误判陈旧后双进程并发。
-        released = true;
-        throw new Error(
+        // 心跳持续写失败：记录失败信息并停止心跳（让 Job 在下次 checkHealth 时失败）。
+        // 不在此处抛错（setInterval 回调内的 throw 会变成未捕获异常），
+        // 也不在此 release（finally 会在 Job 退出时统一释放）。
+        heartbeatFailureMessage =
           `锁心跳连续 ${heartbeatFailures} 次写入失败（${path}），可能磁盘满或权限问题；` +
-            `为避免双进程并发写入，主动放弃锁。`,
-        );
+          `为避免双进程并发写入，主动放弃锁。`;
+        clearInterval(timer);
       }
     }
   };
@@ -158,6 +181,11 @@ export function acquireLock(opts: AcquireOptions): HeldLock {
           // 锁文件损坏或无法读取，安全删除
           rmSync(path, { force: true });
         }
+      }
+    },
+    checkHealth: () => {
+      if (heartbeatFailureMessage !== undefined) {
+        throw new LockHeartbeatError(path, heartbeatFailureMessage);
       }
     },
   };

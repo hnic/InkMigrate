@@ -387,45 +387,50 @@ export async function runCleanupUnfavorite(
     };
 
     // d. 落库（UPSERT 支持断点续跑）。抽成函数：重试终止分支也需先落库当前条再 break。
+    // C3: 三步写（upsert → 回查 id → attempts.create）必须包在事务里，与迁移侧
+    // commitTxn 一致。否则崩溃在 upsert 与 create 之间会产生有 cleanup_items 行但无
+    // cleanup_action_attempts 审计行的状态。
     const persistItem = () => {
       processedCount++; // 每条落库计一次实际处理数（§缺陷2 对账准确性）
       const o = latestOutcome!;
       const actionFinishedAt = now();
-      itemsRepo.upsert({
-        jobId,
-        sourceItemId: row.id,
-        precheckStatus: o.precheckStatus,
-        preActionState: o.precheckStatus,
-        actionStatus: o.actionStatus,
-        postActionState: o.actionStatus,
-        actionStartedAt,
-        actionFinishedAt,
-        verifiedAt: o.actionStatus === ACTION_STATUS_UNFAVORITED ? actionFinishedAt : null,
-        lastErrorCode: o.lastErrorCode,
-        lastErrorMessage: o.lastErrorMessage,
-        createdAt: ts,
-        updatedAt: actionFinishedAt,
-      });
-      // 审计日志（cleanup_item_id 由 UPSERT 产生，回查）
-      // I7: 走 UNIQUE(job_id, source_item_id) 索引的精确查询，替代 listByJob 全表扫描 + find
-      //（原 O(n²)，批量清理数百条时显著降低 DB 负载）。
-      const itemRow = itemsRepo.findByJobAndSourceItem(jobId, row.id);
-      if (itemRow !== undefined) {
-        attemptsRepo.create({
-          cleanupItemId: itemRow.id,
-          // §I-F(2)：此前硬编码 attemptNo: 1，丢失了重试次数。改用本轮实际尝试次数
-          //（首轮=1，每次重试 +1），使审计日志能反映重试历程。
-          attemptNo: attemptCount,
+      db.transaction(() => {
+        itemsRepo.upsert({
+          jobId,
+          sourceItemId: row.id,
+          precheckStatus: o.precheckStatus,
           preActionState: o.precheckStatus,
-          actionResult: o.actionStatus,
+          actionStatus: o.actionStatus,
           postActionState: o.actionStatus,
-          startedAt: actionStartedAt,
-          finishedAt: actionFinishedAt,
-          errorCode: o.lastErrorCode,
-          errorMessage: o.lastErrorMessage,
-          createdAt: actionFinishedAt,
+          actionStartedAt,
+          actionFinishedAt,
+          verifiedAt: o.actionStatus === ACTION_STATUS_UNFAVORITED ? actionFinishedAt : null,
+          lastErrorCode: o.lastErrorCode,
+          lastErrorMessage: o.lastErrorMessage,
+          createdAt: ts,
+          updatedAt: actionFinishedAt,
         });
-      }
+        // 审计日志（cleanup_item_id 由 UPSERT 产生，回查）
+        // I7: 走 UNIQUE(job_id, source_item_id) 索引的精确查询，替代 listByJob 全表扫描 + find
+        //（原 O(n²)，批量清理数百条时显著降低 DB 负载）。
+        const itemRow = itemsRepo.findByJobAndSourceItem(jobId, row.id);
+        if (itemRow !== undefined) {
+          attemptsRepo.create({
+            cleanupItemId: itemRow.id,
+            // §I-F(2)：此前硬编码 attemptNo: 1，丢失了重试次数。改用本轮实际尝试次数
+            //（首轮=1，每次重试 +1），使审计日志能反映重试历程。
+            attemptNo: attemptCount,
+            preActionState: o.precheckStatus,
+            actionResult: o.actionStatus,
+            postActionState: o.actionStatus,
+            startedAt: actionStartedAt,
+            finishedAt: actionFinishedAt,
+            errorCode: o.lastErrorCode,
+            errorMessage: o.lastErrorMessage,
+            createdAt: actionFinishedAt,
+          });
+        }
+      })();
     };
 
     const first = await attemptOnce();

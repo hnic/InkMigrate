@@ -19,6 +19,26 @@ export function shouldPauseForRateLimit(httpStatus: number): boolean {
   return httpStatus === 429 || httpStatus === 503;
 }
 
+/**
+ * H8: 限流错误（HTTP 429/503）。用 Error 子类替代原「抛普通对象 + 魔法属性
+ * __rateLimited」——后者丢失栈、instanceof Error 失败，且与 shouldPauseForRateLimit
+ * 形成两份独立判断会漂移。此处通过 isRateLimitedError 复用同一判定源。
+ */
+export class RateLimitedError extends Error {
+  constructor(
+    public readonly httpStatus: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'RateLimitedError';
+  }
+}
+
+/** 判断错误是否为限流错误（单一判定源，供 job-runner 复用，消除漂移）。 */
+export function isRateLimitedError(e: unknown): e is RateLimitedError {
+  return e instanceof RateLimitedError;
+}
+
 /** HTTP 状态码是否表示永久错误，不应重试。 */
 export function isPermanentHttpError(httpStatus: number): boolean {
   return httpStatus === 404 || httpStatus === 410 || httpStatus === 403;

@@ -46,13 +46,18 @@ function wrapRedacted(logger: Logger, redactor: Redactor): Logger {
           ? redactor(objOrMsg)
           : redactValue(objOrMsg, redactor);
       const safeMsg = msg !== undefined ? redactor(msg) : undefined;
+      // H3: printf 风格的 rest 插值参数（如 log.info({url}, 'fetched %s', token)）
+      // 也需脱敏，否则会泄漏。
+      const safeRest = rest.map((x) => (typeof x === 'string' ? redactor(x) : redactValue(x, redactor)));
       if (safeMsg === undefined) {
         fn.call(logger, safeObj);
       } else {
-        fn.call(logger, safeObj, safeMsg, ...rest);
+        fn.call(logger, safeObj, safeMsg, ...safeRest);
       }
     };
   // Logger 是函数与对象的混合体；用 Proxy 拦截已知方法。
+  // H1: 必须同时拦截 child() —— Pino 的 logger.child() 返回新的未包装 logger，
+  // 任何 logger.child({...}).info(...) 会写未脱敏内容，静默击穿 redact 保证。
   return new Proxy(logger, {
     get(target, prop, receiver) {
       if (
@@ -60,6 +65,12 @@ function wrapRedacted(logger: Logger, redactor: Redactor): Logger {
         ['trace', 'debug', 'info', 'warn', 'error', 'fatal'].includes(prop)
       ) {
         return wrap(Reflect.get(target, prop, receiver) as (...a: unknown[]) => void);
+      }
+      // 拦截 child：返回的子 logger 递归包装（共享同一 redactor）。
+      if (prop === 'child') {
+        const origChild = Reflect.get(target, prop, receiver) as Logger['child'];
+        return (...args: Parameters<Logger['child']>) =>
+          wrapRedacted(origChild.apply(target, args) as unknown as Logger, redactor);
       }
       return Reflect.get(target, prop, receiver);
     },
@@ -71,6 +82,28 @@ function redactValue(v: unknown, r: Redactor): unknown {
   if (typeof v === 'string') return r(v);
   if (Array.isArray(v)) return v.map((x) => redactValue(x, r));
   if (typeof v === 'object') {
+    // L3: Map/Set/Error.cause 等非普通对象，Object.entries 不遍历其内部条目，
+    // 需显式处理避免泄漏。Error 的 message/stack 是可枚举的（已被上面分支覆盖），
+    // 但 Error.cause 需递归；Map/Set 转 entry 处理。
+    if (v instanceof Map) {
+      const out = new Map();
+      for (const [k, val] of v) out.set(redactValue(k, r), redactValue(val, r));
+      return out;
+    }
+    if (v instanceof Set) {
+      return new Set([...v].map((x) => redactValue(x, r)));
+    }
+    if (v instanceof Error) {
+      const out: Record<string, unknown> = {};
+      for (const [k, val] of Object.entries(v)) {
+        out[k] = redactValue(val, r);
+      }
+      // Error.cause 可能是嵌套 Error 或含敏感信息，递归处理
+      if (v.cause !== undefined) {
+        out.cause = redactValue(v.cause, r);
+      }
+      return out;
+    }
     const out: Record<string, unknown> = {};
     for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
       out[k] = redactValue(val, r);

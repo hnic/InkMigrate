@@ -105,7 +105,9 @@ export async function driveScanFavorites(
             // §9 移动端分享短链接 /is/<digits>/（与 extractToutiaoContentId 保持同口径）
             const sl = /\/is\/(\d+)(?:\/|$)/.exec(u.pathname);
             if (sl) return sl[1];
-            const m = /\/(article|wenda|video|group|w)\/(\d+)/.exec(u.pathname);
+            // M3: 与 normalize/url.ts:extractToutiaoContentId 保持同口径，含 /a/<id>/（新文章路径）。
+            // 原浏览器端漏了 'a'，与 Node 端漂移——正是注释警告的「务必同步两处」已发生。
+            const m = /\/(article|a|wenda|video|group|w)\/(\d+)/.exec(u.pathname);
             return m?.[2];
           } catch {
             return undefined;

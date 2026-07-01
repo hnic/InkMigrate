@@ -64,7 +64,7 @@ export class CleanupItems {
            pre_action_state=excluded.pre_action_state,
            action_status=excluded.action_status,
            post_action_state=excluded.post_action_state,
-           attempt_count=excluded.attempt_count,
+           attempt_count=cleanup_items.attempt_count + 1,
            action_started_at=excluded.action_started_at,
            action_finished_at=excluded.action_finished_at,
            verified_at=excluded.verified_at,

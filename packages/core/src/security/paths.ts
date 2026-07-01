@@ -56,6 +56,17 @@ export function assertSymlinkSafe(root: string, target: string): void {
  * 一致语义，避免每处各自处理 ENOENT 与目录创建的细节差异。
  *
  * 调用方应在 mkdirSync(parentDir, { recursive: true }) 之后、writeFileSync 之前调用。
+ *
+ * H4（TOCTOU 残留窗口，诚实声明）：本函数的 realpathSync 校验与后续 write/rename
+ * 是两次独立的系统调用，之间存在理论上的 TOCTOU 窗口——若攻击者在 realpathSync 之后、
+ * write/rename 之前把父目录链中的某级替换为指向 Vault 外的符号链接，写入会逃逸。
+ * 完整闭合需 fd-based 写入（逐组件 open with O_NOFOLLOW，持有 fd 后再 write），
+ * 这在纯 Node.js 层面难以完全实现（需 native addon）。
+ *
+ * 当前威胁模型：InkMigrate 是本地单用户工具，攻击者需在同一机器具备写 Vault 目录
+ * 的能力并能赢得毫秒级竞争窗口——实际风险极低。本函数提供的是「纵深防御 + 检测
+ * 已存在的逃逸符号链接」，而非对实时攻击的完全保证。atomicWriteRaw 的 tmp 文件
+ * 用 randomBytes(6) 随机命名，使攻击者无法预置 tmp 路径的符号链接，进一步收窄窗口。
  */
 export function assertWriteDirSafe(root: string, targetAbsPath: string): void {
   const parentDir = resolve(targetAbsPath, '..');

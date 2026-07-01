@@ -14,21 +14,25 @@ import { assertSymlinkSafe, writtenFileHash } from '@inkmigrate/core';
  * §13.10 原子写入流程（底层，不校验 frontmatter 结构）。
  *
  * 1. 在同目录创建隐藏临时文件（`.inkmigrate-<basename>.<rand>.tmp`）。
- * 2. 写入（writeFileSync 在 Node 上默认 flush 元数据）。
+ * 2. 写入（writeFileSync 刷数据到 OS，但不 fsync——断电仍可能丢半截，L11）。
  * 3. 安全校验：解引用符号链接确认 tmpPath 真实路径在 Vault 内。
  * 4. 原子 rename 到目标路径。
  *
  * I17: 抽出此底层函数供分片索引 / 附件复用——它们不需要 frontmatter 校验，
  * 但同样需要原子性（temp + rename），避免进程被杀留下半截损坏文件被幂等性逻辑固化。
  *
+ * H3: content 既支持 string（笔记/索引），也支持 Buffer（附件二进制），使附件
+ * 写入复用同一原子流程，消除附件侧半写文件风险。
+ *
  * §13.2 任何目标路径都必须在解引用符号链接后再次确认位于 Vault 内。
  * 任何验证失败都不触碰目标文件，并清理临时文件。
  */
 export function atomicWriteRaw(
   targetPath: string,
-  content: string,
+  content: string | Buffer,
   vaultRoot?: string,
 ): string {
+  const isBuffer = Buffer.isBuffer(content);
   if (content.length === 0) {
     throw new Error('atomicWriteRaw: content is empty');
   }
@@ -46,7 +50,11 @@ export function atomicWriteRaw(
     `.inkmigrate-${basename(targetPath)}.${randomBytes(6).toString('hex')}.tmp`,
   );
   try {
-    writeFileSync(tmpPath, content, { encoding: 'utf8' });
+    if (isBuffer) {
+      writeFileSync(tmpPath, content);
+    } else {
+      writeFileSync(tmpPath, content, { encoding: 'utf8' });
+    }
 
     if (vaultRoot !== undefined) {
       assertSymlinkSafe(vaultRoot, tmpPath);
@@ -58,7 +66,7 @@ export function atomicWriteRaw(
     throw e;
   }
 
-  return writtenFileHash(Buffer.from(content, 'utf8'));
+  return writtenFileHash(isBuffer ? content : Buffer.from(content, 'utf8'));
 }
 
 /**

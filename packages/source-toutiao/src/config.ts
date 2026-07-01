@@ -17,7 +17,11 @@ export const ToutiaoSourceConfigSchema = z
       .default({}),
     /** §12.10 图片下载上限（字节）。 */
     maxImageBytes: z.number().int().positive().default(50 * 1024 * 1024),
-    /** §12.10 SVG 策略：默认 remote-link 不落地。 */
+    /**
+     * §12.10 SVG 策略。L19: 当前实现固定为「不落地」（SVG 不在 image-downloader 的
+     * ALLOWED_MIME 白名单，且 stage 3 sanitize 默认 strip svg 标签），本字段被接受
+     * 但暂无代码读取分支。保留为前向兼容点，供后续 preserve/sanitize 模式实现。
+     */
     svgPolicy: z.enum(['preserve', 'sanitize', 'remote-link']).default('remote-link'),
   })
   .strict();

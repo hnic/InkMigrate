@@ -11,9 +11,12 @@ export interface VerificationResult {
 export function verifyUnfavoriteResult(html: string): VerificationResult {
   const dom = new JSDOM(html, { runScripts: 'outside-only', resources: undefined });
   const doc = dom.window.document;
-  const btn = doc.querySelector(UNFAVORITE_SELECTORS.collectButton[0]);
+  // R1: collectButton / successMarker 用全部选择器 join（L8 漏了此处），
+  // 与 unfavorite-driver / state-detector 一致。
+  const btn = doc.querySelector(UNFAVORITE_SELECTORS.collectButton.join(', '));
   const pressed = btn?.getAttribute('aria-pressed');
   const strongSignal = pressed === UNFAVORITE_SELECTORS.notFavoritedAriaPressed;
-  const auxiliarySignal = doc.querySelector(UNFAVORITE_SELECTORS.successMarker[0]) !== null;
+  const auxiliarySignal =
+    doc.querySelector(UNFAVORITE_SELECTORS.successMarker.join(', ')) !== null;
   return { verified: strongSignal, strongSignal, auxiliarySignal };
 }

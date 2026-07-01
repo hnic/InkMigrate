@@ -24,7 +24,14 @@ export interface ObsidianWriteResult {
   expectedWrittenFileHash?: string;
   /** §13.9 实际生效的覆盖策略。 */
   overwritePolicy: 'preserve' | 'replace' | 'write-new' | 'metadata-only';
-  /** §17.5 action_code，由决策树决定；阶段 4 写 migration_attempts 时使用。 */
+  /**
+   * §17.5 action_code，由决策树决定；阶段 4 写 migration_attempts 时使用。
+   *
+   * L20: 当前 writeNote 仅产出 'stage_attempt' / 'forced_overwrite' /
+   * 'write_new_variant'。'source_update' / 'quality_upgrade' / 'metadata_update'
+   * 为前向兼容保留（对应未实现的 metadata-only 全路径与质量升级全流程，见 L21），
+   * 当前不可达，但保留在联合类型中以稳定 DB action_code 契约。
+   */
   actionCode:
     | 'stage_attempt'
     | 'source_update'

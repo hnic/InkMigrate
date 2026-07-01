@@ -86,8 +86,11 @@ export function noteRelativePath(i: NotePathInput): string {
 /**
  * I15: 把来源实例 ID 规范化为单一安全路径段——替换正反斜杠为 `-`（防止创建意外
  * 子目录层级或 `..` 逃逸），其余字符安全性由下游 resolveWithin 在写入时兜底。
+ *
+ * L10: 导出供 index-generator 复用（原仅 paths.ts 内部使用，index-generator
+ * 原始拼接 sourceInstanceId，未走此清洗，不一致）。
  */
-function sanitizePathSegment(seg: string): string {
+export function sanitizePathSegment(seg: string): string {
   return seg.replace(/[\\/]/g, '-');
 }
 

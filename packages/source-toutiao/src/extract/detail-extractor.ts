@@ -91,21 +91,22 @@ export function extractDetail(i: DetailInput): DetailResult {
 }
 
 function detectSpecialPageFromDoc(doc: Document): SourceDegradation | undefined {
-  if (doc.querySelector(SPECIAL_PAGE_SELECTORS.contentDeleted[0])) {
+  // L8: 用全部选择器 join，与 unfavorite-driver 一致
+  if (doc.querySelector(SPECIAL_PAGE_SELECTORS.contentDeleted.join(', '))) {
     return {
       code: 'content-unavailable',
       stage: 'extract',
       message: 'content deleted or not found',
     };
   }
-  if (doc.querySelector(SPECIAL_PAGE_SELECTORS.loginRequired[0])) {
+  if (doc.querySelector(SPECIAL_PAGE_SELECTORS.loginRequired.join(', '))) {
     return {
       code: 'partial-visibility',
       stage: 'extract',
       message: 'login required to view full content',
     };
   }
-  if (doc.querySelector(SPECIAL_PAGE_SELECTORS.securityChallenge[0])) {
+  if (doc.querySelector(SPECIAL_PAGE_SELECTORS.securityChallenge.join(', '))) {
     return {
       code: 'partial-visibility',
       stage: 'extract',

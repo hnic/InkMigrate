@@ -60,4 +60,20 @@ describe('filenames (§13.4)', () => {
     expect(sanitizeFilename('笔记-2026')).toBe('笔记-2026');
     expect(sanitizeFilename('如何学习编程？')).toBe('如何学习编程-');
   });
+
+  it('L1: replaces all fullwidth illegal chars (／＼：＜＞｜＂)', () => {
+    expect(sanitizeFilename('a／b')).toBe('a-b');
+    expect(sanitizeFilename('a＼b')).toBe('a-b');
+    expect(sanitizeFilename('a：b')).toBe('a-b');
+    expect(sanitizeFilename('a＜b＞c')).toBe('a-b-c');
+    expect(sanitizeFilename('a｜b')).toBe('a-b');
+    expect(sanitizeFilename('a＂b')).toBe('a-b');
+  });
+
+  it('L1: truncation does not split surrogate pairs (emoji)', () => {
+    // 😀 是代理对（2 个 UTF-16 code unit）。maxLength=1 用 code point 截断应保留完整 emoji，
+    // 而非产生孤立代理导致无效文件名。
+    const out = sanitizeFilename('😀😀😀', { maxLength: 1 });
+    expect(out).toBe('😀');
+  });
 });
