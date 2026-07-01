@@ -115,6 +115,23 @@ describe('cleanup repositories', () => {
       expect(j?.status).toBe('completed');
       expect(j?.finishedAt).toBe('2026-01-02');
     });
+
+    it('N4: updateStatus rejects unknown status', () => {
+      const { jobId } = seedPlanAndJob();
+      expect(() =>
+        new CleanupJobs(db).updateStatus(jobId, { status: 'bogus', updatedAt: 't' }),
+      ).toThrow(/非法 cleanup_job status/);
+    });
+
+    it('N4: updateStatus rejects illegal transition from terminal state', () => {
+      const { jobId } = seedPlanAndJob();
+      // running → completed 合法
+      new CleanupJobs(db).updateStatus(jobId, { status: 'completed', updatedAt: 't1' });
+      // completed → running 非法（终态不可再转换）
+      expect(() =>
+        new CleanupJobs(db).updateStatus(jobId, { status: 'running', updatedAt: 't2' }),
+      ).toThrow(/非法 cleanup_job 状态转换/);
+    });
   });
 
   describe('CleanupItems', () => {
