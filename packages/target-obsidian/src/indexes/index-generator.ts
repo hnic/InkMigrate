@@ -134,8 +134,18 @@ function buildShardKey(
   for (const dim of groupBy) {
     if (dim === 'month') {
       const date = entry.favoritedAt ?? entry.publishedAt ?? '';
-      const m = /^(\d{4}-\d{2})/.exec(date);
-      parts.push(m?.[1] ?? '未知日期');
+      // R10: 校验月份合法性（01-12），避免源数据异常（如 2025-13）产出非法分片名
+      const m = /^(\d{4})-(\d{2})/.exec(date);
+      if (m) {
+        const month = parseInt(m[2]!, 10);
+        if (month >= 1 && month <= 12) {
+          parts.push(`${m[1]}-${m[2]}`);
+        } else {
+          parts.push('未知日期');
+        }
+      } else {
+        parts.push('未知日期');
+      }
     } else if (dim === 'content-type') {
       parts.push(entry.contentKind);
     } else if (dim === 'collection') {
@@ -211,6 +221,10 @@ function renderEntryIndex(
  * 2. **重跑保护**（§13.8 "可重复生成且不覆盖用户笔记"）：若调用方传入上一轮的
  *    recordedHash，且磁盘文件已被用户修改（on-disk 哈希 ≠ recordedHash），则**跳过
  *    覆写**，保留用户文件并返回磁盘原哈希 + skipped=true。
+ *
+ *    R8（契约约束）：重跑保护仅在 recordedHash 非 null 时生效。调用方（job-runner）
+ *    必须从 listIndexArtifacts 正确传入 knownIndexArtifacts（R6 已修正其 != null 过滤）。
+ *    若未来新增调用方未传入，首次写入会跳过用户修改检测——新增调用方务必传入。
  *
  * 返回 { hash, skipped } 供 artifact 追踪。
  */
