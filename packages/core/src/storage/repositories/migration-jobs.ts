@@ -1,24 +1,15 @@
 import type { DB } from '../database.js';
-import { isJobStatus, type JobStatus } from '../../domain/states.js';
+import { isJobStatus, canJobTransition, type JobStatus } from '../../domain/states.js';
 
 /**
- * §11.1 Job status 合法转换矩阵的本地副本（与 runtime/job-state.ts 的 TRANSITIONS 保持一致）。
- * 内联在仓储层以避免 storage → runtime 的反向分层依赖；状态机变更时两处需同步。
+ * §11.1 跨状态转换 + 自环（同 status 内推进 current_stage）。
+ * M9: 矩阵改为引用 domain/states.ts 的单一真相源，消除本地副本漂移。
  */
-const JOB_TRANSITIONS: Readonly<Record<JobStatus, ReadonlySet<JobStatus>>> = {
-  created: new Set<JobStatus>(['running', 'failed']),
-  running: new Set<JobStatus>(['paused', 'interrupted', 'completed', 'failed']),
-  paused: new Set<JobStatus>(['running', 'failed']),
-  interrupted: new Set<JobStatus>(['running', 'failed']),
-  completed: new Set<JobStatus>(),
-  failed: new Set<JobStatus>(),
-};
-
 function canTransitionTo(from: JobStatus, to: JobStatus): boolean {
   // 自环（to === from）总是允许：current_stage 在同一 status 内推进（如 running→running
   // 从 scanning 到 extracting）不是状态转换，矩阵只约束跨状态转换。
   if (to === from) return true;
-  return JOB_TRANSITIONS[from].has(to);
+  return canJobTransition(from, to);
 }
 
 export interface MigrationJobInput {

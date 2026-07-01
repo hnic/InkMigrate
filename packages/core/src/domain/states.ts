@@ -179,6 +179,34 @@ export function isJobStatus(v: unknown): v is JobStatus {
   return typeof v === 'string' && (JOB_STATUS as readonly string[]).includes(v);
 }
 
+/**
+ * §11.1 Job status 合法转换矩阵（单一真相源）。
+ *
+ * M9: 此前 runtime/job-state.ts 与 storage/repositories/migration-jobs.ts 各持一份
+ * 手动同步的副本，注释承认「两处需同步」但无测试约束，漂移必然发生。提升到 domain 层
+ * （runtime 和 storage 都已依赖 domain），两处引用同一常量，消除分叉。
+ *
+ * paused 不是终态；从 paused 恢复必须先复核暂停原因。
+ * interrupted 恢复前必须重检悬挂状态。
+ * completed/failed 是终态，不可再转换。
+ */
+export const JOB_TRANSITIONS: Readonly<Record<JobStatus, ReadonlySet<JobStatus>>> = {
+  created: new Set<JobStatus>(['running', 'failed']),
+  running: new Set<JobStatus>(['paused', 'interrupted', 'completed', 'failed']),
+  paused: new Set<JobStatus>(['running', 'failed']),
+  interrupted: new Set<JobStatus>(['running', 'failed']),
+  completed: new Set<JobStatus>(),
+  failed: new Set<JobStatus>(),
+};
+
+/**
+ * §11.1 跨状态转换合法性（不含自环）。
+ * 调用方若需允许「同 status 内推进 current_stage」（自环），自行处理 to===from。
+ */
+export function canJobTransition(from: JobStatus, to: JobStatus): boolean {
+  return JOB_TRANSITIONS[from].has(to);
+}
+
 export function isJobPauseReason(v: unknown): v is JobPauseReason {
   return (
     typeof v === 'string' &&
