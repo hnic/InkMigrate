@@ -127,43 +127,57 @@ export class MigrationJobs {
    * §11.1 状态转换守卫：读取当前 status，按 JOB_TRANSITIONS 校验目标 status 合法性。
    * 终态（completed/failed）的 Job 无法再被改写，断点续跑只能从 paused/interrupted 恢复。
    * 这把规格里的转换矩阵从"纸上规则"升级为运行期强制约束，防止并发/误操作写出非法状态。
+   *
+   * M1: 未知 status（拼写错误等）直接抛错，而非原实现那样静默跳过守卫直写 DB。
+   * 读-校验-写包入事务，消除单连接内的 TOCTOU 窗口。
    */
   updateStatus(id: string, u: UpdateStatusInput): void {
-    if (isJobStatus(u.status)) {
+    // M1: 未知 status 直接拒绝——原实现仅在 isJobStatus 为真时校验，非法状态会
+    // 绕过守卫直写 DB（配合 schema 缺 CHECK，拼写错误被静默持久化）。
+    if (!isJobStatus(u.status)) {
+      throw new Error(
+        `非法 Job status 值："${u.status}"（id=${id}）；合法值：created/running/paused/interrupted/completed/failed`,
+      );
+    }
+    // 守卫后固化为 JobStatus，供事务闭包内使用（闭包会丢失类型收窄）。
+    const targetStatus: JobStatus = u.status;
+    // 读-校验-写包入事务，消除 TOCTOU（M1）。
+    const txn = this.db.transaction(() => {
       const current = this.db
         .prepare('SELECT status FROM migration_jobs WHERE id=?')
         .get(id) as { status: string } | undefined;
       if (current !== undefined && isJobStatus(current.status)) {
-        if (!canTransitionTo(current.status, u.status)) {
+        if (!canTransitionTo(current.status, targetStatus)) {
           throw new Error(
-            `非法 Job 状态转换：${current.status} → ${u.status}（id=${id}）。` +
+            `非法 Job 状态转换：${current.status} → ${targetStatus}（id=${id}）。` +
               `终态（completed/failed）不可再转换；resume 只能从 paused/interrupted 恢复。`,
           );
         }
       }
-    }
-    this.db
-      .prepare(
-        `UPDATE migration_jobs
-         SET status=@status,
-             current_stage=COALESCE(@currentStage, current_stage),
-             pause_reason_code=@pauseReasonCode,
-             paused_at=@pausedAt,
-             started_at=COALESCE(@startedAt, started_at),
-             finished_at=COALESCE(@finishedAt, finished_at),
-             updated_at=@updatedAt
-         WHERE id=@id`,
-      )
-      .run({
-        id,
-        status: u.status,
-        currentStage: u.currentStage ?? null,
-        pauseReasonCode: u.pauseReasonCode ?? null,
-        pausedAt: u.pausedAt ?? null,
-        startedAt: u.startedAt ?? null,
-        finishedAt: u.finishedAt ?? null,
-        updatedAt: u.updatedAt,
-      });
+      this.db
+        .prepare(
+          `UPDATE migration_jobs
+           SET status=@status,
+               current_stage=COALESCE(@currentStage, current_stage),
+               pause_reason_code=@pauseReasonCode,
+               paused_at=@pausedAt,
+               started_at=COALESCE(@startedAt, started_at),
+               finished_at=COALESCE(@finishedAt, finished_at),
+               updated_at=@updatedAt
+           WHERE id=@id`,
+        )
+        .run({
+          id,
+          status: u.status,
+          currentStage: u.currentStage ?? null,
+          pauseReasonCode: u.pauseReasonCode ?? null,
+          pausedAt: u.pausedAt ?? null,
+          startedAt: u.startedAt ?? null,
+          finishedAt: u.finishedAt ?? null,
+          updatedAt: u.updatedAt,
+        });
+    });
+    txn();
   }
 }
 
