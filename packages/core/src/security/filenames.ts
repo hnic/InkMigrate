@@ -6,12 +6,13 @@ const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i;
 
 /**
  * §13.4 在 Windows/macOS/Linux 上都不允许出现在文件名中的字符。
- * 同时覆盖全角变体（`？`、`＊` 等），因为它们在终端/同步工具中容易造成歧义。
+ * 同时覆盖全角变体（`／`：`＼`：`＜`＞`｜`？`＊` 等），因为它们在终端/同步工具中
+ * 容易造成歧义。L1: 原仅覆盖 ？＊，补齐 ／＼：＜＞｜＂ 全角形式。
  */
-const ILLEGAL = /[\\/:*?"<>|？＊]/g;
+const ILLEGAL = /[\\/:*?"<>|／＼：＜＞｜＂？＊]/g;
 
-/** §13.4 控制字符（C0）。 */
-const CONTROL = /[\x00-\x1f]/g;
+/** §13.4 控制字符（C0）+ C1 删除符 + BOM。 */
+const CONTROL = /[\x00-\x1f\x7f]/g;
 
 export interface SanitizeOptions {
   /** 主体最大长度，默认 100。 */
@@ -39,8 +40,10 @@ export function sanitizeFilename(
   s = s.replace(/[\s.]+$/g, '');
   // 先截断（截断可能产生保留名，例如 'CONCEPT' → 'CON'），
   // 之后再删除结尾并检查保留名，避免截断后再次逃逸。
+  // L1: 用 Array.from 按 code point 截断，避免 slice(0,max) 截断代理对（如 emoji）
+  // 产生孤立代理导致无效文件名。
   if (s.length > max) {
-    s = s.slice(0, max).replace(/[\s.]+$/g, '');
+    s = Array.from(s).slice(0, max).join('').replace(/[\s.]+$/g, '');
   }
   if (RESERVED.test(s)) {
     s = '_' + s;
