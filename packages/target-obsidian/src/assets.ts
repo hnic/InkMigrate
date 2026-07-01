@@ -1,17 +1,14 @@
 import {
-  mkdirSync,
-  writeFileSync,
   existsSync,
   statSync,
   readFileSync,
 } from 'node:fs';
-import { dirname } from 'node:path';
 import {
   resolveWithin,
   assertSymlinkSafe,
-  assertWriteDirSafe,
   writtenFileHash,
 } from '@inkmigrate/core';
+import { atomicWriteRaw } from './atomic-write.js';
 
 export interface WriteAssetInput {
   vaultPath: string;
@@ -30,17 +27,19 @@ export interface WriteAssetResult {
  *
  * C6: 符号链接逃逸防护。原实现仅 resolveWithin（词法 `..` 检查，不解析 symlink），
  * 若 Vault 内附件目录链中存在指向外部的 symlink，writeFileSync 会解引用并把任意字节
- * 写到 Vault 外（如 ~/.ssh/authorized_keys）。与笔记侧 atomicWrite/writeShard 一致，
- * 这里在 mkdir 之后、write 之前调用 assertWriteDirSafe 校验父目录链真实路径在 Vault 内。
+ * 写到 Vault 外（如 ~/.ssh/authorized_keys）。atomicWriteRaw 内部在写入前后做
+ * assertSymlinkSafe 校验真实路径在 Vault 内。
+ *
+ * H3: 原直接 writeFileSync 非原子——进程被杀留下半截损坏附件，且重跑保护可能把它
+ * 当「用户改过 → 跳过覆写」。现复用 atomicWriteRaw（temp + rename），与笔记/索引侧
+ * （I17 修复）一致，消除半写风险。
  */
 export function writeAsset(i: WriteAssetInput): WriteAssetResult {
   const abs = resolveWithin(i.vaultPath, i.relativePath);
-  mkdirSync(dirname(abs), { recursive: true });
-  assertWriteDirSafe(i.vaultPath, abs);
-  writeFileSync(abs, i.bytes);
+  const hash = atomicWriteRaw(abs, i.bytes, i.vaultPath);
   return {
     relativePath: i.relativePath,
-    writtenFileHash: writtenFileHash(i.bytes),
+    writtenFileHash: hash,
     byteSize: i.bytes.length,
   };
 }
