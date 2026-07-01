@@ -23,7 +23,12 @@ import {
   type ReportItemRow,
 } from '../reports/migration-report.js';
 import { isQualityUpgradeCandidate } from './quality-upgrade.js';
-import { withRetry, DEFAULT_RETRY_POLICY } from './retry.js';
+import {
+  withRetry,
+  DEFAULT_RETRY_POLICY,
+  RateLimitedError,
+  shouldPauseForRateLimit,
+} from './retry.js';
 import { withJitter, ITEM_INTERVAL_JITTER } from './jitter.js';
 import { installSignalHandlers } from './signals.js';
 
@@ -303,10 +308,9 @@ export async function runMigrationJob(
         signal: abortController.signal,
         ...(i.onLog !== undefined ? { onLog: i.onLog } : {}),
       }).catch((e): ItemFinalState => {
-        // §18.2 限流检测：processOneItem 抛出 __rateLimited 时 Job 进入 paused
-        const rlErr = e as { __rateLimited?: boolean; httpStatus?: number };
-        if (rlErr.__rateLimited === true) {
-          log('warn', `限流检测 (${rlErr.httpStatus})，Job 进入 paused`);
+        // §18.2 限流检测：processOneItem 抛出 RateLimitedError 时 Job 进入 paused
+        if (e instanceof RateLimitedError) {
+          log('warn', `限流检测 (${e.httpStatus})，Job 进入 paused`);
           throw e; // 向上传播到 runMigrationJob 的 try 块
         }
         // C5: 取消导致的 'aborted' 错误归为 skipped（可恢复续跑），不污染为 permanent_failed
@@ -355,9 +359,8 @@ export async function runMigrationJob(
       }
     }
     } catch (e) {
-      // §18.2 捕获限流信号
-      const rlErr = e as { __rateLimited?: boolean };
-      if (rlErr.__rateLimited === true) {
+      // §18.2 捕获限流信号（H8: 用 instanceof 替代魔法属性判断）
+      if (e instanceof RateLimitedError) {
         rateLimited = true;
       } else {
         throw e; // 非限流错误继续向上传播
@@ -899,9 +902,11 @@ async function processOneItem(
     }
 
     // §18.2 检测限流信号（429/503），向上抛出以触发 Job paused
+    // H8: 用 RateLimitedError（Error 子类）替代原「抛普通对象 + 魔法属性 __rateLimited」，
+    // 并复用 shouldPauseForRateLimit 单一判定源，消除两份独立判断的漂移风险。
     const httpStatus = (e as { httpStatus?: number }).httpStatus;
-    if (httpStatus === 429 || httpStatus === 503) {
-      throw { __rateLimited: true, httpStatus, message: errMsg };
+    if (httpStatus !== undefined && shouldPauseForRateLimit(httpStatus)) {
+      throw new RateLimitedError(httpStatus, errMsg);
     }
 
     // 导航超时、网络错误等临时性故障也标记为 permanent_failed，
