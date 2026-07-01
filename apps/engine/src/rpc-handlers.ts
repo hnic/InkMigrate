@@ -240,6 +240,9 @@ async function handleScanStart(params: ScanStartParams | undefined): Promise<Sca
   if (typeof params.favoritesUrl !== 'string' || params.favoritesUrl.length === 0) {
     throw new Error('favoritesUrl 不能为空');
   }
+  // M5: scan.start 路径补 maxItems 校验，与 migrate.start/cleanup.unfavorite 一致，
+  // 拒绝 GUI parseInt 产生的 NaN（I25：非法数值不应直达抓取层）。
+  requirePositiveIntIfDefined(params.maxItems, 'maxItems');
   beginTask('scan'); // C10: 占用活跃任务槽位（拒绝并发长任务，避免 resetCancel 互踩取消请求）
   const profileDir = profilePath(params.stateDir, params.source);
   if (!profileExists(params.stateDir, params.source)) {
@@ -444,10 +447,13 @@ async function runMigrateJob(
       const startParams = params as MigrateStartParams;
       sourceInstanceId = startParams.source;
       targetInstanceId = startParams.target;
-      // I25: 信任边界校验速率/上限数值，防 NaN/0 触发风控封号
-      if (startParams.intervalMs !== undefined) requirePositiveMs(startParams.intervalMs, 'intervalMs');
-      requirePositiveIntIfDefined(startParams.maxItems, 'maxItems');
     }
+    // M5: maxItems/intervalMs 校验对 start 和 resume 两路径统一生效（原仅 start 校验，
+    // resume 路径漏校验，GUI parseInt 产生的 NaN 可直达抓取层，I25 封号风险）。
+    if ('intervalMs' in params && params.intervalMs !== undefined) {
+      requirePositiveMs(params.intervalMs, 'intervalMs');
+    }
+    requirePositiveIntIfDefined(params.maxItems, 'maxItems');
 
     // 构造 source adapter（profileDir 在 ensureInstance 之前计算，用于 config_hash）
     const profileDir = profilePath(params.stateDir, sourceInstanceId);
