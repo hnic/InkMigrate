@@ -1,6 +1,21 @@
 import { JSDOM } from 'jsdom';
 
 /**
+ * M4: 校验 URL 字符串的 scheme 是否安全（仅允许 http/https/协议相对/路径相对）。
+ * stage 5 DOMPurify 对 srcset 做整值去空白 URI 白名单校验，非逐候选 URL，故
+ * stage 6 提升首候选到 src 前需独立校验，杜绝 javascript:/data: 注入。
+ */
+function isSafeUrlScheme(url: string, baseUrl: string): boolean {
+  try {
+    const u = new URL(url, baseUrl);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    // 解析失败视为不安全
+    return false;
+  }
+}
+
+/**
  * §12.9 stage 6：解析相对 URL、懒加载资源和附件引用。
  *
  * - 把相对 URL 转绝对（基于 baseUrl）。
@@ -49,7 +64,10 @@ export function resolveLazyLoadAndUrls(
       const srcset = img.getAttribute('srcset');
       if (srcset) {
         const first = srcset.split(',')[0]?.trim().split(/\s+/)[0];
-        if (first) {
+        // M4: srcset 在 DOMPurify（stage 5）中按整值去空白做 URI 白名单校验，
+        // 非逐候选 URL 校验，故此处提升首候选到 src 前需独立校验 scheme。
+        // 拒绝 javascript:/data: 等危险 scheme（仅允许 http/https/协议相对/根相对）。
+        if (first && isSafeUrlScheme(first, baseUrl)) {
           resolved = first;
         }
       }
@@ -61,6 +79,8 @@ export function resolveLazyLoadAndUrls(
     if (src) {
       try {
         const abs = new URL(src, baseUrl).toString();
+        // M4: 最终 src 也校验 scheme，防御 data-* 提升或 DOMPurify 残留的危险 scheme。
+        if (!isSafeUrlScheme(abs, baseUrl)) return;
         img.setAttribute('src', abs);
         images.push(abs);
         if (
