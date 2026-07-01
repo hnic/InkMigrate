@@ -211,7 +211,16 @@ async function writeNote(
       finalHash = atomicWrite(absPath, contentToWrite, config.vaultPath);
       break;
     case 'write_new_variant': {
-      finalRelativePath = oplan.relativePath.replace(/\.md$/, '.imported-new.md');
+      // M10: 变体路径未做存在性检查——连续两次 write-new 跑同一 item 会覆盖前次变体
+      // （真实数据丢失）。改为：若 .imported-new.md 已存在，递增后缀（-2, -3...）。
+      const variantBase = oplan.relativePath.replace(/\.md$/, '.imported-new');
+      let candidate = `${variantBase}.md`;
+      let suffix = 2;
+      while (existsSync(noteAbsolutePath(config.vaultPath, candidate))) {
+        candidate = `${variantBase}-${suffix}.md`;
+        suffix++;
+      }
+      finalRelativePath = candidate;
       finalHash = atomicWrite(
         noteAbsolutePath(config.vaultPath, finalRelativePath),
         contentToWrite,
