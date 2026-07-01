@@ -396,11 +396,13 @@ export async function runMigrationJob(
       };
     }
 
-    // §18.3 如果被中断，把未处理条目标记为 interrupted
+    // §18.3 如果被中断，把未处理条目标记为 interrupted（可恢复态），与限流路径一致。
+    // 注意：不能用 'skipped'（终态），否则 reconciliation 的 recoverableCount 漏计这些条目，
+    // 导致 reconciliationOk 误报 true、断点续跑丢失这些条目（规格 §11.1）。
     if (interrupted) {
       const processed = itemStates.length;
       for (let idx = processed; idx < refs.length; idx++) {
-        itemStates.push('skipped');
+        itemStates.push('interrupted');
       }
     }
 
