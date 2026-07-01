@@ -91,3 +91,4 @@ export {
   canResumeFrom,
 } from './runtime/job-state.js';
 export { reconcileJob, deriveFinalStateCounts } from './runtime/reconciliation.js';
+export { ensureInstance, computeConfigHash, stableStringify } from './runtime/instance-helpers.js';

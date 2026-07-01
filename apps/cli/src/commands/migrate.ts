@@ -5,6 +5,7 @@ import {
   MigrationJobs,
   computeFingerprint,
   validateSourceItemQuality,
+  ensureInstance,
   type SourceAdapter,
   type SourceItem,
   type SourceItemRef,
@@ -62,20 +63,6 @@ export function createMigrateCommand(): Command {
         const jobId = `mig-${Date.now()}`;
         const now = new Date().toISOString();
 
-        // 确保实例记录存在
-        ensureInstance(db, opts.source, 'toutiao', 'source');
-        ensureInstance(db, opts.target, 'obsidian', 'target');
-
-        new MigrationJobs(db).create({
-          id: jobId,
-          sourceInstanceId: opts.source,
-          targetInstanceId: opts.target,
-          status: 'created',
-          currentStage: 'preflight',
-          createdAt: now,
-          updatedAt: now,
-        });
-
         // 构造 source adapter
         const sourceAdapter = opts.fixtureDir
           ? createFixtureSource(opts.fixtureDir, opts.source)
@@ -120,6 +107,26 @@ export function createMigrateCommand(): Command {
           } as Record<string, unknown>,
         };
 
+        // H5: 确保实例记录存在——移到 config 构造后，传入实际 config 以计算真实
+        // config_hash（原硬编码 'h' 与 Engine 的真实哈希分叉，导致 CLI 创建的 instance
+        // 随后被 GUI 迁移看到哈希「变化」触发虚假 UPDATE）。
+        ensureInstance(db, opts.source, 'toutiao', 'source', {
+          sourceInstanceId: opts.source,
+          profileDir: profilePath(opts.stateDir, opts.source),
+          headless: false,
+        });
+        ensureInstance(db, opts.target, 'obsidian', 'target', targetContext.targetConfig);
+
+        new MigrationJobs(db).create({
+          id: jobId,
+          sourceInstanceId: opts.source,
+          targetInstanceId: opts.target,
+          status: 'created',
+          currentStage: 'preflight',
+          createdAt: now,
+          updatedAt: now,
+        });
+
         console.log(`开始迁移 Job ${jobId}...`);
 
         const result = await runMigrationJob({
@@ -147,22 +154,6 @@ export function createMigrateCommand(): Command {
         db.close();
       }
     });
-}
-
-function ensureInstance(
-  db: DB,
-  id: string,
-  adapterKind: string,
-  role: 'source' | 'target',
-): void {
-  const table = role === 'source' ? 'source_instances' : 'target_instances';
-  const existing = db.prepare(`SELECT id FROM ${table} WHERE id = ?`).get(id);
-  if (!existing) {
-    db.prepare(
-      `INSERT INTO ${table}(id,adapter_kind,adapter_version,adapter_api_version,config_hash,created_at,updated_at)
-       VALUES(?,?,?,?,?,?,?)`,
-    ).run(id, adapterKind, '1.0.0', '1.0.0', 'h', new Date().toISOString(), new Date().toISOString());
-  }
 }
 
 function createFixtureSource(
