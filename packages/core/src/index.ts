@@ -81,7 +81,7 @@ export { installSignalHandlers } from './runtime/signals.js';
 export type { GracefulShutdownHandlers } from './runtime/signals.js';
 export { runMigrationJob } from './runtime/job-runner.js';
 export type { JobRunnerInput, JobRunnerResult, JobProgress } from './runtime/job-runner.js';
-export { withRetry, DEFAULT_RETRY_POLICY, shouldPauseForRateLimit, RateLimitedError, isRateLimitedError } from './runtime/retry.js';
+export { withRetry, DEFAULT_RETRY_POLICY, shouldPauseForRateLimit, RateLimitedError, isRateLimitedError, AbortError, isAbortError } from './runtime/retry.js';
 export type { RetryPolicy } from './runtime/retry.js';
 export { withJitter, ITEM_INTERVAL_JITTER, RETRY_BACKOFF_JITTER } from './runtime/jitter.js';
 export {

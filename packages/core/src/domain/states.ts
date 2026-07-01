@@ -207,7 +207,10 @@ export function canJobTransition(from: JobStatus, to: JobStatus): boolean {
   return JOB_TRANSITIONS[from].has(to);
 }
 
-// §16.9 cleanup_jobs 生命周期（比 migration_jobs 简单：无 paused/failed）
+// §16.9 cleanup_jobs 生命周期
+// M-6: interrupted 允许 → running（恢复语义，与 migration-jobs 一致）。
+// 不加 failed（orchestrator 用 interrupted 表达硬失败；加 failed 需 schema v4
+// 重建 cleanup_jobs CHECK，且当前无人写入，留后续）。
 export const CLEANUP_JOB_STATUS = [
   'created',
   'running',
@@ -225,7 +228,8 @@ export function isCleanupJobStatus(v: unknown): v is CleanupJobStatus {
 
 /**
  * §16.9 cleanup_jobs 合法转换矩阵（N4: 单一真相源，供 storage 守卫复用）。
- * created → running；running → completed/interrupted；终态不可再转换。
+ * M-6: interrupted → running 允许恢复（原为终态，resume 实际靠新建 job 绕过，
+ * 但补此转换使状态机语义完整，与 migration-jobs 对齐）。completed 是终态。
  */
 export const CLEANUP_JOB_TRANSITIONS: Readonly<
   Record<CleanupJobStatus, ReadonlySet<CleanupJobStatus>>
@@ -233,7 +237,7 @@ export const CLEANUP_JOB_TRANSITIONS: Readonly<
   created: new Set<CleanupJobStatus>(['running', 'interrupted']),
   running: new Set<CleanupJobStatus>(['completed', 'interrupted']),
   completed: new Set<CleanupJobStatus>(),
-  interrupted: new Set<CleanupJobStatus>(),
+  interrupted: new Set<CleanupJobStatus>(['running']),
 };
 
 export function canCleanupJobTransition(

@@ -10,7 +10,7 @@ import { deriveFingerprintInput } from '../normalize/fingerprint.js';
 import { ToutiaoBrowserSession } from '../browser/browser-session.js';
 import { driveScanFavorites } from '../browser/scan-driver.js';
 import { driveExtractDetail } from '../browser/extract-driver.js';
-import { driveUnfavorite, inspectCollectedState } from '../browser/unfavorite-driver.js';
+import { driveUnfavorite, inspectCollectedState, waitForCollectedAttribute } from '../browser/unfavorite-driver.js';
 import { SPECIAL_PAGE_SELECTORS, UNFAVORITE_SELECTORS } from '../selectors/index.js';
 
 export const SOURCE_TOUTIAO_KIND = 'toutiao' as const;
@@ -112,6 +112,10 @@ export function createToutiaoSource(
           // count()=0 → 误判 unknown，是生产"未知"大量产生的根因）
           try {
             await collectBtn.waitFor({ state: 'attached', timeout: 10_000 });
+            // M-3: 与 execute 路径（driveUnfavorite）一致，等待 SPA hydration 写入
+            // aria-pressed 属性，避免仅 attached 时 readCollectedState 回退到
+            // 真实页面不存在的 collected class → 误判未收藏。
+            await waitForCollectedAttribute(collectBtn, 10_000);
           } catch {
             // 超时则保留 not found → unknown 语义
           }
@@ -152,6 +156,8 @@ export function createToutiaoSource(
             .first();
           try {
             await collectBtn.waitFor({ state: 'attached', timeout: 10_000 });
+            // M-3: 与 execute/inspect 一致，等待 SPA hydration 写入 aria-pressed
+            await waitForCollectedAttribute(collectBtn, 10_000);
           } catch {
             return { verified: false };
           }

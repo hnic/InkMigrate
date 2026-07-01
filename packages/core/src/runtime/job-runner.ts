@@ -28,6 +28,7 @@ import {
   DEFAULT_RETRY_POLICY,
   RateLimitedError,
   shouldPauseForRateLimit,
+  isAbortError,
 } from './retry.js';
 import { withJitter, ITEM_INTERVAL_JITTER } from './jitter.js';
 import { installSignalHandlers } from './signals.js';
@@ -316,8 +317,9 @@ export async function runMigrationJob(
           log('warn', `限流检测 (${e.httpStatus})，Job 进入 paused`);
           throw e; // 向上传播到 runMigrationJob 的 try 块
         }
-        // C5: 取消导致的 'aborted' 错误归为 skipped（可恢复续跑），不污染为 permanent_failed
-        if (e instanceof Error && e.message === 'aborted') {
+        // C5: 取消导致的 AbortError 归为 skipped（可恢复续跑），不污染为 permanent_failed
+        // M-7: 用 isAbortError 替代魔法字符串 e.message === 'aborted'
+        if (isAbortError(e)) {
           log('warn', `条目因取消信号中断，归为可恢复态（续跑可重试）`);
           return 'skipped';
         }

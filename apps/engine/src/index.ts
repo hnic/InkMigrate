@@ -22,10 +22,11 @@ function main(): void {
     logToStderr('error', `未处理的 Promise 拒绝：${String(reason)}`);
   });
   process.on('uncaughtException', (err) => {
-    // L12: Node 官方文档警告 uncaughtException 后进程状态可能已损坏，继续运行不安全。
-    // 记录后退出（非零码），让宿主重启一个干净的 sidecar，而非带着未知状态继续服务。
-    logToStderr('error', `未捕获异常，进程将退出以避免损坏状态：${err.message}\n${err.stack ?? ''}`);
-    process.exit(1);
+    // M-10: L12 改为 exit(1) 但 Tauri sidecar 无重启机制 → 一次未捕获异常永久杀死
+    // sidecar，所有后续 RPC 失败。回退到记录后继续运行（与 unhandledRejection 一致）。
+    // Node 官方警告 uncaughtException 后状态可能损坏，但 sidecar 死亡比状态不确定
+    // 更糟（用户必须重启整个应用）。日志记录让问题可诊断。
+    logToStderr('error', `未捕获异常（已恢复，sidecar 继续运行）：${err.message}\n${err.stack ?? ''}`);
   });
 
   // 检查堆大小是否足够（全量迁移数千条需要大量内存）

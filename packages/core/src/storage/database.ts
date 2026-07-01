@@ -30,17 +30,37 @@ export function openDatabase(opts: OpenDbOptions): DB {
   const hasSchemaTable = db
     .prepare("SELECT COUNT(*) c FROM sqlite_master WHERE type='table' AND name='schema_version'")
     .get() as { c: number };
-  if (hasSchemaTable.c > 0 && getCurrentSchemaVersion(db) < SCHEMA_VERSION) {
-    db.pragma('foreign_keys = OFF');
-    try {
+  try {
+    if (hasSchemaTable.c > 0 && getCurrentSchemaVersion(db) < SCHEMA_VERSION) {
+      db.pragma('foreign_keys = OFF');
+      try {
+        migrate(db);
+      } finally {
+        db.pragma('foreign_keys = ON');
+      }
+    } else {
+      // 全新库或已是最新版本：FK 保持开启，migrate 安全（CREATE IF NOT EXISTS 不重建表）
       migrate(db);
-    } finally {
       db.pragma('foreign_keys = ON');
     }
-  } else {
-    // 全新库或已是最新版本：FK 保持开启，migrate 安全（CREATE IF NOT EXISTS 不重建表）
-    migrate(db);
-    db.pragma('foreign_keys = ON');
+    // M-1: 迁移后完整性检查——确认关键表存在。防止损坏库（schema_version 存在但
+    // 表缺失）静默"成功"（CREATE IF NOT EXISTS 不重建已缺失的表）。
+    const REQUIRED_TABLES = [
+      'source_instances', 'target_instances', 'migration_jobs', 'source_items',
+      'target_artifacts', 'migration_attempts',
+    ];
+    for (const t of REQUIRED_TABLES) {
+      const exists = db
+        .prepare("SELECT COUNT(*) c FROM sqlite_master WHERE type='table' AND name=?")
+        .get(t) as { c: number };
+      if (exists.c === 0) {
+        throw new Error(`数据库完整性检查失败：关键表 ${t} 不存在（数据库可能已损坏）`);
+      }
+    }
+  } catch (e) {
+    // M-1: migrate 或完整性检查失败时关闭 DB，避免泄漏处于不确定状态的连接
+    db.close();
+    throw e;
   }
   return db;
 }

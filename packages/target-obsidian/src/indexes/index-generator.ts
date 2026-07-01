@@ -112,8 +112,11 @@ export function generateShardIndexes(i: GenerateIndexInput): GenerateIndexResult
   const entryIndexRel = [i.config.importSubdir, safeSourceId, `${sanitizeFilename(safeSourceId)}收藏索引.md`]
     .filter(Boolean)
     .join('/');
-  // R7: renderEntryIndex 尊重 linkStyle（原始终终用 wikilink，与 shard 渲染不一致）
-  const entryContent = renderEntryIndex(shards, safeSourceId, i.config.linkStyle, indexDir);
+  // R7/M-5: renderEntryIndex 尊重 linkStyle。entryDir 必须是入口文件的父目录
+  // （<importSubdir>/<src>），而非 indexDir（<importSubdir>/<src>/_索引）——
+  // 入口文件与 _索引 是兄弟关系，markdown 相对链接需从入口文件位置算起。
+  const entryDir = dirname(entryIndexRel);
+  const entryContent = renderEntryIndex(shards, safeSourceId, i.config.linkStyle, entryDir);
   const entryWritten = writeShard(i.vaultPath, entryIndexRel, entryContent, knownByPath.get(entryIndexRel));
 
   return {

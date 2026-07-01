@@ -288,7 +288,7 @@ export async function inspectCollectedState(
  * 而真实页面按钮不带 collected class（selectors 注释已声明），导致误判"未收藏"。
  * 这里轮询直到属性出现或超时，超时则回退（保留原行为，但给 SPA 足够 hydration 时间）。
  */
-async function waitForCollectedAttribute(
+export async function waitForCollectedAttribute(
   collectBtn: ReturnType<Page['locator']>,
   timeoutMs: number,
 ): Promise<void> {
