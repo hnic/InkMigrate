@@ -6,17 +6,32 @@
  * - stderr：日志输出（不干扰 JSON-RPC 通道）
  */
 import * as readline from 'node:readline';
+import type { ZodType, ZodError } from 'zod';
 import type { RpcRequest, RpcResponse, RpcNotification, RpcError } from './protocol.js';
 
 type RequestHandler = (
   params: Record<string, unknown> | undefined,
 ) => Promise<unknown>;
 
-const handlers = new Map<string, RequestHandler>();
+interface HandlerEntry {
+  handler: RequestHandler;
+  /** N7: 可选 zod schema，在 dispatch 前校验 params，替代各 handler 内的散落守卫。 */
+  schema: ZodType | undefined;
+}
 
-/** 注册一个 RPC method 处理器。 */
-export function registerMethod(method: string, handler: RequestHandler): void {
-  handlers.set(method, handler);
+const handlers = new Map<string, HandlerEntry>();
+
+/**
+ * 注册一个 RPC method 处理器。
+ * N7: 可选 schema 在 dispatch 前校验 params（信任边界），校验失败返回 -32602
+ * (invalid params)，替代各 handler 内的散落 requireXxx 守卫。
+ */
+export function registerMethod(
+  method: string,
+  handler: RequestHandler,
+  schema?: ZodType,
+): void {
+  handlers.set(method, { handler, schema });
 }
 
 /** 发送 Response 到 stdout。 */
@@ -156,8 +171,8 @@ export function startStdinLoop(): void {
 }
 
 async function handleRequest(req: RpcRequest): Promise<void> {
-  const handler = handlers.get(req.method);
-  if (handler === undefined) {
+  const entry = handlers.get(req.method);
+  if (entry === undefined) {
     sendErrorResponse(req.id, {
       code: -32601,
       message: `method not found: ${req.method}`,
@@ -165,8 +180,21 @@ async function handleRequest(req: RpcRequest): Promise<void> {
     return;
   }
 
+  // N7: schema 校验（信任边界）——在 dispatch 前拒绝非法 params
+  if (entry.schema !== undefined) {
+    const parsed = entry.schema.safeParse(req.params);
+    if (!parsed.success) {
+      const zErr = parsed.error as ZodError;
+      sendErrorResponse(req.id, {
+        code: -32602,
+        message: `invalid params: ${zErr.errors.map((e: { message: string }) => e.message).join('; ')}`,
+      });
+      return;
+    }
+  }
+
   try {
-    const result = await handler(req.params);
+    const result = await entry.handler(req.params);
     sendResponse(req.id, result);
   } catch (e) {
     const err = e as Error & { code?: string };
