@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { rmSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import Database from 'better-sqlite3';
 import { makeMemoryDb } from '../helpers/db.js';
 import { migrate, getCurrentSchemaVersion, SCHEMA_VERSION } from '../../src/storage/database.js';
-import type { DB } from '../../src/index.js';
+import { applySchemaV1 } from '../../src/storage/schema.js';
+import { openDatabase, type DB } from '../../src/index.js';
 
 let db: DB;
 beforeEach(() => {
@@ -267,6 +272,71 @@ describe('schema enforcement (§16.12, §24.5)', () => {
     it('fresh db reaches SCHEMA_VERSION after migrate', () => {
       migrate(db);
       expect(getCurrentSchemaVersion(db)).toBe(SCHEMA_VERSION);
+    });
+
+    it('R18: v1 文件库升级到 v2 不丢数据且 CHECK 生效', async () => {
+      // 用文件库（表重建迁移需文件库才能真实体现 DROP/RENAME）。
+      // 直接用原始 better-sqlite3 实例手动建 v1，不经 openDatabase（避免自动跑到 v2）。
+      const dir = mkdtempSync(join(tmpdir(), 'inkmigrate-v1-upgrade-'));
+      const rawDb = new Database(join(dir, 'v1.sqlite'));
+      try {
+        rawDb.pragma('foreign_keys = ON');
+        // 手动建 v1 schema（模拟一个 v1 时代的库）
+        applySchemaV1(rawDb);
+        // applySchemaV1 插入 schema_version=1，但 openDatabase 的 migrate 会再插一次（ON CONFLICT）
+        // 为模拟真实 v1 库，确认当前版本是 1
+        const v1Version = rawDb
+          .prepare('SELECT MAX(version) AS v FROM schema_version')
+          .get() as { v: number };
+        expect(v1Version.v).toBe(1);
+
+        // 插入真实 v1 数据
+        rawDb.prepare(
+          `INSERT INTO source_instances(id,adapter_kind,adapter_version,adapter_api_version,config_hash,created_at,updated_at)
+           VALUES('s1','toutiao','1.0.0','1.0.0','h','t','t')`,
+        ).run();
+        rawDb.prepare(
+          `INSERT INTO target_instances(id,adapter_kind,adapter_version,adapter_api_version,config_hash,created_at,updated_at)
+           VALUES('t1','obsidian','1.0.0','1.0.0','h','t','t')`,
+        ).run();
+        rawDb.prepare(
+          `INSERT INTO migration_jobs(id,source_instance_id,target_instance_id,status,current_stage,scan_count,verified_count,created_at,updated_at)
+           VALUES('j1','s1','t1','running','extracting',10,3,'t','t')`,
+        ).run();
+        rawDb.close();
+
+        // 现在用 openDatabase 打开这个 v1 库——会自动触发 migrate 升级到 v2
+        const upgraded = openDatabase({ path: join(dir, 'v1.sqlite') });
+        try {
+          expect(getCurrentSchemaVersion(upgraded)).toBe(SCHEMA_VERSION);
+
+          // 数据完整：job 仍在，字段值未丢
+          const job = upgraded.prepare(
+            `SELECT status, current_stage, scan_count, verified_count FROM migration_jobs WHERE id='j1'`,
+          ).get() as { status: string; current_stage: string; scan_count: number; verified_count: number };
+          expect(job.status).toBe('running');
+          expect(job.current_stage).toBe('extracting');
+          expect(job.scan_count).toBe(10);
+          expect(job.verified_count).toBe(3);
+
+          // CHECK 生效：非法 status 被拒
+          expect(() =>
+            upgraded.prepare(`UPDATE migration_jobs SET status='bogus' WHERE id='j1'`).run(),
+          ).toThrow(/CHECK/);
+
+          // v2 新增索引存在
+          const idxCount = (
+            upgraded
+              .prepare("SELECT COUNT(*) c FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'")
+              .get() as { c: number }
+          ).c;
+          expect(idxCount).toBeGreaterThanOrEqual(2);
+        } finally {
+          upgraded.close();
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
   });
 
