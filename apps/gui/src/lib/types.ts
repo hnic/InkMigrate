@@ -1,4 +1,23 @@
 /** 全局共享类型定义。 */
+// R12: RPC 协议类型从 @inkmigrate/protocol 共享包导入，消除重声明漂移。
+export type {
+  ProgressNotification as ProgressEvent,
+  LogNotification,
+  MigrateResumableResult as ResumableJob,
+  MigrateResult,
+  StatusQueryResult,
+  ScanStartResult,
+  CleanupResult,
+  AuthLoginResult,
+  AuthStatusResult,
+} from '@inkmigrate/protocol';
+
+import type { LogNotification } from '@inkmigrate/protocol';
+
+/** GUI 本地日志条目（含 timestamp，由 useSidecar 在收到通知时附加）。 */
+export interface LogEntry extends LogNotification {
+  timestamp: number;
+}
 
 export interface AppSettings {
   stateDir: string;
@@ -8,37 +27,6 @@ export interface AppSettings {
   target: string;
   /** 登录状态（由 LoginPage 检测后写入） */
   loggedIn?: boolean;
-}
-
-export interface ProgressEvent {
-  jobId?: string;
-  phase: 'scanning' | 'migrating' | 'cleanup' | 'login' | string;
-  current: number;
-  total: number;
-  currentItem?: string;
-  stage?: string;
-  counts?: {
-    verified?: number;
-    degraded?: number;
-    failed?: number;
-    conflict?: number;
-    skipped?: number;
-  };
-}
-
-export interface LogEntry {
-  level: 'info' | 'warn' | 'error';
-  message: string;
-  timestamp: number;
-}
-
-/** 可续跑 Job 摘要（migrate.resumable 返回）。job 为 null 表示没有可续跑的 Job。 */
-export interface ResumableJob {
-  job: string | null;
-  status?: string;
-  total?: number;
-  verified?: number;
-  targetInstanceId?: string;
 }
 
 export type PageId = 'login' | 'scan' | 'migrate' | 'cleanup' | 'report' | 'settings';

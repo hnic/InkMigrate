@@ -12,9 +12,13 @@ export function createTargetCommand(): Command {
     .description('添加目标适配器实例')
     .requiredOption('--id <id>', '目标实例 ID')
     .action((adapter: string, opts: { id: string }) => {
-      console.log(
-        `Stage 4 占位：将添加目标 ${adapter} (id=${opts.id}) 到 inkmigrate.yaml`,
-      );
+      // N6: 占位命令——明确报错而非静默假装成功。
+      console.error(`target add 尚未实现（v1 阶段占位）。`);
+      console.error(`请手动编辑 inkmigrate.yaml，在 targets: 下添加：`);
+      console.error(`  - id: ${opts.id}`);
+      console.error(`    adapter: ${adapter}`);
+      console.error(`    config: {}`);
+      process.exit(1);
     });
 
   target
@@ -22,7 +26,11 @@ export function createTargetCommand(): Command {
     .description('校验目标配置')
     .requiredOption('--target <id>', '目标实例 ID')
     .action((opts: { target: string }) => {
-      console.log(`Stage 4 占位：将校验目标 ${opts.target} 的配置`);
+      void opts;
+      // N6: 占位命令
+      console.error(`target validate 尚未实现（v1 阶段占位）。`);
+      console.error(`可运行 inkmigrate doctor --state-dir <dir> 做基本健康检查。`);
+      process.exit(1);
     });
 
   return target;

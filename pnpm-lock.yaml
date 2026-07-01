@@ -35,12 +35,18 @@ importers:
       '@inkmigrate/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@inkmigrate/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
       '@inkmigrate/source-toutiao':
         specifier: workspace:*
         version: link:../../packages/source-toutiao
       '@inkmigrate/target-obsidian':
         specifier: workspace:*
         version: link:../../packages/target-obsidian
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
     devDependencies:
       '@types/node':
         specifier: ^22.10.0
@@ -54,6 +60,9 @@ importers:
 
   apps/gui:
     dependencies:
+      '@inkmigrate/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
       '@tauri-apps/api':
         specifier: ^2.0.0
         version: 2.11.1
@@ -125,6 +134,12 @@ importers:
       vitest:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@24.13.2)(jsdom@25.0.1)
+
+  packages/protocol:
+    devDependencies:
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
 
   packages/source-toutiao:
     dependencies:

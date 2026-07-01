@@ -266,6 +266,52 @@ describe('schema enforcement (§16.12, §24.5)', () => {
         .get() as { status: string };
       expect(row.status).toBe('failed');
     });
+
+    it('R5: source_items.status CHECK rejects unknown value', () => {
+      seedInstancesAndJob();
+      db.prepare(
+        `INSERT INTO source_items(source_instance_id,fingerprint,stable_key,item_key,stable_short_id,content_kind,discovered_at,status,created_at,updated_at)
+         VALUES('s1','fp','sk','ik','sid','article','t','verified','t','t')`,
+      ).run();
+      expect(() =>
+        db.prepare(`UPDATE source_items SET status='bogus' WHERE fingerprint='fp'`).run(),
+      ).toThrow(/CHECK/);
+    });
+
+    it('R5: source_items.content_kind CHECK rejects unknown value', () => {
+      seedInstancesAndJob();
+      expect(() =>
+        db.prepare(
+          `INSERT INTO source_items(source_instance_id,fingerprint,stable_key,item_key,stable_short_id,content_kind,discovered_at,status,created_at,updated_at)
+           VALUES('s1','fp','sk','ik','sid','bogus_kind','t','verified','t','t')`,
+        ).run(),
+      ).toThrow(/CHECK/);
+    });
+
+    it('R5: source_items.quality CHECK accepts NULL, full, degraded; rejects others', () => {
+      seedInstancesAndJob();
+      // NULL 合法
+      db.prepare(
+        `INSERT INTO source_items(source_instance_id,fingerprint,stable_key,item_key,stable_short_id,content_kind,discovered_at,status,quality,created_at,updated_at)
+         VALUES('s1','fp1','sk1','ik1','sid1','article','t','verified',NULL,'t','t')`,
+      ).run();
+      // full / degraded 合法
+      let n = 2;
+      for (const q of ['full', 'degraded']) {
+        db.prepare(
+          `INSERT INTO source_items(source_instance_id,fingerprint,stable_key,item_key,stable_short_id,content_kind,discovered_at,status,quality,created_at,updated_at)
+           VALUES('s1',@fp,@sk,@ik,@sid,'article','t','verified',@q,'t','t')`,
+        ).run({ fp: `fp${n}`, sk: `sk${n}`, ik: `ik${n}`, sid: `sid${n}`, q });
+        n++;
+      }
+      // 非法值被拒
+      expect(() =>
+        db.prepare(
+          `INSERT INTO source_items(source_instance_id,fingerprint,stable_key,item_key,stable_short_id,content_kind,discovered_at,status,quality,created_at,updated_at)
+           VALUES('s1','fp-x','sk-x','ik-x','sid-x','article','t','verified','bogus','t','t')`,
+        ).run(),
+      ).toThrow(/CHECK/);
+    });
   });
 
   describe('schema version migration (M2 v1→v2)', () => {

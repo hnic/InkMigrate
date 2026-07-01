@@ -8,7 +8,6 @@ interface Props {
   update: (partial: Partial<AppSettings>) => void;
   rpcCall: (method: string, params: Record<string, unknown>) => Promise<unknown>;
   addLog: (level: 'info' | 'warn' | 'error', message: string) => void;
-  busy: boolean;
   /** 当前运行的 phase：按钮禁用改由 activePhase 判定（避免登录收尾的 busy 锁住迁移）。 */
   activePhase: string | null;
   /** 终止当前正在运行的长任务。 */

@@ -27,9 +27,13 @@ export function createConfigCommand(): Command {
 
   config
     .command('upgrade')
-    .description('升级配置文件到当前版本（stage 4 占位）')
+    .description('升级配置文件到当前版本')
     .action(() => {
-      console.log('Stage 4 占位：配置升级将在后续完善。');
+      // N6: 占位命令——v1 配置 version 固定为 1，无旧版本需升级。明确告知而非
+      // 静默假装执行。
+      console.error('config upgrade 尚未实现（当前配置 version 固定为 1，无需升级）。');
+      console.error('如从旧版本升级，请参考 README 手动调整配置结构。');
+      process.exit(1);
     });
 
   return config;

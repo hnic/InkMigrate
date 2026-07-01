@@ -37,11 +37,19 @@ export function isPathInside(child: string, parent: string): boolean {
  *
  * target 等于 root（文件就位于 Vault 根目录）视为安全——isPathInside 严格区分
  * "在内部"与"相等"，但符号链接逃逸校验的语义是"不逃出 root"，相等即不逃出。
+ *
+ * R14（大小写不敏感 FS）：realpathSync 返回 OS 权威存储路径（已规范化大小写），
+ * 故 realRoot / realTarget 在 APFS（默认不敏感）/NTFS 上不会因大小写变体而误判。
+ * 相等比较用 toLowerCase() 兜底——在大小写敏感 FS（Linux/ext4）上，realpath
+ * 已区分大小写，toLowerCase 不会误放行（不同文件 lowercase 后仍不同路径）；
+ * 在大小写不敏感 FS 上，消除残留的大小写差异避免误拒合法路径。
  */
 export function assertSymlinkSafe(root: string, target: string): void {
   const realRoot = realpathSync(root);
   const realTarget = realpathSync(target);
-  if (realTarget !== realRoot && !isPathInside(realTarget, realRoot)) {
+  const sameRoot =
+    realTarget === realRoot || realTarget.toLowerCase() === realRoot.toLowerCase();
+  if (!sameRoot && !isPathInside(realTarget, realRoot)) {
     throw new Error(
       `resolved path "${realTarget}" escapes root "${realRoot}" via symlink`,
     );

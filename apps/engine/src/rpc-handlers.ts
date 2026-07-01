@@ -29,6 +29,16 @@ import { rmSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import {
+  AuthLoginSchema,
+  AuthStatusSchema,
+  ScanStartSchema,
+  MigrateStartSchema,
+  MigrateResumeSchema,
+  MigrateResumableSchema,
+  CleanupUnfavoriteSchema,
+  StatusQuerySchema,
+} from './schemas.js';
+import {
   registerMethod,
   sendNotification,
   logToStderr,
@@ -131,15 +141,16 @@ function requirePositiveIntIfDefined(value: unknown, field: string): asserts val
 
 /** 注册所有 RPC 方法。 */
 export function registerAllHandlers(): void {
-  registerMethod('auth.login', (p) => handleAuthLogin(expandPaths(p as unknown as AuthLoginParams, ['stateDir'])));
-  registerMethod('auth.status', (p) => handleAuthStatus(expandPaths(p as unknown as AuthStatusParams, ['stateDir'])));
-  registerMethod('auth.clear', (p) => handleAuthClear(expandPaths(p as unknown as AuthStatusParams, ['stateDir'])));
-  registerMethod('scan.start', (p) => handleScanStart(expandPaths(p as unknown as ScanStartParams, ['stateDir'])));
-  registerMethod('migrate.start', (p) => handleMigrateStart(expandPaths(p as unknown as MigrateStartParams, ['stateDir', 'vaultPath'])));
-  registerMethod('migrate.resume', (p) => handleMigrateResume(expandPaths(p as unknown as MigrateResumeParams, ['stateDir', 'vaultPath'])));
-  registerMethod('migrate.resumable', (p) => handleMigrateResumable(expandPaths(p as unknown as MigrateResumableParams, ['stateDir'])));
-  registerMethod('cleanup.unfavorite', (p) => handleCleanupUnfavorite(expandPaths(p as unknown as CleanupUnfavoriteParams, ['stateDir'])));
-  registerMethod('status.query', (p) => handleStatusQuery(expandPaths(p as unknown as StatusQueryParams, ['stateDir'])));
+  // N7: 每个方法传入 zod schema，在 transport dispatch 前统一校验 params（信任边界）
+  registerMethod('auth.login', (p) => handleAuthLogin(expandPaths(p as unknown as AuthLoginParams, ['stateDir'])), AuthLoginSchema);
+  registerMethod('auth.status', (p) => handleAuthStatus(expandPaths(p as unknown as AuthStatusParams, ['stateDir'])), AuthStatusSchema);
+  registerMethod('auth.clear', (p) => handleAuthClear(expandPaths(p as unknown as AuthStatusParams, ['stateDir'])), AuthStatusSchema);
+  registerMethod('scan.start', (p) => handleScanStart(expandPaths(p as unknown as ScanStartParams, ['stateDir'])), ScanStartSchema);
+  registerMethod('migrate.start', (p) => handleMigrateStart(expandPaths(p as unknown as MigrateStartParams, ['stateDir', 'vaultPath'])), MigrateStartSchema);
+  registerMethod('migrate.resume', (p) => handleMigrateResume(expandPaths(p as unknown as MigrateResumeParams, ['stateDir', 'vaultPath'])), MigrateResumeSchema);
+  registerMethod('migrate.resumable', (p) => handleMigrateResumable(expandPaths(p as unknown as MigrateResumableParams, ['stateDir'])), MigrateResumableSchema);
+  registerMethod('cleanup.unfavorite', (p) => handleCleanupUnfavorite(expandPaths(p as unknown as CleanupUnfavoriteParams, ['stateDir'])), CleanupUnfavoriteSchema);
+  registerMethod('status.query', (p) => handleStatusQuery(expandPaths(p as unknown as StatusQueryParams, ['stateDir'])), StatusQuerySchema);
   // 终止当前长任务：设置进程级 cancel flag，循环在下一次迭代边界退出
   registerMethod('cancel.cancel', async () => {
     requestCancel();

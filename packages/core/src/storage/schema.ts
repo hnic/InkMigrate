@@ -3,7 +3,7 @@ import type { Database } from 'better-sqlite3';
 /**
  * §16 当前 Schema 版本。每次 Migration 递增；本常量代表 v1.0 阶段 1 的初始 schema。
  */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /**
  * §16 全部表的最小字段契约 + CHECK 约束 + 部分唯一索引。
@@ -347,4 +347,152 @@ ALTER TABLE migration_jobs_v2 RENAME TO migration_jobs;
      VALUES (?, ?)
      ON CONFLICT(version) DO NOTHING`,
   ).run(2, new Date().toISOString());
+}
+
+/**
+ * 合法值常量，供 applySchemaV3 的 CHECK 约束引用（避免魔法字符串重复）。
+ */
+const SOURCE_ITEM_STATUSES = [
+  'discovered', 'queued', 'extracting', 'extracted', 'normalized', 'assets_ready',
+  'writing', 'written', 'verified', 'degraded', 'permanent_failed', 'unsupported',
+  'blocked', 'conflict', 'skipped', 'retryable_failed', 'interrupted',
+];
+const CONTENT_KINDS = [
+  'article', 'short-post', 'gallery', 'video', 'question-answer', 'note', 'unknown',
+];
+const CLEANUP_ITEM_PRECHECK_STATUSES = [
+  'favorited', 'not_favorited', 'unknown',
+  'login_required', 'challenge_required', 'content_unavailable',
+];
+const CLEANUP_ITEM_ACTION_STATUSES = [
+  'unfavorited_verified', 'already_unfavorited', 'state_unknown',
+  'verification_failed', 'skipped',
+  // 特殊中断态（来自 detectedState / 异常路径）
+  'login_required', 'challenge_required', 'permanent_failed',
+];
+
+function sqlList(values: readonly string[]): string {
+  return values.map((v) => `'${v}'`).join(',');
+}
+
+/**
+ * §16 Schema v3 迁移（R5）：为 source_items / cleanup_jobs / cleanup_items 的状态列
+ * 补 CHECK 约束，匹配 migration_jobs.status 已有的严谨度。SQLite 不支持
+ * ALTER TABLE ADD CONSTRAINT，用标准「重建表」模式。
+ *
+ * 仅对实际有写入的状态列加约束；assets（v1 阶段无写入）和 cleanup_plans（单一
+ * 状态值 created）暂不加，避免无谓的重建风险。
+ */
+export function applySchemaV3(db: Database): void {
+  // --- source_items: 加 content_kind + status + quality CHECK ---
+  db.exec(`
+CREATE TABLE IF NOT EXISTS source_items_v3 (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_instance_id TEXT NOT NULL
+    REFERENCES source_instances(id) ON DELETE CASCADE,
+  external_id TEXT,
+  fingerprint TEXT NOT NULL,
+  stable_key TEXT NOT NULL,
+  item_key TEXT NOT NULL,
+  stable_short_id TEXT NOT NULL,
+  canonical_url TEXT,
+  original_url TEXT,
+  title TEXT,
+  content_kind TEXT NOT NULL CHECK(content_kind IN (${sqlList(CONTENT_KINDS)})),
+  source_position INTEGER,
+  discovered_at TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN (${sqlList(SOURCE_ITEM_STATUSES)})),
+  quality TEXT CHECK(quality IS NULL OR quality IN ('full','degraded')),
+  degradations_json TEXT NOT NULL DEFAULT '[]',
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  last_error_code TEXT,
+  last_error_message TEXT,
+  source_content_hash TEXT,
+  source_metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+INSERT INTO source_items_v3 SELECT * FROM source_items;
+DROP TABLE source_items;
+ALTER TABLE source_items_v3 RENAME TO source_items;
+`);
+  // 重建 source_items 的索引和唯一约束（DROP TABLE 会删除它们）
+  db.exec(`
+CREATE UNIQUE INDEX IF NOT EXISTS uq_source_items_fp
+  ON source_items(source_instance_id, fingerprint);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_source_items_sk
+  ON source_items(source_instance_id, stable_key);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_source_items_ik
+  ON source_items(source_instance_id, item_key);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_source_items_sid
+  ON source_items(source_instance_id, stable_short_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_source_items_ext
+  ON source_items(source_instance_id, external_id)
+  WHERE external_id IS NOT NULL;
+`);
+  // target_artifacts.source_item_id 和 cleanup_items.source_item_id 的 FK 指向
+  // source_items(id)，DROP+RENAME 后 FK 仍有效（SQLite FK 按表名解析）。
+  // 但 migration_attempts.source_item_id 和 assets.source_item_id 同理。
+  // 确认外键完整性：重建后重新启用 FK 检查（迁移在事务中，FK 已开启）。
+
+  // --- cleanup_jobs: 加 status CHECK ---
+  db.exec(`
+CREATE TABLE IF NOT EXISTS cleanup_jobs_v3 (
+  id TEXT PRIMARY KEY,
+  plan_id TEXT NOT NULL
+    REFERENCES cleanup_plans(id) ON DELETE RESTRICT,
+  plan_hash TEXT NOT NULL,
+  action TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('created','running','completed','interrupted')),
+  candidate_count INTEGER NOT NULL,
+  processed_count INTEGER NOT NULL DEFAULT 0,
+  success_count INTEGER NOT NULL DEFAULT 0,
+  skipped_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  unknown_count INTEGER NOT NULL DEFAULT 0,
+  started_at TEXT,
+  finished_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+INSERT INTO cleanup_jobs_v3 SELECT * FROM cleanup_jobs;
+DROP TABLE cleanup_jobs;
+ALTER TABLE cleanup_jobs_v3 RENAME TO cleanup_jobs;
+`);
+
+  // --- cleanup_items: 加 precheck_status + action_status CHECK ---
+  db.exec(`
+CREATE TABLE IF NOT EXISTS cleanup_items_v3 (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id TEXT NOT NULL
+    REFERENCES cleanup_jobs(id) ON DELETE CASCADE,
+  source_item_id INTEGER NOT NULL
+    REFERENCES source_items(id) ON DELETE RESTRICT,
+  precheck_status TEXT NOT NULL CHECK(precheck_status IN (${sqlList(CLEANUP_ITEM_PRECHECK_STATUSES)})),
+  pre_action_state TEXT,
+  action_status TEXT NOT NULL CHECK(action_status IN (${sqlList(CLEANUP_ITEM_ACTION_STATUSES)})),
+  post_action_state TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  action_started_at TEXT,
+  action_finished_at TEXT,
+  verified_at TEXT,
+  last_error_code TEXT,
+  last_error_message TEXT,
+  diagnostic_path TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(job_id, source_item_id)
+);
+INSERT INTO cleanup_items_v3 SELECT * FROM cleanup_items;
+DROP TABLE cleanup_items;
+ALTER TABLE cleanup_items_v3 RENAME TO cleanup_items;
+`);
+  // 重建 cleanup_items 索引
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_cleanup_items_job_source ON cleanup_items(job_id, source_item_id);`);
+
+  db.prepare(
+    `INSERT INTO schema_version(version, applied_at)
+     VALUES (?, ?)
+     ON CONFLICT(version) DO NOTHING`,
+  ).run(3, new Date().toISOString());
 }

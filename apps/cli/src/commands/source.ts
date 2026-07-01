@@ -12,9 +12,14 @@ export function createSourceCommand(): Command {
     .description('添加来源适配器实例')
     .requiredOption('--id <id>', '来源实例 ID')
     .action((adapter: string, opts: { id: string }) => {
-      console.log(
-        `Stage 4 占位：将添加来源 ${adapter} (id=${opts.id}) 到 inkmigrate.yaml`,
-      );
+      // N6: 占位命令——v1 阶段尚未实现交互式配置编辑。明确报错而非静默假装成功，
+      // 指引手动编辑 yaml 的替代方式。
+      console.error(`source add 尚未实现（v1 阶段占位）。`);
+      console.error(`请手动编辑 inkmigrate.yaml，在 sources: 下添加：`);
+      console.error(`  - id: ${opts.id}`);
+      console.error(`    adapter: ${adapter}`);
+      console.error(`    config: {}`);
+      process.exit(1);
     });
 
   source
@@ -22,7 +27,11 @@ export function createSourceCommand(): Command {
     .description('校验来源配置')
     .requiredOption('--source <id>', '来源实例 ID')
     .action((opts: { source: string }) => {
-      console.log(`Stage 4 占位：将校验来源 ${opts.source} 的配置`);
+      void opts;
+      // N6: 占位命令
+      console.error(`source validate 尚未实现（v1 阶段占位）。`);
+      console.error(`可运行 inkmigrate doctor --state-dir <dir> 做基本健康检查。`);
+      process.exit(1);
     });
 
   return source;
