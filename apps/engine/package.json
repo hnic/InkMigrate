@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@inkmigrate/core": "workspace:*",
+    "@inkmigrate/protocol": "workspace:*",
     "@inkmigrate/source-toutiao": "workspace:*",
     "@inkmigrate/target-obsidian": "workspace:*",
     "zod": "^3.23.8"
