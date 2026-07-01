@@ -581,6 +581,11 @@ async function handleCleanupUnfavorite(
   if (params === undefined) throw new Error('missing params');
   requireStateDir(params.stateDir);
   requireId(params.source, 'source');
+  // M6: 取消收藏是不可逆的源端写操作，要求显式确认令牌（与 CLI 的 UNFAVORITE 短语
+  // 或 --force 对齐）。缺令牌即拒，防止 sidecar 被非信任调用方触发破坏性操作。
+  if (params.confirmed !== true) {
+    throw new Error('取消收藏是破坏性操作，需显式确认：传 confirmed:true（GUI 用户确认后设置）');
+  }
   // I25: 信任边界校验速率/上限数值
   if (params.intervalMs !== undefined) requirePositiveMs(params.intervalMs, 'intervalMs');
   requirePositiveIntIfDefined(params.maxItems, 'maxItems');

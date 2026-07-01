@@ -131,6 +131,13 @@ export interface CleanupUnfavoriteParams {
   maxItems?: number;
   /** 条目间基准间隔毫秒（叠加 ±40% 抖动，防风控）。留空=默认 2000。 */
   intervalMs?: number;
+  /**
+   * M6: 服务端危险操作确认令牌。取消收藏是不可逆的源端写操作，CLI 强制输入
+   * UNFAVORITE 短语或 --force；Engine 侧此前无任何护栏。要求调用方显式传
+   * confirmed:true（GUI 在用户确认危险对话框后设置），否则拒绝执行。
+   * 若 sidecar 被非信任 GUI 调用，缺此令牌即拒，提供最小护栏。
+   */
+  confirmed?: boolean;
 }
 
 export interface CleanupResult {

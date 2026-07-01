@@ -30,6 +30,8 @@ export function CleanupPage({ settings, update, rpcCall, addLog, busy, activePha
       const params: Record<string, unknown> = {
         source: settings.source,
         stateDir: settings.stateDir,
+        // M6: 用户已通过危险确认对话框，传服务端确认令牌
+        confirmed: true,
       };
       if (maxItems) params.maxItems = parseInt(maxItems, 10);
       if (intervalMs) params.intervalMs = parseInt(intervalMs, 10);
