@@ -277,6 +277,10 @@ export async function runMigrationJob(
       }
       if (interrupted || i.isCancelled?.()) break;
 
+      // C2: 轮询锁心跳健康。心跳在 setInterval 回调里不再抛错（会变成未捕获异常），
+      // 改为设置失败标志，由这里在主循环中检测并让 Job 优雅失败。
+      lock.checkHealth();
+
       jobs.updateStatus(i.jobId, {
         status: 'running',
         currentStage: 'extracting',
