@@ -25,6 +25,11 @@ export interface ObsidianWriteResult {
   /** §13.9 实际生效的覆盖策略。 */
   overwritePolicy: 'preserve' | 'replace' | 'write-new' | 'metadata-only';
   /**
+   * H-1: mark_conflict 时为 true——表示未写入文件（保留用户已有内容）。
+   * job-runner 据此跳过 verify（verify 不写文件会误判 ok=true，把冲突吞为 verified）。
+   */
+  skippedWrite?: boolean;
+  /**
    * §17.5 action_code，由决策树决定；阶段 4 写 migration_attempts 时使用。
    *
    * L20: 当前 writeNote 仅产出 'stage_attempt' / 'forced_overwrite' /

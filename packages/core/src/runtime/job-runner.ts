@@ -739,6 +739,32 @@ async function processOneItem(
       ? await i.targetAdapter.writeWithExpectedHash(plan, i.targetContext, expectedWrittenFileHash)
       : await i.targetAdapter.write(plan, i.targetContext);
 
+    // H-1: mark_conflict 等未写入的情况（skippedWrite=true）跳过 verify。
+    // verify 未写文件会读原文件 hash 匹配 → 误判 ok=true → 冲突被吞为 verified。
+    if (writeResult.skippedWrite === true) {
+      if (existingItem?.id !== undefined) {
+        // H-4: 包事务，与成功路径一致
+        i.db.transaction(() => {
+          const attemptId = i.attempts.createItem({
+            migrationJobId: i.jobId,
+            sourceItemId: existingItem.id!,
+            stage: 'writing_target',
+            actionCode: isUpgrade ? 'quality_upgrade' : 'stage_attempt',
+            attemptNo: 1,
+            startedAt: now(),
+            createdAt: now(),
+          });
+          i.attempts.finishAttempt(attemptId, {
+            success: false,
+            finishedAt: now(),
+            errorCode: 'CONFLICT_PRESERVED',
+            errorMessage: 'preserve 策略保留用户修改，未写入（mark_conflict）',
+          });
+        })();
+      }
+      return 'conflict';
+    }
+
     // verify
     const verification = await i.targetAdapter.verify(
       writeResult,
@@ -748,22 +774,25 @@ async function processOneItem(
     if (!verification.ok) {
       // verify 失败 → conflict（用户修改导致 hash 不匹配）
       if (existingItem?.id !== undefined) {
-        // 记录失败的 attempt 并闭环（finishAttempt 标记结束）
-        const attemptId = i.attempts.createItem({
-          migrationJobId: i.jobId,
-          sourceItemId: existingItem.id,
-          stage: 'verifying_target',
-          actionCode: isUpgrade ? 'quality_upgrade' : 'stage_attempt',
-          attemptNo: 1,
-          startedAt: now(),
-          createdAt: now(),
-        });
-        i.attempts.finishAttempt(attemptId, {
-          success: false,
-          finishedAt: now(),
-          errorCode: 'VERIFICATION_FAILED',
-          errorMessage: 'verification failed (possible user-modified mismatch)',
-        });
+        // H-4: 失败 attempt 的 createItem+finishAttempt 包事务，与成功路径
+        // commitTxn 一致，避免崩溃在两步之间留下未闭合的 attempt 行。
+        i.db.transaction(() => {
+          const attemptId = i.attempts.createItem({
+            migrationJobId: i.jobId,
+            sourceItemId: existingItem.id!,
+            stage: 'verifying_target',
+            actionCode: isUpgrade ? 'quality_upgrade' : 'stage_attempt',
+            attemptNo: 1,
+            startedAt: now(),
+            createdAt: now(),
+          });
+          i.attempts.finishAttempt(attemptId, {
+            success: false,
+            finishedAt: now(),
+            errorCode: 'VERIFICATION_FAILED',
+            errorMessage: 'verification failed (possible user-modified mismatch)',
+          });
+        })();
       }
       return 'conflict';
     }
@@ -876,24 +905,26 @@ async function processOneItem(
     // 持久化失败的 migration_attempt（完成生命周期闭环）
     if (existingItem?.id !== undefined) {
       try {
-        const attemptId = i.attempts.createItem({
-          migrationJobId: i.jobId,
-          sourceItemId: existingItem.id,
-          stage: 'extracting',
-          actionCode: 'stage_attempt',
-          attemptNo: 1,
-          startedAt: now(),
-          createdAt: now(),
-        });
-        i.attempts.finishAttempt(attemptId, {
-          success: false,
-          finishedAt: now(),
-          errorCode: errCode,
-          errorMessage: errMsg,
-        });
+        // H-4: 包事务，与成功路径 commitTxn 一致
+        i.db.transaction(() => {
+          const attemptId = i.attempts.createItem({
+            migrationJobId: i.jobId,
+            sourceItemId: existingItem.id!,
+            stage: 'extracting',
+            actionCode: 'stage_attempt',
+            attemptNo: 1,
+            startedAt: now(),
+            createdAt: now(),
+          });
+          i.attempts.finishAttempt(attemptId, {
+            success: false,
+            finishedAt: now(),
+            errorCode: errCode,
+            errorMessage: errMsg,
+          });
+        })();
       } catch (persistErr) {
         // N8: 审计写入失败不应影响错误分类，但需记录便于诊断
-        //（否则 migration_attempts 静默缺失，事后无法追溯失败原因）。
         log('warn', `失败审计写入异常（不影响错误分类）：${(persistErr as Error).message ?? persistErr}`);
       }
     }

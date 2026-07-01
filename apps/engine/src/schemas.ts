@@ -67,6 +67,6 @@ export const CleanupUnfavoriteSchema = z.object({
 });
 
 export const StatusQuerySchema = z.object({
-  source: idField,
+  job: idField,
   stateDir: z.string().min(1),
 });

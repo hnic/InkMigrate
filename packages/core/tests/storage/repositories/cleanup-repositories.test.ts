@@ -203,7 +203,7 @@ describe('cleanup repositories', () => {
     it('findUnfavoritedSourceItemIds returns only successfully unfavorited items (cross-job)', () => {
       const { jobId: jobId1 } = seedPlanAndJob();
       const item1 = seedSourceItem(1); // 第一次清理成功
-      const item2 = seedSourceItem(2); // 第一次清理失败
+      const item2 = seedSourceItem(2); // 第一次清理失败（verification_failed）
       const item3 = seedSourceItem(3); // 未清理
 
       new CleanupItems(db).upsert({
@@ -219,7 +219,8 @@ describe('cleanup repositories', () => {
 
       const done = new CleanupItems(db).findUnfavoritedSourceItemIds('s1');
       expect(done.has(item1)).toBe(true);  // 成功 → 排除
-      expect(done.has(item2)).toBe(false); // 失败 → 不排除
+      // H-5: verification_failed 也是终态失败（已重试 3 次放弃），重跑只浪费退避时间
+      expect(done.has(item2)).toBe(true);  // 终态失败 → 排除（H-5 改动）
       expect(done.has(item3)).toBe(false); // 未清理 → 不排除
     });
 

@@ -236,6 +236,8 @@ async function writeNote(
     }
     case 'mark_conflict':
       // §13.9 preserve + 用户修改 → 不写正文，保留用户文件
+      // H-1: skippedWrite=true 让 job-runner 跳过 verify（否则 verify 读原文件 hash
+      // 匹配会误判 ok=true，把冲突吞为 verified，永久跳过该条目）。
       return {
         relativePath: oplan.relativePath,
         artifactKind: 'note',
@@ -245,6 +247,7 @@ async function writeNote(
         wasForcedOverwrite: false,
         overwritePolicy: config.overwritePolicy,
         actionCode: 'stage_attempt',
+        skippedWrite: true,
       };
   }
 
