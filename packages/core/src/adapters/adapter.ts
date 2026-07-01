@@ -16,7 +16,15 @@ export interface AdapterContext {
 }
 
 export type ScanContext = AdapterContext;
-export type ExtractContext = AdapterContext;
+/**
+ * H7: extract 上下文扩展可选 AbortSignal。适配器可在 extract 内部监听该信号
+ * 以支持进行中提取的协作式取消（如中断长导航），而非只能等条目间检查。
+ * 可选字段——mock/fixture/旧适配器无需改；真实适配器可选使用。
+ */
+export interface ExtractContext extends AdapterContext {
+  /** 取消信号；适配器可在长操作前检查 signal.aborted 或传给底层库。 */
+  signal?: AbortSignal;
+}
 export type VerifyContext = AdapterContext;
 
 export interface TargetContext extends AdapterContext {

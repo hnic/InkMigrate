@@ -200,12 +200,16 @@ export function createToutiaoSource(
         await page.close();
       }
     },
-    extract: async (ref, _ctx) => {
-      void _ctx;
+    extract: async (ref, ctx) => {
       if (session === undefined || browserConfig === undefined) {
         throw new Error(
           'createToutiaoSource().extract requires a real browser session; use fixture-driven wrapper for tests',
         );
+      }
+      // H7: 若调用方传入已 abort 的 signal，在启动浏览器导航前快速失败，
+      // 避免取消后仍发起一次完整 extract。进行中的导航由 navigationTimeoutMs 兜底。
+      if (ctx.signal?.aborted) {
+        throw new Error('aborted');
       }
       // M11: 包入 withRecycleLock 串行化，避免并发 extract 时 recycle 的 close/launch
       // 杀掉其他在飞 page（共享 context）。

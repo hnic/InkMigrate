@@ -694,6 +694,9 @@ async function processOneItem(
         i.sourceAdapter.extract(i.ref, {
           config: {},
           workspaceDir: i.workspaceDir,
+          // H7: 传入 AbortSignal，让适配器可在 extract 内部协作式响应取消
+          //（如中断长导航），而非只能等条目间检查。
+          ...(i.signal !== undefined ? { signal: i.signal } : {}),
         }),
       i.retryPolicy,
       i.signal,
