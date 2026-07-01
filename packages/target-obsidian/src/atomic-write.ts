@@ -14,7 +14,7 @@ import { assertSymlinkSafe, writtenFileHash } from '@inkmigrate/core';
  * §13.10 原子写入流程（底层，不校验 frontmatter 结构）。
  *
  * 1. 在同目录创建隐藏临时文件（`.inkmigrate-<basename>.<rand>.tmp`）。
- * 2. 写入（writeFileSync 在 Node 上默认 flush 元数据）。
+ * 2. 写入（writeFileSync 刷数据到 OS，但不 fsync——断电仍可能丢半截，L11）。
  * 3. 安全校验：解引用符号链接确认 tmpPath 真实路径在 Vault 内。
  * 4. 原子 rename 到目标路径。
  *
