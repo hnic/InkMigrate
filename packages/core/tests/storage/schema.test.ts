@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { makeMemoryDb } from '../helpers/db.js';
 import { migrate, getCurrentSchemaVersion, SCHEMA_VERSION } from '../../src/storage/database.js';
-import { applySchemaV1 } from '../../src/storage/schema.js';
+import { applySchemaV1, applySchemaV2 } from '../../src/storage/schema.js';
 import { openDatabase, type DB } from '../../src/index.js';
 
 let db: DB;
@@ -377,6 +377,69 @@ describe('schema enforcement (§16.12, §24.5)', () => {
               .get() as { c: number }
           ).c;
           expect(idxCount).toBeGreaterThanOrEqual(2);
+        } finally {
+          upgraded.close();
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('R5-fix: v2 文件库 + FK 数据升级到 v3 不丢数据、无 FK 违规、CHECK 生效', () => {
+      // 复现真实 bug：v3 的表重建（DROP source_items）在 foreign_keys=ON 下因子表
+      // FK 引用而失败（FOREIGN KEY constraint failed），导致 migrate.resumable 等只读
+      // 操作每次 openDatabase 都报 FK 错。修复：迁移期间临时关闭 FK。
+      const dir = mkdtempSync(join(tmpdir(), 'inkmigrate-v2-fk-'));
+      try {
+        // 用真实 applySchemaV1+V2 建 v2 库（FK ON）
+        const raw = new Database(join(dir, 'v2fk.sqlite'));
+        raw.pragma('foreign_keys = ON');
+        applySchemaV1(raw);
+        applySchemaV2(raw);
+        // 插入有 FK 关系的数据（target_artifacts → source_items）
+        raw.prepare(
+          `INSERT INTO source_instances(id,adapter_kind,adapter_version,adapter_api_version,config_hash,created_at,updated_at)
+           VALUES('s1','a','1','1','h','t','t')`,
+        ).run();
+        raw.prepare(
+          `INSERT INTO target_instances(id,adapter_kind,adapter_version,adapter_api_version,config_hash,created_at,updated_at)
+           VALUES('t1','a','1','1','h','t','t')`,
+        ).run();
+        raw.prepare(
+          `INSERT INTO migration_jobs(id,source_instance_id,target_instance_id,status,current_stage,created_at,updated_at)
+           VALUES('j1','s1','t1','completed','completed','t','t')`,
+        ).run();
+        raw.prepare(
+          `INSERT INTO source_items(source_instance_id,fingerprint,stable_key,item_key,stable_short_id,content_kind,discovered_at,status,created_at,updated_at)
+           VALUES('s1','fp','sk','ik','sid','article','t','verified','t','t')`,
+        ).run();
+        raw.prepare(
+          `INSERT INTO target_artifacts(migration_job_id,source_item_id,artifact_kind,target_instance_id,relative_path,status,created_at,updated_at)
+           VALUES('j1',1,'note','t1','x.md','verified','t','t')`,
+        ).run();
+        expect(getCurrentSchemaVersion(raw)).toBe(2);
+        raw.close();
+
+        // openDatabase 触发 v3 迁移（FK 临时关闭）
+        const upgraded = openDatabase({ path: join(dir, 'v2fk.sqlite') });
+        try {
+          expect(getCurrentSchemaVersion(upgraded)).toBe(3);
+          // 数据完整
+          expect(
+            (upgraded.prepare('SELECT COUNT(*) c FROM source_items').get() as { c: number }).c,
+          ).toBe(1);
+          expect(
+            (upgraded.prepare('SELECT COUNT(*) c FROM target_artifacts').get() as { c: number }).c,
+          ).toBe(1);
+          // 无 FK 违规
+          const fkIssues = upgraded.pragma('foreign_key_check') as unknown[];
+          expect(fkIssues).toHaveLength(0);
+          // CHECK 生效（source_items.content_kind）
+          expect(() =>
+            upgraded
+              .prepare("UPDATE source_items SET content_kind='bogus' WHERE fingerprint='fp'")
+              .run(),
+          ).toThrow(/CHECK/);
         } finally {
           upgraded.close();
         }
