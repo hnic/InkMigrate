@@ -91,7 +91,8 @@ export interface JobProgress {
 export interface JobRunnerResult {
   status: 'completed' | 'failed' | 'interrupted' | 'paused';
   scanCount: number;
-  finalStateCounts: Record<string, number>;
+  /** §11.1 条目终态计数（精确形状，含 permanent_failed/unsupported/blocked 分项）。 */
+  finalStateCounts: FinalStateCounts;
   reconciliationOk: boolean;
   reconciliationReason?: string;
 }
@@ -397,7 +398,7 @@ export async function runMigrationJob(
       return {
         status: 'paused',
         scanCount: refs.length,
-        finalStateCounts: rateLimitedCounts as unknown as Record<string, number>,
+        finalStateCounts: rateLimitedCounts,
         reconciliationOk: false,
         reconciliationReason: 'rate_limited',
       };
@@ -592,7 +593,7 @@ export async function runMigrationJob(
     const result: JobRunnerResult = {
       status: finalStatus,
       scanCount: refs.length,
-      finalStateCounts: counts as unknown as Record<string, number>,
+      finalStateCounts: counts,
       reconciliationOk: reconciliation.ok,
     };
     if (reconciliation.reason !== undefined) {
