@@ -18,9 +18,14 @@ export interface ReadabilityResult {
  * 保留为独立调用入口（自建 JSDOM），向后兼容。
  */
 export function readabilityFallbackFromDoc(doc: Document): ReadabilityResult {
-  // 优先 `<article>`，其次带 content 类的 div
+  // L9: 优先级修正——先尝试头条/常见博客的精确正文容器（.article-content / .post-content），
+  // 再回退 <article>，最后才是宽泛的 [class*="content"]（后者会匹配 .ad-content / .sidebar-content
+  // 等非正文容器，可能抓错子树）。
   const article =
-    doc.querySelector('article') ?? doc.querySelector('[class*="content"]');
+    doc.querySelector('.article-content') ??
+    doc.querySelector('.post-content') ??
+    doc.querySelector('article') ??
+    doc.querySelector('[class*="content"]');
   let contentHtml = '';
   if (article) {
     contentHtml = article.innerHTML;

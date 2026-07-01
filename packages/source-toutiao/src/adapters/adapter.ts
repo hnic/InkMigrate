@@ -257,9 +257,9 @@ export function createToutiaoSource(
         if (currentUrl.includes('login') || currentUrl.includes('passport')) {
           return { resolvable: false, availability: 'login_required' as const };
         }
-        // 检查删除标记
+        // 检查删除标记（L8: 用全部选择器 join，而非仅 [0]，与 unfavorite-driver 一致）
         const hasDeletedMarker = await page
-          .locator(SPECIAL_PAGE_SELECTORS.contentDeleted[0])
+          .locator(SPECIAL_PAGE_SELECTORS.contentDeleted.join(', '))
           .count()
           .catch(() => 0);
         if (hasDeletedMarker > 0) {
