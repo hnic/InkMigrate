@@ -334,6 +334,14 @@ ALTER TABLE migration_jobs_v2 RENAME TO migration_jobs;
   db.exec(`CREATE INDEX IF NOT EXISTS idx_migration_jobs_source ON migration_jobs(source_instance_id);`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_migration_jobs_target ON migration_jobs(target_instance_id);`);
 
+  // L6: 补 FK 子列索引——SQLite 不自动索引 FK 子列，以下查询原为全表扫：
+  // - migration_attempts 按 job/item 列表（listByJob/listByItem）
+  // - target_artifacts 按 source_item 查最近 verified（findBySourceItem）
+  // - cleanup_items 按 job+source_item 精确查（findByJobAndSourceItem）
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_migration_attempts_job ON migration_attempts(migration_job_id);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_target_artifacts_source_item ON target_artifacts(source_item_id);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_cleanup_items_job_source ON cleanup_items(job_id, source_item_id);`);
+
   db.prepare(
     `INSERT INTO schema_version(version, applied_at)
      VALUES (?, ?)

@@ -142,31 +142,46 @@ export function createMigrateCommand(): Command {
 
         console.log(`开始迁移 Job ${jobId}...`);
 
-        const result = await runMigrationJob({
-          db,
-          jobId,
-          sourceAdapter,
-          targetAdapter,
-          sourceInstanceId: opts.source,
-          targetInstanceId: opts.target,
-          targetContext,
-          workspaceDir: opts.stateDir,
-          reportsDir: join(opts.stateDir, 'reports'),
-          // L17: parseInt 可能产生 NaN（用户传非数字），校验后再传入，避免 NaN 直达
-          // 速率控制（I25：NaN interval → 最快速率 → 封号）。
-          ...(opts.interval !== undefined
-            ? { intervalMs: parsePositiveInt(opts.interval, 'interval') }
-            : {}),
-        });
+        // L16: SIGINT 协作取消（与 cleanup 命令一致）。原 migrate/resume 无 SIGINT 处理，
+        // Ctrl+C 硬杀会留 Job 状态 running 直到 stale-running 兜底。改为置标志，让
+        // runMigrationJob 在条目间优雅终止并落库已处理项。
+        let cancelled = false;
+        const onSigInt = () => {
+          cancelled = true;
+          console.log('\n收到终止信号，正在停止当前任务（已处理项已落库，可 resume 续跑）...');
+        };
+        process.on('SIGINT', onSigInt);
 
-        console.log(`\n迁移完成：`);
-        console.log(`  status: ${result.status}`);
-        console.log(`  scan_count: ${result.scanCount}`);
-        console.log(`  reconciliation: ${result.reconciliationOk ? '通过' : '失败'}`);
-        if (result.reconciliationReason) {
-          console.log(`  reason: ${result.reconciliationReason}`);
+        try {
+          const result = await runMigrationJob({
+            db,
+            jobId,
+            sourceAdapter,
+            targetAdapter,
+            sourceInstanceId: opts.source,
+            targetInstanceId: opts.target,
+            targetContext,
+            workspaceDir: opts.stateDir,
+            reportsDir: join(opts.stateDir, 'reports'),
+            isCancelled: () => cancelled,
+            // L17: parseInt 可能产生 NaN（用户传非数字），校验后再传入，避免 NaN 直达
+            // 速率控制（I25：NaN interval → 最快速率 → 封号）。
+            ...(opts.interval !== undefined
+              ? { intervalMs: parsePositiveInt(opts.interval, 'interval') }
+              : {}),
+          });
+
+          console.log(`\n迁移完成：`);
+          console.log(`  status: ${result.status}`);
+          console.log(`  scan_count: ${result.scanCount}`);
+          console.log(`  reconciliation: ${result.reconciliationOk ? '通过' : '失败'}`);
+          if (result.reconciliationReason) {
+            console.log(`  reason: ${result.reconciliationReason}`);
+          }
+          console.log(`\n报告：${join(opts.stateDir, 'reports', jobId, 'summary.md')}`);
+        } finally {
+          process.off('SIGINT', onSigInt);
         }
-        console.log(`\n报告：${join(opts.stateDir, 'reports', jobId, 'summary.md')}`);
       } finally {
         db.close();
       }
