@@ -136,9 +136,15 @@ async function planNote(
     importedAt: new Date().toISOString(),
   });
 
-  const markdownBody = item.bodyHtml
-    ? htmlToMarkdown(item.bodyHtml)
-    : (item.bodyText ?? '');
+  // R9: bodyHtml 为纯空白时 htmlToMarkdown 返回 ''，原实现不回退 bodyText 导致正文丢失。
+  // 改为：先尝试 bodyHtml→markdown，结果为空时回退 bodyText。
+  let markdownBody = '';
+  if (item.bodyHtml) {
+    markdownBody = htmlToMarkdown(item.bodyHtml);
+  }
+  if (markdownBody.length === 0) {
+    markdownBody = item.bodyText ?? '';
+  }
   const body = renderBody({
     item,
     markdownBody,

@@ -169,7 +169,9 @@ export class TargetArtifacts {
   /** §13.8 列出某 Job 下所有 index artifact（relativePath + 哈希），用于索引重跑保护。 */
   listIndexArtifacts(
     migrationJobId: string,
-  ): { relativePath: string; writtenFileHash: string | undefined }[] {
+  ): { relativePath: string; writtenFileHash: string | null }[] {
+    // R6: better-sqlite3 对 SQL NULL 返回 null（非 undefined）。原类型标注 string | undefined
+    // 是类型谎言，下游 job-runner 用 !== undefined 过滤会漏掉 null 值。
     return this.db
       .prepare(
         `SELECT relative_path AS relativePath, written_file_hash AS writtenFileHash
@@ -178,7 +180,7 @@ export class TargetArtifacts {
       )
       .all(migrationJobId) as {
       relativePath: string;
-      writtenFileHash: string | undefined;
+      writtenFileHash: string | null;
     }[];
   }
 }

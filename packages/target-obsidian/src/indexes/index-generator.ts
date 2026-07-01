@@ -112,7 +112,8 @@ export function generateShardIndexes(i: GenerateIndexInput): GenerateIndexResult
   const entryIndexRel = [i.config.importSubdir, safeSourceId, `${sanitizeFilename(safeSourceId)}收藏索引.md`]
     .filter(Boolean)
     .join('/');
-  const entryContent = renderEntryIndex(shards, i.sourceInstanceId);
+  // R7: renderEntryIndex 尊重 linkStyle（原始终终用 wikilink，与 shard 渲染不一致）
+  const entryContent = renderEntryIndex(shards, safeSourceId, i.config.linkStyle, indexDir);
   const entryWritten = writeShard(i.vaultPath, entryIndexRel, entryContent, knownByPath.get(entryIndexRel));
 
   return {
@@ -176,6 +177,9 @@ function renderShardMarkdown(
 function renderEntryIndex(
   shards: readonly ShardResult[],
   sourceInstanceId: string,
+  linkStyle: 'wikilink' | 'markdown',
+  /** entry index 文件所在目录（相对 Vault 根），用于 markdown 链接的相对路径计算。 */
+  entryDir: string,
 ): string {
   const lines: string[] = [
     `# ${sourceInstanceId} 收藏索引`,
@@ -184,8 +188,15 @@ function renderEntryIndex(
     '',
   ];
   for (const shard of shards) {
-    const link = shard.relativePath.replace(/\.md$/, '');
-    lines.push(`- [[${link}|${shard.shardKey}]]`);
+    if (linkStyle === 'wikilink') {
+      const link = shard.relativePath.replace(/\.md$/, '');
+      lines.push(`- [[${link}|${shard.shardKey}]]`);
+    } else {
+      // R7: markdown 模式用相对路径（entry 文件与 shard 文件的相对位置），
+      // 与 renderShardMarkdown 一致，归一化正斜杠。
+      const rel = relative(entryDir, shard.relativePath).split('\\').join('/');
+      lines.push(`- [${shard.shardKey}](${rel})`);
+    }
   }
   lines.push('');
   return lines.join('\n');

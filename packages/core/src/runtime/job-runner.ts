@@ -461,9 +461,10 @@ export async function runMigrationJob(
           return entry;
         });
         // §13.8 重跑保护：传入上一轮已落库的 index artifact 哈希
+        // R6: writtenFileHash 可能是 null（DB NULL），用 != null 同时排除 null 和 undefined
         const knownIndexArtifacts = targetArtifacts
           .listIndexArtifacts(i.jobId)
-          .filter((a): a is { relativePath: string; writtenFileHash: string } => a.writtenFileHash !== undefined);
+          .filter((a): a is { relativePath: string; writtenFileHash: string } => a.writtenFileHash != null);
         // 索引目录的路径段必须与笔记实际写入路径一致（<importSubdir>/<seg>/_索引/）。
         // 笔记路径由 ref.sourceInstanceId 决定，可能与 i.sourceInstanceId（DB 键）不同，
         // 故从第一条笔记的 relativePath 反解路径段，避免索引目录与笔记分目录错配。
