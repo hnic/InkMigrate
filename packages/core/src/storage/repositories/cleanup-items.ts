@@ -64,7 +64,7 @@ export class CleanupItems {
            pre_action_state=excluded.pre_action_state,
            action_status=excluded.action_status,
            post_action_state=excluded.post_action_state,
-           attempt_count=cleanup_items.attempt_count + 1,
+           attempt_count=MAX(cleanup_items.attempt_count, excluded.attempt_count),
            action_started_at=excluded.action_started_at,
            action_finished_at=excluded.action_finished_at,
            verified_at=excluded.verified_at,
@@ -126,9 +126,13 @@ export class CleanupItems {
 
   /** 查询某 plan 体系下已无需再处理的 source_item_id（用于排除重跑）。
    *  跨 job：只要该 source_item 在任意清理中已落到"终态"action_status，就不再选中。
-   *  终态包含：unfavorited_verified（真正取消成功）+ already_unfavorited（本就未收藏/
-   *  内容删除——对取消收藏目标已是终态）。§缺陷修复：此前漏排 already_unfavorited，
-   *  导致重跑反复重新打开这些页面。 */
+   *  终态包含：
+   *  - unfavorited_verified（真正取消成功）
+   *  - already_unfavorited（本就未收藏/内容删除——对取消收藏目标已是终态）
+   *  - verification_failed（点击了但仍收藏，已重试 3 次后放弃——重跑只会再浪费 45 分钟退避）
+   *  - permanent_failed（异常路径，不该重试）
+   *  H-5: 此前只排除前两个，verification_failed/permanent_failed 每次重跑都重新
+   *  导航+重试，纯浪费且加剧风控暴露。 */
   findUnfavoritedSourceItemIds(sourceInstanceId: string): Set<number> {
     const rows = this.db
       .prepare(
@@ -137,9 +141,15 @@ export class CleanupItems {
          JOIN cleanup_jobs cj ON cj.id = ci.job_id
          JOIN cleanup_plans cp ON cp.id = cj.plan_id
          WHERE cp.source_instance_id = ?
-           AND ci.action_status IN (?, ?)`,
+           AND ci.action_status IN (?, ?, ?, ?)`,
       )
-      .all(sourceInstanceId, ACTION_STATUS_UNFAVORITED, ACTION_STATUS_ALREADY_UNFAVORITED) as Array<{ id: number }>;
+      .all(
+        sourceInstanceId,
+        ACTION_STATUS_UNFAVORITED,
+        ACTION_STATUS_ALREADY_UNFAVORITED,
+        'verification_failed',
+        'permanent_failed',
+      ) as Array<{ id: number }>;
     return new Set(rows.map((r) => r.id));
   }
 }

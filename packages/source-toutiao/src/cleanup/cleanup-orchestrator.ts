@@ -402,6 +402,9 @@ export async function runCleanupUnfavorite(
           preActionState: o.precheckStatus,
           actionStatus: o.actionStatus,
           postActionState: o.actionStatus,
+          // M-2: 传入真实重试计数（首轮=1，每次重试+1），原恒为 1 与
+          // cleanup_action_attempts 的真实计数矛盾。
+          attemptCount,
           actionStartedAt,
           actionFinishedAt,
           verifiedAt: o.actionStatus === ACTION_STATUS_UNFAVORITED ? actionFinishedAt : null,

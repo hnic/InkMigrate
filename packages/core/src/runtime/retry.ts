@@ -39,6 +39,22 @@ export function isRateLimitedError(e: unknown): e is RateLimitedError {
   return e instanceof RateLimitedError;
 }
 
+/**
+ * M-7: 取消错误。替代原魔法字符串 e.message === 'aborted'（与 H8 的 RateLimitedError
+ * 同理）——业务错误恰好 message 为 'aborted' 会被误判为取消。
+ */
+export class AbortError extends Error {
+  constructor(message = 'aborted') {
+    super(message);
+    this.name = 'AbortError';
+  }
+}
+
+/** 判断错误是否为取消错误。 */
+export function isAbortError(e: unknown): e is AbortError {
+  return e instanceof AbortError;
+}
+
 /** HTTP 状态码是否表示永久错误，不应重试。 */
 export function isPermanentHttpError(httpStatus: number): boolean {
   return httpStatus === 404 || httpStatus === 410 || httpStatus === 403;
@@ -61,13 +77,13 @@ export async function withRetry<T>(
   let lastError: unknown;
   for (let attempt = 0; attempt < policy.maxRetries; attempt++) {
     // 每次尝试前检查取消：避免在已取消时仍发起一次新的 extract。
-    if (signal?.aborted) throw new Error('aborted');
+    if (signal?.aborted) throw new AbortError();
     try {
       return await fn();
     } catch (e) {
       lastError = e;
       // 取消信号优先于重试决策
-      if (signal?.aborted) throw new Error('aborted');
+      if (signal?.aborted) throw new AbortError();
       const httpStatus = (e as { httpStatus?: number }).httpStatus;
       const retryable = (e as { retryable?: boolean }).retryable;
       // 显式标记 retryable=false 的错误不重试（如导航超时）
@@ -92,7 +108,7 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     return new Promise((r) => setTimeout(r, ms));
   }
   // 已取消则立即拒绝，不等满 ms
-  if (signal.aborted) return Promise.reject(new Error('aborted'));
+  if (signal.aborted) return Promise.reject(new AbortError());
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       signal.removeEventListener('abort', onAbort);
@@ -101,7 +117,7 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     const onAbort = (): void => {
       clearTimeout(timer);
       signal.removeEventListener('abort', onAbort);
-      reject(new Error('aborted'));
+      reject(new AbortError());
     };
     signal.addEventListener('abort', onAbort, { once: true });
   });

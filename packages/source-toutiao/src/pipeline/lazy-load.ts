@@ -79,8 +79,12 @@ export function resolveLazyLoadAndUrls(
     if (src) {
       try {
         const abs = new URL(src, baseUrl).toString();
-        // M4: 最终 src 也校验 scheme，防御 data-* 提升或 DOMPurify 残留的危险 scheme。
-        if (!isSafeUrlScheme(abs, baseUrl)) return;
+        // M4/M-9: 最终 src 也校验 scheme，防御 data-* 提升或 DOMPurify 残留的危险 scheme。
+        // M-9: 检测到危险 scheme 时移除 src（原仅 return，危险值残留在输出 HTML）。
+        if (!isSafeUrlScheme(abs, baseUrl)) {
+          img.removeAttribute('src');
+          return;
+        }
         img.setAttribute('src', abs);
         images.push(abs);
         if (

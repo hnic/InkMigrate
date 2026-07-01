@@ -159,6 +159,11 @@ export interface TargetWriteResult {
   relativePath: string;
   targetContentHash: string;
   writtenFileHash: string;
+  /**
+   * H-1: 适配器未写入文件时设为 true（如 mark_conflict 保留用户已有内容）。
+   * job-runner 据此跳过 verify（verify 未写文件会误判 ok=true，吞没冲突）。
+   */
+  skippedWrite?: boolean;
 }
 
 export interface TargetVerification {

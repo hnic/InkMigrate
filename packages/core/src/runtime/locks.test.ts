@@ -98,23 +98,33 @@ describe('acquireLock (§18.4)', () => {
     expect(after.jobId).toBe('other-job');
   });
 
-  it('心跳连续写失败达阈值时，checkHealth 抛 LockHeartbeatError（不在回调里抛）', () => {
+  it('T-2: 心跳连续写失败达阈值后 checkHealth 抛 LockHeartbeatError', async () => {
     // C2: 原实现心跳失败时在 setInterval 回调里 throw，会变成未捕获异常 + 锁残留。
     // 改为设置失败标志，由持锁方在主循环调用 checkHealth() 轮询。
-    // 用 heartbeatMs=10 加快心跳，再通过破坏锁文件可写性模拟连续写失败。
+    // T-2: 真实触发失败——把锁文件替换为目录（writeFileSync 写目录抛 EISDIR）。
+    const { rmSync, mkdirSync } = await import('node:fs');
     const held = acquireLock({
       locksDir: dir,
-      lockName: 'heartbeat-fail',
+      lockName: 'heartbeat-fail-real',
       jobId: 'j1',
       heartbeatMs: 10,
     });
-    // 用一个不存在（且无法创建）的目录替换 path 不可行（mv 跨挂载点），
-    // 改为直接删除锁文件 + 把目录改为只读，使心跳 writeFileSync 失败。
-    // 简化：直接观察正常情况下 checkHealth 不抛。
+    // 正常情况下 checkHealth 不抛
     expect(() => held.checkHealth()).not.toThrow();
-    held.release();
-    // release 后 checkHealth 仍不抛（已无失败）
-    expect(() => held.checkHealth()).not.toThrow();
+    // 把锁文件替换为同名目录，使心跳 writeFileSync 抛 EISDIR
+    const lockPath = held.path;
+    rmSync(lockPath, { force: true });
+    mkdirSync(lockPath);
+    try {
+      // 等待足够心跳周期（10ms × 阈值3 + 余量）
+      await new Promise((r) => setTimeout(r, 120));
+      // 阈值后 checkHealth 应抛 LockHeartbeatError
+      expect(() => held.checkHealth()).toThrow(/锁心跳连续.*次写入失败/);
+    } finally {
+      // 清理：删目录，release 会尝试读锁文件（已是目录），rmSync force 兜底
+      rmSync(lockPath, { recursive: true, force: true });
+      held.release();
+    }
   });
 
   it('HeldLock.checkHealth 在无失败时是 no-op，release 后调用安全', () => {

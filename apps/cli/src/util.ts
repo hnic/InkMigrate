@@ -3,17 +3,15 @@
  */
 
 /**
- * R3: 把字符串选项解析为正整数，NaN/非正数时打印错误并 exit(1)。
- * 防止 parseInt(非数字) 产生 NaN 直达速率控制/抓取层（I25：NaN interval →
- * 最快速率 → 封号；NaN maxItems → 行为未定义）。
- *
- * migrate.ts 原有内联 parsePositiveInt 提升至此，供所有命令复用。
+ * R3: 把字符串选项解析为正整数，NaN/非正数时抛错（被 commander 外层 catch 捕获）。
+ * M-4: 原用 process.exit(1) 会跳过调用方的 finally { db.close()/session.close() }，
+ * 导致 auth.ts 中浏览器已启动后传错 --timeout 泄漏 Chromium。改为 throw 让 finally
+ * 正常执行。
  */
 export function parsePositiveInt(raw: string, field: string): number {
   const n = parseInt(raw, 10);
   if (!Number.isFinite(n) || n <= 0) {
-    console.error(`无效的 ${field} 值："${raw}"，必须是正整数`);
-    process.exit(1);
+    throw new Error(`无效的 ${field} 值："${raw}"，必须是正整数`);
   }
   return n;
 }

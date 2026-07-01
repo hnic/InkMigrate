@@ -11,8 +11,8 @@ const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i;
  */
 const ILLEGAL = /[\\/:*?"<>|／＼：＜＞｜＂？＊]/g;
 
-/** §13.4 控制字符（C0）+ C1 删除符 + BOM。 */
-const CONTROL = /[\x00-\x1f\x7f]/g;
+/** §13.4 控制字符（C0 + DEL + C1）+ BOM。M-8: 补全 C1(0x80-0x9f) 和 BOM(U+FEFF)。 */
+const CONTROL = /[\x00-\x1f\x7f-\x9f\uFEFF]/g;
 
 export interface SanitizeOptions {
   /** 主体最大长度，默认 100。 */

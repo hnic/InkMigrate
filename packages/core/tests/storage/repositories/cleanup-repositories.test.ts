@@ -170,40 +170,43 @@ describe('cleanup repositories', () => {
       expect(items[0]!.lastErrorCode).toBeNull();
     });
 
-    it('R4: attempt_count 在 UPSERT 时累加（首次 1，每次重试 +1）', () => {
+    it('R4/M-2: attempt_count 首次用传入值，UPSERT 取 MAX(已有, 新值)', () => {
       const { jobId } = seedPlanAndJob();
       const itemId = seedSourceItem(1);
       const repo = new CleanupItems(db);
-      // 首次插入：attempt_count = 1（默认值）
+      // 首次插入：传入 attemptCount=3（真实重试计数）
       repo.upsert({
         jobId, sourceItemId: itemId,
         precheckStatus: 'favorited', actionStatus: 'verification_failed',
+        attemptCount: 3,
         createdAt: 't', updatedAt: 't1',
       });
       let items = repo.listByJob(jobId);
-      expect(items[0]!.attemptCount).toBe(1);
-      // 第二次 upsert（同 job+source_item）：attempt_count 累加为 2
-      repo.upsert({
-        jobId, sourceItemId: itemId,
-        precheckStatus: 'favorited', actionStatus: 'verification_failed',
-        createdAt: 't', updatedAt: 't2',
-      });
-      items = repo.listByJob(jobId);
-      expect(items[0]!.attemptCount).toBe(2);
-      // 第三次：累加为 3
+      expect(items[0]!.attemptCount).toBe(3);
+      // 第二次 upsert（重跑）：attemptCount=1（新一轮首轮）→ MAX(3,1)=3
       repo.upsert({
         jobId, sourceItemId: itemId,
         precheckStatus: 'favorited', actionStatus: ACTION_STATUS_UNFAVORITED,
-        createdAt: 't', updatedAt: 't3',
+        attemptCount: 1,
+        createdAt: 't', updatedAt: 't2',
       });
       items = repo.listByJob(jobId);
       expect(items[0]!.attemptCount).toBe(3);
+      // 第三次：attemptCount=5 → MAX(3,5)=5
+      repo.upsert({
+        jobId, sourceItemId: itemId,
+        precheckStatus: 'favorited', actionStatus: ACTION_STATUS_UNFAVORITED,
+        attemptCount: 5,
+        createdAt: 't', updatedAt: 't3',
+      });
+      items = repo.listByJob(jobId);
+      expect(items[0]!.attemptCount).toBe(5);
     });
 
     it('findUnfavoritedSourceItemIds returns only successfully unfavorited items (cross-job)', () => {
       const { jobId: jobId1 } = seedPlanAndJob();
       const item1 = seedSourceItem(1); // 第一次清理成功
-      const item2 = seedSourceItem(2); // 第一次清理失败
+      const item2 = seedSourceItem(2); // 第一次清理失败（verification_failed）
       const item3 = seedSourceItem(3); // 未清理
 
       new CleanupItems(db).upsert({
@@ -219,7 +222,8 @@ describe('cleanup repositories', () => {
 
       const done = new CleanupItems(db).findUnfavoritedSourceItemIds('s1');
       expect(done.has(item1)).toBe(true);  // 成功 → 排除
-      expect(done.has(item2)).toBe(false); // 失败 → 不排除
+      // H-5: verification_failed 也是终态失败（已重试 3 次放弃），重跑只浪费退避时间
+      expect(done.has(item2)).toBe(true);  // 终态失败 → 排除（H-5 改动）
       expect(done.has(item3)).toBe(false); // 未清理 → 不排除
     });
 
