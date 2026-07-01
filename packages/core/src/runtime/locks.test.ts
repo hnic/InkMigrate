@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { acquireLock, LockConflictError, LockHeartbeatError } from './locks.js';
+import { acquireLock, LockConflictError } from './locks.js';
 import { isStaleLock, type LockFileContent } from './lock-content.js';
 
 let dir: string;

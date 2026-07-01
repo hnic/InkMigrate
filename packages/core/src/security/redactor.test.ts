@@ -89,4 +89,15 @@ describe('redactor (§19.2)', () => {
     // URL 结构其余部分保留，便于诊断
     expect(out).toContain('toutiao.com/c/user/token/');
   });
+
+  it('H2: redacts multi-word secret values containing whitespace', () => {
+    // 原 (\S+) 只匹配首个非空白词，含空格的密钥泄漏空格后的部分。
+    expect(r('client_secret: the quick brown')).toBe('client_secret: [REDACTED]');
+    expect(r('password=hunter2 correct horse')).toBe('password=[REDACTED]');
+    expect(r('api_key: sk_test_123 extra bits')).toBe('api_key: [REDACTED]');
+  });
+
+  it('H2: redacts multi-word token values containing whitespace', () => {
+    expect(r('access_token: abc def ghi')).toBe('access_token: [REDACTED]');
+  });
 });

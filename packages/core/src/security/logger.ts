@@ -46,13 +46,18 @@ function wrapRedacted(logger: Logger, redactor: Redactor): Logger {
           ? redactor(objOrMsg)
           : redactValue(objOrMsg, redactor);
       const safeMsg = msg !== undefined ? redactor(msg) : undefined;
+      // H3: printf 风格的 rest 插值参数（如 log.info({url}, 'fetched %s', token)）
+      // 也需脱敏，否则会泄漏。
+      const safeRest = rest.map((x) => (typeof x === 'string' ? redactor(x) : redactValue(x, redactor)));
       if (safeMsg === undefined) {
         fn.call(logger, safeObj);
       } else {
-        fn.call(logger, safeObj, safeMsg, ...rest);
+        fn.call(logger, safeObj, safeMsg, ...safeRest);
       }
     };
   // Logger 是函数与对象的混合体；用 Proxy 拦截已知方法。
+  // H1: 必须同时拦截 child() —— Pino 的 logger.child() 返回新的未包装 logger，
+  // 任何 logger.child({...}).info(...) 会写未脱敏内容，静默击穿 redact 保证。
   return new Proxy(logger, {
     get(target, prop, receiver) {
       if (
@@ -60,6 +65,12 @@ function wrapRedacted(logger: Logger, redactor: Redactor): Logger {
         ['trace', 'debug', 'info', 'warn', 'error', 'fatal'].includes(prop)
       ) {
         return wrap(Reflect.get(target, prop, receiver) as (...a: unknown[]) => void);
+      }
+      // 拦截 child：返回的子 logger 递归包装（共享同一 redactor）。
+      if (prop === 'child') {
+        const origChild = Reflect.get(target, prop, receiver) as Logger['child'];
+        return (...args: Parameters<Logger['child']>) =>
+          wrapRedacted(origChild.apply(target, args) as unknown as Logger, redactor);
       }
       return Reflect.get(target, prop, receiver);
     },
