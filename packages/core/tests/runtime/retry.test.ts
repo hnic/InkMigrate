@@ -2,6 +2,10 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   withRetry,
   shouldPauseForRateLimit,
+  RateLimitedError,
+  isRateLimitedError,
+  AbortError,
+  isAbortError,
   type RetryPolicy,
 } from '../../src/runtime/retry.js';
 import { RETRY_BACKOFF_JITTER } from '../../src/runtime/jitter.js';
@@ -102,5 +106,36 @@ describe('shouldPauseForRateLimit (§18.2)', () => {
   });
   it('returns true for 503', () => {
     expect(shouldPauseForRateLimit(503)).toBe(true);
+  });
+});
+
+describe('RateLimitedError (H8, T-3)', () => {
+  it('is an Error instance with correct name and httpStatus', () => {
+    const err = new RateLimitedError(429, 'rate limited');
+    expect(err).toBeInstanceOf(Error);
+    expect(err.name).toBe('RateLimitedError');
+    expect(err.httpStatus).toBe(429);
+    expect(err.message).toBe('rate limited');
+  });
+  it('isRateLimitedError type guard', () => {
+    expect(isRateLimitedError(new RateLimitedError(503, 'x'))).toBe(true);
+    expect(isRateLimitedError(new Error('x'))).toBe(false);
+    expect(isRateLimitedError({ httpStatus: 429 })).toBe(false);
+    expect(isRateLimitedError(null)).toBe(false);
+  });
+});
+
+describe('AbortError (M-7, T-3)', () => {
+  it('is an Error instance with correct name', () => {
+    const err = new AbortError();
+    expect(err).toBeInstanceOf(Error);
+    expect(err.name).toBe('AbortError');
+    expect(err.message).toBe('aborted');
+  });
+  it('isAbortError type guard', () => {
+    expect(isAbortError(new AbortError())).toBe(true);
+    // M-7: 业务错误恰好 message='aborted' 不应被误判（原魔法字符串会误判）
+    expect(isAbortError(new Error('aborted'))).toBe(false);
+    expect(isAbortError(null)).toBe(false);
   });
 });

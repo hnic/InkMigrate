@@ -35,8 +35,9 @@ jobs:
       - name: Guard JSON-RPC stdout channel
         run: node scripts/check-no-stdout-log.mjs
 
-      - name: Build core + testkit (for downstream imports)
+      - name: Build core + protocol + testkit (for downstream imports)
         run: |
+          pnpm --filter @inkmigrate/protocol build
           pnpm --filter @inkmigrate/core build
           pnpm --filter @inkmigrate/testkit build
 
