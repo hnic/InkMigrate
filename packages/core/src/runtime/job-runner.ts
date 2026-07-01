@@ -174,8 +174,10 @@ export async function runMigrationJob(
           currentStage: 'extracting',
           updatedAt: new Date().toISOString(),
         });
-      } catch {
-        // 硬退路径：吞掉 DB 写入错误，避免影响退出。
+      } catch (e) {
+        // N8: 硬退路径吞掉 DB 写入错误避免影响退出，但记录到 stderr 便于诊断
+        //（否则 Job 停留 running 且无任何线索）。
+        console.error(`[job ${i.jobId}] 第二次中断时落库失败：`, e);
       }
       lock.release();
       process.exit(130);
@@ -445,6 +447,8 @@ export async function runMigrationJob(
           try {
             meta = JSON.parse(r.sourceMetadataJson) as Record<string, unknown>;
           } catch {
+            // N8: 损坏的 source_metadata_json 回退空对象（collections/日期等丢失）。
+            // 静默回退是有意的——索引生成不应因个别条目元数据损坏而中断。
             meta = {};
           }
           const collections = Array.isArray(meta.displayCollection)
@@ -887,8 +891,10 @@ async function processOneItem(
           errorCode: errCode,
           errorMessage: errMsg,
         });
-      } catch {
-        // 持久化失败不应影响错误分类
+      } catch (persistErr) {
+        // N8: 审计写入失败不应影响错误分类，但需记录便于诊断
+        //（否则 migration_attempts 静默缺失，事后无法追溯失败原因）。
+        log('warn', `失败审计写入异常（不影响错误分类）：${(persistErr as Error).message ?? persistErr}`);
       }
     }
 
