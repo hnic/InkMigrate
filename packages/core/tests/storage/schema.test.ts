@@ -241,6 +241,33 @@ describe('schema enforcement (§16.12, §24.5)', () => {
         ).run(),
       ).toThrow(/CHECK/);
     });
+
+    it('M2: migration_jobs.status CHECK rejects unknown value', () => {
+      seedInstancesAndJob();
+      expect(() =>
+        db.prepare(
+          `UPDATE migration_jobs SET status='bogus' WHERE id='j1'`,
+        ).run(),
+      ).toThrow(/CHECK/);
+    });
+
+    it('M2: migration_jobs.status CHECK accepts all six lifecycle values', () => {
+      seedInstancesAndJob();
+      for (const s of ['created', 'running', 'paused', 'interrupted', 'completed', 'failed']) {
+        db.prepare(`UPDATE migration_jobs SET status=? WHERE id='j1'`).run(s);
+      }
+      const row = db
+        .prepare(`SELECT status FROM migration_jobs WHERE id='j1'`)
+        .get() as { status: string };
+      expect(row.status).toBe('failed');
+    });
+  });
+
+  describe('schema version migration (M2 v1→v2)', () => {
+    it('fresh db reaches SCHEMA_VERSION after migrate', () => {
+      migrate(db);
+      expect(getCurrentSchemaVersion(db)).toBe(SCHEMA_VERSION);
+    });
   });
 
   describe('partial unique indexes (§16.6, §16.7)', () => {

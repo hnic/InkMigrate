@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import type { Database as DB, Options } from 'better-sqlite3';
-import { SCHEMA_VERSION, applySchemaV1 } from './schema.js';
+import { SCHEMA_VERSION, applySchemaV1, applySchemaV2 } from './schema.js';
 
 export interface OpenDbOptions {
   /** 文件路径，或 ':memory:'。 */
@@ -39,7 +39,8 @@ export function openDatabase(opts: OpenDbOptions): DB {
  */
 const MIGRATIONS: ReadonlyArray<{ version: number; apply: (db: DB) => void }> = [
   { version: 1, apply: applySchemaV1 },
-  // 版本 2 起在此追加：{ version: 2, apply: applySchemaV2 }, ...
+  { version: 2, apply: applySchemaV2 },
+  // 版本 3 起在此追加：{ version: 3, apply: applySchemaV3 }, ...
 ];
 
 /**
