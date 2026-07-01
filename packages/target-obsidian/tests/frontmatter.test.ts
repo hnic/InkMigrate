@@ -11,7 +11,7 @@ describe('stringifyFrontmatter (§13.5 精简模式)', () => {
     item.ref.fingerprint,
   );
 
-  it('produces --- delimited YAML with title and source_url only', () => {
+  it('produces --- delimited YAML with title, source_url and M8 provenance fields', () => {
     const fm = stringifyFrontmatter({
       item,
       stableKey,
@@ -25,24 +25,28 @@ describe('stringifyFrontmatter (§13.5 精简模式)', () => {
     const parsed = parse(fm.slice(4, -4));
     expect(parsed.title).toBe('人工智能如何改变软件开发');
     expect(parsed.source_url).toBe('https://www.toutiao.com/article/7428193012345678901/');
+    // M8: 稳定溯源字段
+    expect(parsed.source_content_hash).toBe('sha256:abc');
+    expect(parsed.inkmigrate_id).toBe(stableKey);
+    expect(parsed.migration_job_id).toBe('mig-20260622-143000-a81f');
   });
 
-  it('does not include removed fields', () => {
+  it('M8: omits migration_job_id when unknown; never writes imported_at (hash stability)', () => {
     const fm = stringifyFrontmatter({
       item,
       stableKey,
-      migrationJobId: 'j1',
+      migrationJobId: 'unknown',
       inkmigrateVersion: 1,
       sourceContentHash: 'sha256:abc',
       importedAt: '2026-06-22T14:30:00+08:00',
     });
-    expect(fm).not.toContain('inkmigrate_id');
-    expect(fm).not.toContain('inkmigrate_version');
     expect(fm).not.toContain('migration_job_id');
+    // importedAt 不写入（随时间变化会破坏 targetContentHash 幂等性）
+    expect(fm).not.toContain('imported_at');
+    // 仍保留其余被移除的字段不出现
+    expect(fm).not.toContain('inkmigrate_version');
     expect(fm).not.toContain('source_instance');
     expect(fm).not.toContain('source_type');
-    expect(fm).not.toContain('imported_at');
-    expect(fm).not.toContain('source_content_hash');
     expect(fm).not.toContain('tags:');
     expect(fm).not.toContain('author:');
   });
