@@ -207,6 +207,42 @@ export function canJobTransition(from: JobStatus, to: JobStatus): boolean {
   return JOB_TRANSITIONS[from].has(to);
 }
 
+// §16.9 cleanup_jobs 生命周期（比 migration_jobs 简单：无 paused/failed）
+export const CLEANUP_JOB_STATUS = [
+  'created',
+  'running',
+  'completed',
+  'interrupted',
+] as const;
+export type CleanupJobStatus = (typeof CLEANUP_JOB_STATUS)[number];
+
+export function isCleanupJobStatus(v: unknown): v is CleanupJobStatus {
+  return (
+    typeof v === 'string' &&
+    (CLEANUP_JOB_STATUS as readonly string[]).includes(v)
+  );
+}
+
+/**
+ * §16.9 cleanup_jobs 合法转换矩阵（N4: 单一真相源，供 storage 守卫复用）。
+ * created → running；running → completed/interrupted；终态不可再转换。
+ */
+export const CLEANUP_JOB_TRANSITIONS: Readonly<
+  Record<CleanupJobStatus, ReadonlySet<CleanupJobStatus>>
+> = {
+  created: new Set<CleanupJobStatus>(['running', 'interrupted']),
+  running: new Set<CleanupJobStatus>(['completed', 'interrupted']),
+  completed: new Set<CleanupJobStatus>(),
+  interrupted: new Set<CleanupJobStatus>(),
+};
+
+export function canCleanupJobTransition(
+  from: CleanupJobStatus,
+  to: CleanupJobStatus,
+): boolean {
+  return CLEANUP_JOB_TRANSITIONS[from].has(to);
+}
+
 export function isJobPauseReason(v: unknown): v is JobPauseReason {
   return (
     typeof v === 'string' &&

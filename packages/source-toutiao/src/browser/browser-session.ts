@@ -77,12 +77,31 @@ export class ToutiaoBrowserSession {
       //前端 busy 永不复位 → 所有按钮灰着点不动。这里给一个上限：超时则放弃等待，
       //让 RPC 尽快释放；浏览器进程由 Playwright/系统最终回收。
       const CLOSE_TIMEOUT_MS = 15_000;
+      let timedOut = false;
+      const timer = new Promise<void>((resolve) => {
+        setTimeout(() => {
+          timedOut = true;
+          resolve();
+        }, CLOSE_TIMEOUT_MS);
+      });
       await Promise.race([
         ctx.close({ reason: 'browser-session close timeout' }),
-        new Promise<void>((resolve) => setTimeout(resolve, CLOSE_TIMEOUT_MS)),
+        timer,
       ]).catch(() => {
         /* close 失败不阻塞：会话即将被丢弃 */
       });
+      // R16: 超时后 ctx.close() 仍在后台挂起，浏览器进程可能泄漏。
+      // Playwright 公开 API 不暴露 browser PID，无法直接 process.kill。
+      // 兜底：遍历并强制关闭所有残留 page，触发浏览器释放大部分资源（渲染进程）。
+      // 若 ctx 已不可用（已 close）则忽略错误。
+      if (timedOut) {
+        try {
+          const pages = ctx.pages();
+          await Promise.allSettled(pages.map((p) => p.close({ runBeforeUnload: false })));
+        } catch {
+          /* ctx 已关闭或不可用，忽略 */
+        }
+      }
     }
   }
 

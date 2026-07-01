@@ -1,4 +1,9 @@
 import type { DB } from '../database.js';
+import {
+  isCleanupJobStatus,
+  canCleanupJobTransition,
+  type CleanupJobStatus,
+} from '../../domain/states.js';
 
 export interface CleanupJobInput {
   id: string;
@@ -91,24 +96,50 @@ export class CleanupJobs {
       .run({ ...params, updatedAt: new Date().toISOString() });
   }
 
-  /** 更新 Job 生命周期 status 与时间戳。 */
+  /**
+   * 更新 Job 生命周期 status 与时间戳。
+   *
+   * N4: 加状态机守卫（与 migration-jobs.updateStatus 的 M1 修复同模式）——
+   * 原实现任意 status 字符串都能写入（配合 schema 缺 CHECK，拼写错误静默持久化）。
+   * 现在：未知 status 直接抛错；读-校验-写包入事务消除 TOCTOU。
+   */
   updateStatus(id: string, u: UpdateCleanupStatusInput): void {
-    this.db
-      .prepare(
-        `UPDATE cleanup_jobs
-         SET status=@status,
-             started_at=COALESCE(@startedAt, started_at),
-             finished_at=COALESCE(@finishedAt, finished_at),
-             updated_at=@updatedAt
-         WHERE id=@id`,
-      )
-      .run({
-        id,
-        status: u.status,
-        startedAt: u.startedAt ?? null,
-        finishedAt: u.finishedAt ?? null,
-        updatedAt: u.updatedAt,
-      });
+    if (!isCleanupJobStatus(u.status)) {
+      throw new Error(
+        `非法 cleanup_job status 值："${u.status}"（id=${id}）；合法值：created/running/completed/interrupted`,
+      );
+    }
+    const targetStatus: CleanupJobStatus = u.status;
+    const txn = this.db.transaction(() => {
+      const current = this.db
+        .prepare('SELECT status FROM cleanup_jobs WHERE id=?')
+        .get(id) as { status: string } | undefined;
+      if (current !== undefined && isCleanupJobStatus(current.status)) {
+        if (!canCleanupJobTransition(current.status, targetStatus)) {
+          throw new Error(
+            `非法 cleanup_job 状态转换：${current.status} → ${targetStatus}（id=${id}）。` +
+              `终态（completed/interrupted）不可再转换。`,
+          );
+        }
+      }
+      this.db
+        .prepare(
+          `UPDATE cleanup_jobs
+           SET status=@status,
+               started_at=COALESCE(@startedAt, started_at),
+               finished_at=COALESCE(@finishedAt, finished_at),
+               updated_at=@updatedAt
+           WHERE id=@id`,
+        )
+        .run({
+          id,
+          status: targetStatus,
+          startedAt: u.startedAt ?? null,
+          finishedAt: u.finishedAt ?? null,
+          updatedAt: u.updatedAt,
+        });
+    });
+    txn();
   }
 }
 
