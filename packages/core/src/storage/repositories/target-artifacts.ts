@@ -183,4 +183,24 @@ export class TargetArtifacts {
       writtenFileHash: string | null;
     }[];
   }
+
+  /**
+   * R4-M9: 列出某 target_instance 下所有 index artifact（跨 job），用于索引重跑保护。
+   * 原按 migration_job_id 查询 → 新 job 的 listIndexArtifacts 返回空 →
+   * 用户编辑的索引文件被静默覆盖。改为按 target_instance_id 查询。
+   */
+  listIndexArtifactsByTarget(
+    targetInstanceId: string,
+  ): { relativePath: string; writtenFileHash: string | null }[] {
+    return this.db
+      .prepare(
+        `SELECT relative_path AS relativePath, written_file_hash AS writtenFileHash
+         FROM target_artifacts
+         WHERE target_instance_id = ? AND artifact_kind = 'index'`,
+      )
+      .all(targetInstanceId) as {
+      relativePath: string;
+      writtenFileHash: string | null;
+    }[];
+  }
 }

@@ -469,9 +469,11 @@ export async function runMigrationJob(
           return entry;
         });
         // §13.8 重跑保护：传入上一轮已落库的 index artifact 哈希
+        // R4-M9: 按 target_instance_id 查询（跨 job 保护用户编辑的索引文件）。
+        // 原按 jobId 查询 → 新 job 返回空 → 用户编辑被静默覆盖。
         // R6: writtenFileHash 可能是 null（DB NULL），用 != null 同时排除 null 和 undefined
         const knownIndexArtifacts = targetArtifacts
-          .listIndexArtifacts(i.jobId)
+          .listIndexArtifactsByTarget(i.targetInstanceId)
           .filter((a): a is { relativePath: string; writtenFileHash: string } => a.writtenFileHash != null);
         // 索引目录的路径段必须与笔记实际写入路径一致（<importSubdir>/<seg>/_索引/）。
         // 笔记路径由 ref.sourceInstanceId 决定，可能与 i.sourceInstanceId（DB 键）不同，
@@ -941,6 +943,8 @@ async function processOneItem(
           const attemptId = i.attempts.createItem({
             migrationJobId: i.jobId,
             sourceItemId: existingItem.id!,
+            // R4-L1: 统一记 'extracting'（无法确定异常发生在 extract/write/verify 哪个阶段，
+            // 需引入 per-stage 状态跟踪才能精确，当前用兜底值）
             stage: 'extracting',
             actionCode: 'stage_attempt',
             attemptNo: nextAttemptNo,

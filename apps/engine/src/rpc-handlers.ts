@@ -474,7 +474,17 @@ async function runMigrateJob(
 
     // 确保实例存在（FK 约束要求）。config_hash 反映各实例配置指纹。
     const sourceConfig: Record<string, unknown> = { sourceInstanceId, profileDir, headless: false };
-    const targetConfig: Record<string, unknown> = { vaultPath: params.vaultPath };
+    // R4-M7: targetConfig 用与 CLI 一致的完整 7 键（原只传 vaultPath，hash 与 CLI 不同
+    // → 每次跨工具运行触发虚假 UPDATE）。
+    const targetConfig: Record<string, unknown> = {
+      vaultPath: params.vaultPath,
+      importSubdir: '',
+      attachmentsSubdir: 'Attachments',
+      linkStyle: 'wikilink',
+      overwritePolicy: 'preserve',
+      collectionMapping: { toTags: false, toFolders: false },
+      maxFilenameLength: 100,
+    };
     ensureInstance(db, sourceInstanceId, 'toutiao', 'source', sourceConfig);
     ensureInstance(db, targetInstanceId, 'obsidian', 'target', targetConfig);
 

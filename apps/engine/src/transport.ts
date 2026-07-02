@@ -186,6 +186,8 @@ async function handleRequest(req: RpcRequest): Promise<void> {
   }
 
   // N7: schema 校验（信任边界）——在 dispatch 前拒绝非法 params
+  // R4-M2: 传 parsed.data 而非原始 req.params（原传未校验对象，zod 的 strip 无效）
+  let dispatchParams = req.params;
   if (entry.schema !== undefined) {
     const parsed = entry.schema.safeParse(req.params);
     if (!parsed.success) {
@@ -196,10 +198,11 @@ async function handleRequest(req: RpcRequest): Promise<void> {
       });
       return;
     }
+    dispatchParams = parsed.data as Record<string, unknown> | undefined;
   }
 
   try {
-    const result = await entry.handler(req.params);
+    const result = await entry.handler(dispatchParams);
     sendResponse(req.id, result);
   } catch (e) {
     const err = e as Error & { code?: string };
