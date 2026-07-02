@@ -15,6 +15,12 @@ const PNG_BYTES = Buffer.from([
   0x42, 0x60, 0x82,
 ]);
 
+// 最小 JPEG magic bytes（FFD8FF + E0 JFIF 标记 + 少量填充）
+const JPEG_BYTES = Buffer.from([
+  0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01,
+  0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xff, 0xd9,
+]);
+
 let server: Server;
 let baseUrl: string;
 
@@ -24,6 +30,10 @@ beforeAll(async () => {
     if (url === '/ok.png') {
       res.writeHead(200, { 'content-type': 'image/png' });
       res.end(PNG_BYTES);
+    } else if (url === '/ok.jpg') {
+      // R4-C3: image/jpg（非标准别名）+ 合法 JPEG magic bytes
+      res.writeHead(200, { 'content-type': 'image/jpg' });
+      res.end(JPEG_BYTES);
     } else if (url === '/zero.png') {
       res.writeHead(200, { 'content-type': 'image/png' });
       res.end();
@@ -60,6 +70,19 @@ describe('downloadImage (§12.10)', () => {
       expect(result.bytes.slice(0, 8)).toEqual(PNG_BYTES.slice(0, 8));
       expect(result.mimeType).toBe('image/png');
       expect(result.byteSize).toBe(PNG_BYTES.length);
+    }
+  });
+
+  it('R4-C3: accepts image/jpg content-type with JPEG magic bytes（非标准别名豁免）', async () => {
+    const { downloadImage } = await import('../src/assets/image-downloader.js');
+    const result = await downloadImage({
+      url: `${baseUrl}/ok.jpg`,
+      maxBytes: 1024 * 1024,
+      allowPrivateTargets: true,
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.bytes.slice(0, 3)).toEqual(JPEG_BYTES.slice(0, 3));
     }
   });
 

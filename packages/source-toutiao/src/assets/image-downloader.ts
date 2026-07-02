@@ -268,7 +268,12 @@ async function tryDownloadOnce(i: DownloadInput): Promise<DownloadResult> {
   }
   // SVG 不在白名单（§12.10 svgPolicy 单独处理；stage 3 默认 remote-link 不落地）
   // 容忍 webp（RIFF 基础但 MIME 是 webp）
-  if (sigMatch.mime !== contentType && contentType !== 'image/webp') {
+  // R4-C3: 容忍 image/jpg（image/jpeg 的非标准但常见别名，magic bytes 报 image/jpeg）
+  if (
+    sigMatch.mime !== contentType &&
+    contentType !== 'image/webp' &&
+    !(sigMatch.mime === 'image/jpeg' && contentType === 'image/jpg')
+  ) {
     return {
       ok: false,
       reason: `magic bytes (${sigMatch.mime}) vs content-type (${contentType}) mismatch`,

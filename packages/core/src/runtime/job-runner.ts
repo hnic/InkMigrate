@@ -898,6 +898,13 @@ async function processOneItem(
 
     return finalState;
   } catch (e) {
+    // R4-C2: AbortError（取消信号）归为 skipped（可恢复续跑），不污染为 permanent_failed。
+    // 原实现此内部 catch 无 isAbortError 检查 → AbortError 落入默认 permanent_failed，
+    // 且因 processOneItem return（非 throw），外部 .catch 的 isAbortError→skipped 永不触发。
+    if (isAbortError(e)) {
+      log('warn', `条目因取消信号中断，归为可恢复态（续跑可重试）`);
+      return 'skipped';
+    }
     // §11.5 + §20.2 错误处置：单条失败不中断整个 Job
     const err = e as {
       retryable?: boolean;
