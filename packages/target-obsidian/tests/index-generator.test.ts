@@ -189,4 +189,28 @@ describe('generateShardIndexes (§13.8)', () => {
     const shardAbs = join(vault, result.shards[0]!.relativePath);
     expect(existsSync(shardAbs)).toBe(true);
   });
+
+  it('R3-T4/M-5: markdown 模式入口索引链接指向 _索引/（非裸文件名，原 entryDir 错误）', () => {
+    const markdownConfig: ObsidianTargetConfig = { ...config, linkStyle: 'markdown' };
+    const result = generateShardIndexes({
+      config: markdownConfig,
+      vaultPath: vault,
+      sourceInstanceId: 's1',
+      entries,
+      groupBy: ['content-type'],
+    });
+    const entryAbs = join(vault, result.entryIndex.relativePath);
+    const entryContent = readFileSync(entryAbs, 'utf8');
+    // 入口索引的 markdown 链接应指向 _索引/xxx.md（入口文件在 <src>/ 下，
+    // 分片在 <src>/_索引/ 下，相对链接需含 _索引/ 前缀）。
+    // M-5 修复前 entryDir=indexDir（_索引/），relative 算出的链接缺 _索引/ 前缀 → 404。
+    const mdLinkLine = entryContent
+      .split('\n')
+      .find((l) => /^\- \[[^\]]+\]\(([^)]+)\)/.test(l));
+    expect(mdLinkLine).toBeDefined();
+    const href = /^\- \[[^\]]+\]\(([^)]+)\)/.exec(mdLinkLine!)![1];
+    // 入口索引链接应包含 _索引/ 前缀（指向子目录中的分片文件）
+    expect(href).toContain('_索引/');
+    expect(href).not.toMatch(/\\/); // 跨平台正斜杠
+  });
 });

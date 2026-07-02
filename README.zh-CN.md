@@ -201,7 +201,7 @@ Monorepo（pnpm workspace）：
 ## 测试
 
 ```bash
-# 默认测试套件（457 测试，不需要浏览器）
+# 默认测试套件（600+ 测试，不需要浏览器）
 pnpm test
 
 # 浏览器测试套件（10 测试，需要 Playwright Chromium）

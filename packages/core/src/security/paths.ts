@@ -45,11 +45,14 @@ export function isPathInside(child: string, parent: string): boolean {
  * FS（Linux）上不同文件 lowercase 后仍是不同绝对路径，不会误放行。
  */
 export function assertSymlinkSafe(root: string, target: string): void {
-  const realRoot = realpathSync(root).toLowerCase();
-  const realTarget = realpathSync(target).toLowerCase();
+  // R3-L5: 保留原始 realpath 用于错误消息（toLowerCase 会隐藏触发失败的大小写差异）
+  const rawRoot = realpathSync(root);
+  const rawTarget = realpathSync(target);
+  const realRoot = rawRoot.toLowerCase();
+  const realTarget = rawTarget.toLowerCase();
   if (realTarget !== realRoot && !isPathInside(realTarget, realRoot)) {
     throw new Error(
-      `resolved path "${realTarget}" escapes root "${realRoot}" via symlink`,
+      `resolved path "${rawTarget}" escapes root "${rawRoot}" via symlink`,
     );
   }
 }

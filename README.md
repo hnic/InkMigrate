@@ -69,7 +69,7 @@ pnpm monorepo:
 ## Testing
 
 ```bash
-pnpm test                                                    # 457 tests
+pnpm test                                                    # 600+ tests
 pnpm --filter @inkmigrate/source-toutiao test:browser        # 10 browser tests
 pnpm -r typecheck
 ```

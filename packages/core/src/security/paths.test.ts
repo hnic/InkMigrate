@@ -91,5 +91,14 @@ describe('paths (§13.2)', () => {
     it('rejects when target does not exist', () => {
       expect(() => assertSymlinkSafe(root, join(root, 'missing.md'))).toThrow();
     });
+    it('R3-T3/H-2: 同路径大小写变体不误判为逃逸（大小写不敏感 FS 兼容）', () => {
+      // H-2 修复：realpath 后统一 toLowerCase 比较，避免 APFS/NTFS 上
+      // 配置路径与磁盘存储大小写不符时 isPathInside 误判逃逸。
+      // 在大小写敏感 FS（Linux/CI）上，root 和 realFile 同大小写 → 不抛。
+      const realFile = join(root, 'Note.md');
+      writeFileSync(realFile, 'x');
+      // 同路径（realpath 一致）不应抛——无论 FS 大小写敏感性
+      expect(() => assertSymlinkSafe(root, realFile)).not.toThrow();
+    });
   });
 });
