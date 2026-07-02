@@ -264,6 +264,31 @@ describe('repositories', () => {
       expect(atts.listByJob('j1')).toHaveLength(2);
     });
 
+    it('R3-H1: maxAttemptNo returns highest attempt_no for item (0 if none)', () => {
+      seedInstancesAndJob();
+      // 内联插入 source_item（repositories.test.ts 无 seedSourceItem helper）
+      db.prepare(
+        `INSERT INTO source_items(source_instance_id,fingerprint,stable_key,item_key,stable_short_id,content_kind,discovered_at,status,created_at,updated_at)
+         VALUES('s1','fp','sk','ik','sid','article','t','discovered','t','t')`,
+      ).run();
+      const itemId = (
+        db.prepare('SELECT id FROM source_items WHERE fingerprint=?').get('fp') as { id: number }
+      ).id;
+      const atts = new MigrationAttempts(db);
+      expect(atts.maxAttemptNo('j1', itemId)).toBe(0); // 无历史
+      atts.createItem({
+        migrationJobId: 'j1', sourceItemId: itemId, stage: 'extracting',
+        actionCode: 'stage_attempt', attemptNo: 1, startedAt: 't', createdAt: 't',
+      });
+      atts.createItem({
+        migrationJobId: 'j1', sourceItemId: itemId, stage: 'verifying_target',
+        actionCode: 'stage_attempt', attemptNo: 3, startedAt: 't', createdAt: 't',
+      });
+      expect(atts.maxAttemptNo('j1', itemId)).toBe(3); // 返回最大值
+      // R3-H1: resume 时 nextAttemptNo = maxAttemptNo + 1 = 4，避免撞唯一索引
+      expect(atts.maxAttemptNo('j1', itemId) + 1).toBe(4);
+    });
+
     it('finishAttempt sets success, finishedAt, error fields', () => {
       seedInstancesAndJob();
       new MigrationAttempts(db).createJob({

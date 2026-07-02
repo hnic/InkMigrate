@@ -121,6 +121,20 @@ export class MigrationAttempts {
       .all(migrationJobId, sourceItemId) as AttemptRow[];
   }
 
+  /**
+   * R3-H1: 查询某 item 在某 job 下已有的最大 attempt_no（用于 resume 时递增）。
+   * 返回 0 表示无历史尝试。
+   */
+  maxAttemptNo(migrationJobId: string, sourceItemId: number): number {
+    const row = this.db
+      .prepare(
+        `SELECT MAX(attempt_no) AS m FROM migration_attempts
+         WHERE migration_job_id=? AND source_item_id=?`,
+      )
+      .get(migrationJobId, sourceItemId) as { m: number | null } | undefined;
+    return row?.m ?? 0;
+  }
+
   listByJob(migrationJobId: string): AttemptRow[] {
     return this.db
       .prepare(

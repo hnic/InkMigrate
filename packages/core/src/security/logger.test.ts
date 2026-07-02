@@ -38,11 +38,30 @@ describe('logger (§20.1) - 脱敏包装', () => {
   it('H1: child logger 的 info 也是被包装的函数（不是原始 pino LogFn）', () => {
     const log = createLogger({ level: 'silent' });
     const child = log.child({ rid: 'r' });
-    // 被包装的 info 与原始 logger.info 不是同一个引用（包装层产生了新函数）
-    // 这验证了 child 确实走了拦截路径，而非透传原始 logger
     const rawInfo = (log as unknown as { info: unknown }).info;
     const childInfo = (child as unknown as { info: unknown }).info;
     expect(typeof childInfo).toBe('function');
     expect(childInfo).not.toBe(rawInfo);
+  });
+
+  it('R3-H2: 循环引用对象/数组不栈溢出（H-3 修复对数组路径也生效）', () => {
+    const log = createLogger({ level: 'silent' });
+    // 对象自引用
+    const obj: Record<string, unknown> = { a: 1 };
+    obj.self = obj;
+    expect(() => log.info(obj)).not.toThrow();
+    // 数组自引用（R3-H2 核心：原数组分支传 seen 而非 visited，仍栈溢出）
+    const arr: unknown[] = [1];
+    arr.push(arr);
+    expect(() => log.info({ items: arr })).not.toThrow();
+    // err.cause = [err]（通过数组的循环）
+    const err = new Error('test');
+    (err as { cause: unknown }).cause = [err];
+    expect(() => log.error(err)).not.toThrow();
+    // 互相引用的数组
+    const a1: unknown[] = [];
+    const a2: unknown[] = [a1];
+    a1.push(a2);
+    expect(() => log.info({ a1 })).not.toThrow();
   });
 });

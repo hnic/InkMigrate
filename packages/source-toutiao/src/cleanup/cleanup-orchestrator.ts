@@ -357,7 +357,9 @@ export async function runCleanupUnfavorite(
 
     /** 当前条目的最新尝试结果（闭包变量，供 persistItem 读取最终态）。 */
     let latestOutcome: AttemptOutcome | undefined;
-    // §I-F(2)：当前条目已执行的尝试次数（首轮=1，每次重试 +1），供 persistItem 落 attemptNo。
+    // §I-F(2)：当前条目已执行的总尝试次数（首轮=1，每次重试 +1），供 persistItem 落 attemptNo。
+    // R3-L4: 注意语义——耗尽 MAX_RETRY_ATTEMPTS(3) 的条目 attemptCount=4（1+3 重试），
+    // 即 attemptCount = 首轮 + 重试次数，表示「总尝试次数」而非「重试次数」。
     let attemptCount = 0;
 
     /**

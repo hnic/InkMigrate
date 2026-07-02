@@ -138,7 +138,7 @@ function parseItemsFromHtml(html: string, baseUrl: string): FavoriteItem[] {
     if (titleEl === undefined) {
       titleEl =
         (el as Element).querySelector(
-          'a[href*="/article/"], a[href*="/video/"], a[href*="/wenda/"], a[href*="/group/"], a[href*="/w/"]',
+          'a[href*="/article/"], a[href*="/a/"], a[href*="/video/"], a[href*="/wenda/"], a[href*="/group/"], a[href*="/w/"]',
         ) ?? undefined;
     }
     // 标题：优先文本节点；视频条目标题在 a 的 title 属性里（非文本节点）

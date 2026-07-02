@@ -62,8 +62,8 @@ export const CleanupUnfavoriteSchema = z.object({
   stateDir: z.string().min(1),
   maxItems: positiveInt.optional(),
   intervalMs: positiveMs.optional(),
-  /** M6: 危险操作确认令牌 */
-  confirmed: z.boolean(),
+  /** M6: 危险操作确认令牌（R3-M6: z.literal(true) 替代 z.boolean()，拒绝 false） */
+  confirmed: z.literal(true),
 });
 
 export const StatusQuerySchema = z.object({

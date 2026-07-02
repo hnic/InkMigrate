@@ -43,11 +43,12 @@ export function openDatabase(opts: OpenDbOptions): DB {
       migrate(db);
       db.pragma('foreign_keys = ON');
     }
-    // M-1: 迁移后完整性检查——确认关键表存在。防止损坏库（schema_version 存在但
-    // 表缺失）静默"成功"（CREATE IF NOT EXISTS 不重建已缺失的表）。
+    // M-1/R3-M4: 迁移后完整性检查——确认全部业务表存在。防止损坏库（schema_version
+    // 存在但表缺失）静默"成功"（CREATE IF NOT EXISTS 不重建已缺失的表）。
     const REQUIRED_TABLES = [
       'source_instances', 'target_instances', 'migration_jobs', 'source_items',
-      'target_artifacts', 'migration_attempts',
+      'assets', 'target_artifacts', 'migration_attempts',
+      'cleanup_plans', 'cleanup_jobs', 'cleanup_items', 'cleanup_action_attempts',
     ];
     for (const t of REQUIRED_TABLES) {
       const exists = db

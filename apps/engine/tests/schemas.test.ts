@@ -32,6 +32,31 @@ describe('engine schemas (N7, T-1)', () => {
       });
       expect(valid.success).toBe(true);
     });
+    it('R3-M6: confirmed:false 被 schema 拒绝（z.literal(true) 替代 z.boolean()）', () => {
+      const rejected = CleanupUnfavoriteSchema.safeParse({
+        source: 's1', stateDir: '/tmp/x', confirmed: false,
+      });
+      expect(rejected.success).toBe(false);
+    });
+  });
+
+  describe('R3-T5: schema 字段名与 handler/protocol 一致性（P0-1 类防护）', () => {
+    // P0-1 是 StatusQuerySchema 用 source 而 handler 用 job 的字段名不匹配。
+    // 此测试固化各 schema 的关键字段名，防止再次漂移。
+    it('StatusQuerySchema 的 id 字段是 job', () => {
+      const shape = StatusQuerySchema.shape as Record<string, unknown>;
+      expect(shape).toHaveProperty('job');
+      expect(shape).not.toHaveProperty('source');
+    });
+    it('MigrateResumeSchema 的 id 字段是 job', () => {
+      const shape = MigrateResumeSchema.shape as Record<string, unknown>;
+      expect(shape).toHaveProperty('job');
+    });
+    it('MigrateStartSchema 有 source 和 target', () => {
+      const shape = MigrateStartSchema.shape as Record<string, unknown>;
+      expect(shape).toHaveProperty('source');
+      expect(shape).toHaveProperty('target');
+    });
   });
 
   describe('valid params 通过', () => {

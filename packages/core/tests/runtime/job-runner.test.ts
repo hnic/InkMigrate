@@ -13,6 +13,10 @@ import {
   type SourceItem,
   type SourceItemRef,
   type TargetContext,
+  type TargetAdapter,
+  type TargetPlan,
+  type TargetWriteResult,
+  type TargetVerification,
 } from '../../src/index.js';
 import {
   createToutiaoSource,
@@ -704,5 +708,72 @@ describe('runMigrationJob (§11 端到端)', () => {
     const refreshed = new TargetArtifacts(db).findByTargetPath('t1', notePath);
     expect(refreshed).toBeDefined();
     expect(refreshed!.migrationJobId).toBe('j-reup');
+  });
+
+  it('R3-T1/H-1: mark_conflict (skippedWrite=true) 归为 conflict 而非 verified', async () => {
+    const favoritesHtml = readFileSync(join(FIXTURES, 'favorites-list.html'), 'utf8');
+    const articleHtml = readFileSync(join(FIXTURES, 'article.html'), 'utf8');
+
+    new SourceInstances(db).create({
+      id: 's1', adapterKind: 'toutiao', adapterVersion: '1.0.0',
+      adapterApiVersion: '1.0.0', configHash: 'h', createdAt: 't', updatedAt: 't',
+    });
+    new TargetInstances(db).create({
+      id: 't1', adapterKind: 'obsidian', adapterVersion: '1.0.0',
+      adapterApiVersion: '1.0.0', configHash: 'h', createdAt: 't', updatedAt: 't',
+    });
+    new MigrationJobs(db).create({
+      id: 'j-conflict', sourceInstanceId: 's1', targetInstanceId: 't1',
+      status: 'created', currentStage: 'preflight', createdAt: 't', updatedAt: 't',
+    });
+
+    const targetCtx: TargetContext = {
+      config: {}, workspaceDir: dbDir, vaultPath: vaultDir,
+      targetConfig: {
+        vaultPath: vaultDir, importSubdir: '', attachmentsSubdir: 'Attachments',
+        linkStyle: 'wikilink', overwritePolicy: 'preserve',
+        collectionMapping: { toTags: false, toFolders: false }, maxFilenameLength: 100,
+      } as Record<string, unknown>,
+    };
+
+    // mock target adapter：write 返回 skippedWrite=true（模拟 mark_conflict）
+    const conflictTarget: TargetAdapter = {
+      kind: 'mock', version: '1.0.0', adapterApiVersion: '1.0.0',
+      capabilities: { supportsCleanup: false, contentKinds: ['article'] },
+      async validateConfig() { return { ok: true }; },
+      async prepare() {},
+      async plan(_ref) {
+        return {
+          relativePath: 'mock-note.md',
+          artifactKind: 'note',
+          sourceContentHash: 'sha256:mock',
+        } satisfies TargetPlan;
+      },
+      async write(_plan, _ctx): Promise<TargetWriteResult> {
+        // H-1 核心：返回 skippedWrite=true，不写文件
+        return {
+          relativePath: 'x.md',
+          targetContentHash: 'sha256:mock-target',
+          writtenFileHash: 'sha256:mock-written',
+          skippedWrite: true,
+        };
+      },
+      async verify(_r, _ctx): Promise<TargetVerification> {
+        // verify 不应被调用（skippedWrite 跳过），但若被调用返回 ok=true 会暴露 H-1 bug
+        return { ok: true };
+      },
+      async close() {},
+    };
+
+    const result = await runMigrationJob({
+      db, jobId: 'j-conflict',
+      sourceAdapter: createFixtureSource(favoritesHtml, articleHtml), targetAdapter: conflictTarget,
+      sourceInstanceId: 's1', targetInstanceId: 't1',
+      targetContext: targetCtx, workspaceDir: dbDir, reportsDir: join(dbDir, 'reports'),
+    });
+
+    // H-1: skippedWrite → conflict（不是 verified）
+    expect(result.status).toBe('completed');
+    expect((result.finalStateCounts as Record<string, number>).conflict ?? 0).toBeGreaterThan(0);
   });
 });

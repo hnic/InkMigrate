@@ -80,15 +80,19 @@ function wrapRedacted(logger: Logger, redactor: Redactor): Logger {
 function redactValue(v: unknown, r: Redactor, seen?: WeakSet<object>): unknown {
   if (v === null || v === undefined) return v;
   if (typeof v === 'string') return r(v);
-  if (Array.isArray(v)) return v.map((x) => redactValue(x, r, seen));
+  // H-3/R3-H2: 循环引用守卫。原数组分支传 seen（undefined）而非 visited（WeakSet），
+  // 且数组自身不加入 visited → arr.push(arr) 或 err.cause=[err] 仍栈溢出。
+  // 统一：数组和对象都用同一 visited WeakSet，进入前检查+标记。
   if (typeof v === 'object') {
-    // H-3: 循环引用守卫。err.cause = err 或对象自引用会导致无限递归栈溢出。
-    // 用 WeakSet 跟踪已访问对象，重复访问时返回占位（不泄漏内容，不崩溃）。
     const visited = seen ?? new WeakSet<object>();
     if (visited.has(v as object)) {
       return '[Circular]';
     }
     visited.add(v as object);
+    if (Array.isArray(v)) {
+      // R3-H2: 数组也加入 visited，递归传 visited（非原始 seen）
+      return v.map((x) => redactValue(x, r, visited));
+    }
     // L3: Map/Set/Error.cause 等非普通对象，Object.entries 不遍历其内部条目，
     // 需显式处理避免泄漏。
     if (v instanceof Map) {
