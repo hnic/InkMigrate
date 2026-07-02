@@ -693,6 +693,14 @@ async function processOneItem(
     return 'verified';
   }
 
+  // R3-H1: 计算本次 attempt_no（已有最大值 + 1）。原硬编码 attemptNo:1 在 resume 时
+  // 会撞 uq_migration_attempts_item 唯一索引（同 job+item+stage+action_code+attempt_no=1），
+  // 导致 conflict 归为 permanent_failed 且永不能重试。
+  const nextAttemptNo =
+    existingItem?.id !== undefined
+      ? i.attempts.maxAttemptNo(i.jobId, existingItem.id) + 1
+      : 1;
+
   try {
     // §18.1/§18.2 retry-wrapped extract
     // migration_attempts 记录在下方成功/失败分支内联创建（携带准确的 stage/actionCode）。
@@ -752,7 +760,7 @@ async function processOneItem(
             sourceItemId: existingItem.id!,
             stage: 'writing_target',
             actionCode: isUpgrade ? 'quality_upgrade' : 'stage_attempt',
-            attemptNo: 1,
+            attemptNo: nextAttemptNo,
             startedAt: now(),
             createdAt: now(),
           });
@@ -784,7 +792,7 @@ async function processOneItem(
             sourceItemId: existingItem.id!,
             stage: 'verifying_target',
             actionCode: isUpgrade ? 'quality_upgrade' : 'stage_attempt',
-            attemptNo: 1,
+            attemptNo: nextAttemptNo,
             startedAt: now(),
             createdAt: now(),
           });
@@ -815,7 +823,7 @@ async function processOneItem(
           sourceItemId: existingItem.id,
           stage: 'verifying_target',
           actionCode: isUpgrade ? 'quality_upgrade' : 'stage_attempt',
-          attemptNo: 1,
+          attemptNo: nextAttemptNo,
           startedAt: now(),
           createdAt: now(),
         });
@@ -914,7 +922,7 @@ async function processOneItem(
             sourceItemId: existingItem.id!,
             stage: 'extracting',
             actionCode: 'stage_attempt',
-            attemptNo: 1,
+            attemptNo: nextAttemptNo,
             startedAt: now(),
             createdAt: now(),
           });
