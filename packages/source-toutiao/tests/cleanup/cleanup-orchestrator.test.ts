@@ -447,6 +447,23 @@ describe('runCleanupUnfavorite', () => {
     // 避免未用告警
     expect(item1Attempts).toBeGreaterThan(0);
 
+    // R3-T6: 端到端验证 cleanup_items.attempt_count 反映真实重试次数。
+    // M-2 修复前 attempt_count 恒为 1（与 cleanup_action_attempts 的真实计数矛盾）。
+    // M-2 修复后 orchestrator 传入真实 attemptCount，upsert 用 MAX(已有, 新值)。
+    // 第 1 条耗尽 MAX_RETRY_ATTEMPTS(3) 次重试仍失败 → 总尝试 = 1(首轮) + 3(重试) = 4。
+    const item0Row = db
+      .prepare(
+        `SELECT ci.attempt_count AS attemptCount
+         FROM cleanup_items ci
+         JOIN source_items si ON si.id = ci.source_item_id
+         WHERE si.canonical_url = 'https://www.toutiao.com/article/0/'`,
+      )
+      .get() as { attemptCount: number } | undefined;
+    expect(item0Row).toBeDefined();
+    expect(item0Row!.attemptCount).toBe(item1Attempts);
+    // item1Attempts = 首轮 + 重试次数 = 4（1 + MAX_RETRY_ATTEMPTS=3）
+    expect(item0Row!.attemptCount).toBe(4);
+
     db.close();
   });
 
