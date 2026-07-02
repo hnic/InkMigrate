@@ -138,4 +138,11 @@ describe('AbortError (M-7, T-3)', () => {
     expect(isAbortError(new Error('aborted'))).toBe(false);
     expect(isAbortError(null)).toBe(false);
   });
+  it('R3-M1: isAbortError 覆盖原生 DOMException(name=AbortError)', () => {
+    // adapter 用 signal.throwIfAborted() 抛原生 AbortError（DOMException）
+    const nativeAbort = Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
+    expect(isAbortError(nativeAbort)).toBe(true);
+    // 普通 name 不匹配
+    expect(isAbortError(Object.assign(new Error('x'), { name: 'TypeError' }))).toBe(false);
+  });
 });

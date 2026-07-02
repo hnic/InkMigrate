@@ -1,26 +1,17 @@
 import { useState } from 'react';
-import type { AppSettings } from '../../lib/types.js';
+import type { AppSettings, StatusQueryResult } from '../../lib/types.js';
 
 interface Props {
   settings: AppSettings;
   rpcCall: (method: string, params: Record<string, unknown>) => Promise<unknown>;
 }
 
-interface JobInfo {
-  jobId: string;
-  status: string;
-  scanCount: number;
-  verifiedCount: number;
-  degradedCount: number;
-  failedCount: number;
-  // N8: 与 engine StatusQueryResult 对齐——此前漏了 conflictCount/skippedCount，导致这两类计数永远不展示。
-  conflictCount?: number;
-  skippedCount?: number;
-}
+// R3-M5: 改用共享 StatusQueryResult 类型（原 JobInfo 重声明且含不存在的 jobId 字段，
+// handler 不返回 jobId，渲染 Job: {undefined}）。jobId 显示用客户端 selectedJob。
 
 export function ReportPage({ settings, rpcCall }: Props) {
   const [selectedJob, setSelectedJob] = useState('');
-  const [detail, setDetail] = useState<JobInfo | null>(null);
+  const [detail, setDetail] = useState<StatusQueryResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -33,7 +24,7 @@ export function ReportPage({ settings, rpcCall }: Props) {
       const res = await rpcCall('status.query', {
         job: selectedJob,
         stateDir: settings.stateDir,
-      }) as JobInfo;
+      }) as StatusQueryResult;
       setDetail(res);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -85,7 +76,7 @@ export function ReportPage({ settings, rpcCall }: Props) {
         {detail && (
           <div style={{ marginTop: '8px' }}>
             <div style={{ fontSize: '12px', color: 'var(--text-dim)', marginBottom: '8px' }}>
-              Job: {detail.jobId}
+              Job: {selectedJob}
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
               <StatCard label="状态" value={statusLabels[detail.status] ?? detail.status} color={detail.status === 'completed' ? 'var(--success)' : 'var(--warning)'} />

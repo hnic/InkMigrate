@@ -32,6 +32,12 @@ describe('engine schemas (N7, T-1)', () => {
       });
       expect(valid.success).toBe(true);
     });
+    it('R3-M6: confirmed:false 被 schema 拒绝（z.literal(true) 替代 z.boolean()）', () => {
+      const rejected = CleanupUnfavoriteSchema.safeParse({
+        source: 's1', stateDir: '/tmp/x', confirmed: false,
+      });
+      expect(rejected.success).toBe(false);
+    });
   });
 
   describe('valid params 通过', () => {

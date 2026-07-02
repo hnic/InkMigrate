@@ -52,7 +52,10 @@ export class AbortError extends Error {
 
 /** 判断错误是否为取消错误。 */
 export function isAbortError(e: unknown): e is AbortError {
-  return e instanceof AbortError;
+  // R3-M1: 除本地 AbortError 类外，也匹配原生 DOMException(name='AbortError')
+  //（adapter 用 signal.throwIfAborted() 或 fetch({signal}) 抛的原生 abort）。
+  if (e instanceof AbortError) return true;
+  return typeof e === 'object' && e !== null && (e as { name?: string }).name === 'AbortError';
 }
 
 /** HTTP 状态码是否表示永久错误，不应重试。 */

@@ -176,14 +176,33 @@ async function tryDownloadOnce(i: DownloadInput): Promise<DownloadResult> {
   try {
     // I3: 总超时（连接 + 读取），防止慢/挂图片服务器永久阻塞 extract。
     const timeoutMs = i.timeoutMs ?? 30000;
+    // R3-M3: redirect:'manual' + 逐跳重新校验目标 IP（原 'follow' 不校验重定向目标，
+    // 攻击者用 benign URL 302 到 169.254.169.254 即绕过 SSRF 防护）。
     const fetchOpts: RequestInit = {
-      redirect: 'follow',
+      redirect: 'manual',
       signal: AbortSignal.timeout(timeoutMs),
     };
     if (i.referer !== undefined) {
       fetchOpts.headers = { referer: i.referer };
     }
     response = await fetch(i.url, fetchOpts);
+
+    // R3-M3: 手动跟随重定向，每跳重新 assertSafeImageUrl
+    let redirectCount = 0;
+    while (response.status >= 300 && response.status < 400 && redirectCount < 5) {
+      const location = response.headers.get('location');
+      if (!location) break;
+      const targetUrl = new URL(location, i.url).toString();
+      if (!i.allowPrivateTargets) {
+        try {
+          await assertSafeImageUrl(targetUrl);
+        } catch (e) {
+          return { ok: false, reason: `ssrf blocked (redirect): ${(e as Error).message}` };
+        }
+      }
+      response = await fetch(targetUrl, fetchOpts);
+      redirectCount++;
+    }
   } catch (e) {
     return { ok: false, reason: `network error: ${(e as Error).message}` };
   }
