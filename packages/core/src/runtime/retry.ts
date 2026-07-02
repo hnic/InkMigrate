@@ -87,6 +87,9 @@ export async function withRetry<T>(
       lastError = e;
       // 取消信号优先于重试决策
       if (signal?.aborted) throw new AbortError();
+      // R4-C2: adapter 自身抛的 AbortError（非 signal 触发）也不重试——
+      // 否则取消一个 in-flight extract 会浪费 3 轮退避重试。
+      if (isAbortError(e)) throw e;
       const httpStatus = (e as { httpStatus?: number }).httpStatus;
       const retryable = (e as { retryable?: boolean }).retryable;
       // 显式标记 retryable=false 的错误不重试（如导航超时）

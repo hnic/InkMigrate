@@ -463,13 +463,17 @@ export async function runMigrationJob(
             relativePath: r.relativePath,
             contentKind: r.contentKind,
             collections,
+            // R4-M4: 从 source_metadata_json 解析 publishedAt（原不传，month 分片全落入"未知日期"）
+            ...(typeof meta.publishedAt === 'string' ? { publishedAt: meta.publishedAt } : {}),
           };
           return entry;
         });
         // §13.8 重跑保护：传入上一轮已落库的 index artifact 哈希
+        // R4-M9: 按 target_instance_id 查询（跨 job 保护用户编辑的索引文件）。
+        // 原按 jobId 查询 → 新 job 返回空 → 用户编辑被静默覆盖。
         // R6: writtenFileHash 可能是 null（DB NULL），用 != null 同时排除 null 和 undefined
         const knownIndexArtifacts = targetArtifacts
-          .listIndexArtifacts(i.jobId)
+          .listIndexArtifactsByTarget(i.targetInstanceId)
           .filter((a): a is { relativePath: string; writtenFileHash: string } => a.writtenFileHash != null);
         // 索引目录的路径段必须与笔记实际写入路径一致（<importSubdir>/<seg>/_索引/）。
         // 笔记路径由 ref.sourceInstanceId 决定，可能与 i.sourceInstanceId（DB 键）不同，
@@ -772,10 +776,15 @@ async function processOneItem(
           });
         })();
       }
+      // R4-M3: 写 source_items.status='conflict'（原只更新 job 缓存列，DB 与报告不一致）
+      if (existingItem !== undefined) {
+        i.sourceItemsRepo.updateCommittedResult(existingItem.id, {
+          status: 'conflict',
+          updatedAt: now(),
+        });
+      }
       return 'conflict';
     }
-
-    // verify
     const verification = await i.targetAdapter.verify(
       writeResult,
       i.targetContext,
@@ -803,6 +812,13 @@ async function processOneItem(
             errorMessage: 'verification failed (possible user-modified mismatch)',
           });
         })();
+      }
+      // R4-M3: 写 source_items.status='conflict'
+      if (existingItem !== undefined) {
+        i.sourceItemsRepo.updateCommittedResult(existingItem.id, {
+          status: 'conflict',
+          updatedAt: now(),
+        });
       }
       return 'conflict';
     }
@@ -898,6 +914,13 @@ async function processOneItem(
 
     return finalState;
   } catch (e) {
+    // R4-C2: AbortError（取消信号）归为 skipped（可恢复续跑），不污染为 permanent_failed。
+    // 原实现此内部 catch 无 isAbortError 检查 → AbortError 落入默认 permanent_failed，
+    // 且因 processOneItem return（非 throw），外部 .catch 的 isAbortError→skipped 永不触发。
+    if (isAbortError(e)) {
+      log('warn', `条目因取消信号中断，归为可恢复态（续跑可重试）`);
+      return 'skipped';
+    }
     // §11.5 + §20.2 错误处置：单条失败不中断整个 Job
     const err = e as {
       retryable?: boolean;
@@ -920,6 +943,8 @@ async function processOneItem(
           const attemptId = i.attempts.createItem({
             migrationJobId: i.jobId,
             sourceItemId: existingItem.id!,
+            // R4-L1: 统一记 'extracting'（无法确定异常发生在 extract/write/verify 哪个阶段，
+            // 需引入 per-stage 状态跟踪才能精确，当前用兜底值）
             stage: 'extracting',
             actionCode: 'stage_attempt',
             attemptNo: nextAttemptNo,
@@ -950,6 +975,13 @@ async function processOneItem(
     // better-sqlite3 在违反唯一约束时 errCode 形如 'SQLITE_CONSTRAINT_UNIQUE'。
     if (typeof err.code === 'string' && err.code.includes('CONSTRAINT')) {
       log('warn', `路径并发冲突（UNIQUE 约束），标记为 conflict：${errMsg}`);
+      // R4-M3: 写 source_items.status='conflict'
+      if (existingItem !== undefined) {
+        i.sourceItemsRepo.updateCommittedResult(existingItem.id, {
+          status: 'conflict',
+          updatedAt: now(),
+        });
+      }
       return 'conflict';
     }
 

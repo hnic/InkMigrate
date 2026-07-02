@@ -776,4 +776,47 @@ describe('runMigrationJob (§11 端到端)', () => {
     expect(result.status).toBe('completed');
     expect((result.finalStateCounts as Record<string, number>).conflict ?? 0).toBeGreaterThan(0);
   });
+
+  it('R4-C2: 取消 in-flight extract 归为 skipped 而非 permanent_failed', async () => {
+    const favoritesHtml = readFileSync(join(FIXTURES, 'favorites-list.html'), 'utf8');
+    const articleHtml = readFileSync(join(FIXTURES, 'article.html'), 'utf8');
+    new SourceInstances(db).create({
+      id: 's1', adapterKind: 'toutiao', adapterVersion: '1.0.0',
+      adapterApiVersion: '1.0.0', configHash: 'h', createdAt: 't', updatedAt: 't',
+    });
+    new TargetInstances(db).create({
+      id: 't1', adapterKind: 'obsidian', adapterVersion: '1.0.0',
+      adapterApiVersion: '1.0.0', configHash: 'h', createdAt: 't', updatedAt: 't',
+    });
+    new MigrationJobs(db).create({
+      id: 'j-abort', sourceInstanceId: 's1', targetInstanceId: 't1',
+      status: 'created', currentStage: 'preflight', createdAt: 't', updatedAt: 't',
+    });
+    const targetCtx: TargetContext = {
+      config: {}, workspaceDir: dbDir, vaultPath: vaultDir,
+      targetConfig: {
+        vaultPath: vaultDir, importSubdir: '', attachmentsSubdir: 'Attachments',
+        linkStyle: 'wikilink', overwritePolicy: 'preserve',
+        collectionMapping: { toTags: false, toFolders: false }, maxFilenameLength: 100,
+      } as Record<string, unknown>,
+    };
+    // mock source adapter: extract 抛 AbortError（模拟取消信号中断 in-flight extract）
+    const abortSource: SourceAdapter = {
+      ...createFixtureSource(favoritesHtml, articleHtml),
+      async extract() {
+        // R4-C2: 模拟 adapter 收到 abort 信号后抛 AbortError
+        throw Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
+      },
+    };
+    const result = await runMigrationJob({
+      db, jobId: 'j-abort',
+      sourceAdapter: abortSource, targetAdapter: createObsidianTarget(),
+      sourceInstanceId: 's1', targetInstanceId: 't1',
+      targetContext: targetCtx, workspaceDir: dbDir, reportsDir: join(dbDir, 'reports'),
+    });
+    // R4-C2: AbortError 应归为 skipped（可恢复），而非 permanent_failed
+    const counts = result.finalStateCounts as Record<string, number>;
+    expect(counts.permanent_failed ?? 0).toBe(0);
+    expect(counts.skipped).toBeGreaterThan(0);
+  });
 });

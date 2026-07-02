@@ -40,6 +40,8 @@ export function useSidecar() {
         { level: 'error', message: `⚠️ ${e.payload.message}`, timestamp: Date.now() },
       ]);
       setBusy(false);
+      // R4-M8: 重置 activePhase（原只重置 busy，页面级 activePhase 检查卡在错误状态）
+      setActivePhase(null);
     }).then((fn) => { if (cancelled) fn(); else unlistenRefs.current.push(fn); })
       .catch((e) => console.error('crashed listen 失败', e));
 

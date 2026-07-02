@@ -173,6 +173,8 @@ function parseItemsFromHtml(html: string, baseUrl: string): FavoriteItem[] {
       sourceMetadata: {
         contentTypeHint: contentType,
         displayCollection: collection,
+        // R4-M4: 存入 publishedAt 供索引 month 分片使用（原不存，导致所有笔记落入"未知日期"）
+        ...(publishedAt !== undefined ? { publishedAt } : {}),
       },
     };
     if (finalExternalId !== undefined) item.externalId = finalExternalId;

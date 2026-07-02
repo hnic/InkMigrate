@@ -40,7 +40,7 @@ export function sendResponse(
   result: unknown,
 ): void {
   const msg: RpcResponse = { jsonrpc: '2.0', id, result };
-  writeLine(msg);
+  writeLine(msg, 'response');
 }
 
 /** 发送 Error Response 到 stdout。 */
@@ -49,7 +49,7 @@ export function sendErrorResponse(
   error: RpcError,
 ): void {
   const msg: RpcResponse = { jsonrpc: '2.0', id, error };
-  writeLine(msg);
+  writeLine(msg, 'response');
 }
 
 /** 发送 Notification 到 stdout（用于进度/日志推送）。 */
@@ -58,7 +58,7 @@ export function sendNotification(
   params?: Record<string, unknown>,
 ): void {
   const msg: RpcNotification = { jsonrpc: '2.0', method, ...(params !== undefined ? { params } : {}) };
-  writeLine(msg);
+  writeLine(msg, 'notification');
 }
 
 /** 发送日志到 stderr（不干扰 stdout JSON 通道）。 */
@@ -70,21 +70,20 @@ export function logToStderr(level: string, message: string): void {
 let stdoutBroken = false;
 
 /**
- * H6: stdout 背压保护。process.stdout.write 返回 false 表示内核缓冲已满，
+ * H6/R4-C1: stdout 背压保护。process.stdout.write 返回 false 表示内核缓冲已满，
  * 应等待 'drain'。若宿主持续不读，Node 内部缓冲会无界增长导致 OOM。
- * 用一个上限计数器：超过阈值后丢弃低优先级的 log/progress 通知（保留 response/error）。
+ * 用一个上限计数器：超过阈值后丢弃低优先级的 notification（log/progress），
+ * 但**永不丢弃 response/error**（R4-C1: 原实现一律丢弃导致 GUI 永久冻结）。
  */
 const STDOUT_HIGH_WATERMARK = 1024 * 1024; // 1 MiB 排队上限
 let stdoutBackpressured = false;
 
-function writeLine(msg: unknown): void {
+function writeLine(msg: unknown, priority: 'response' | 'notification' = 'notification'): void {
   if (stdoutBroken) return; // 管道已断，静默丢弃
   const line = JSON.stringify(msg) + '\n';
   try {
-    // 检查排队量：process.stdout.writableLength 是当前在内核/流缓冲中待写的字节数
-    if (stdoutBackpressured) {
-      // 已超水位且未 drain：丢弃非关键通知（log/progress），保留 response/error。
-      // 这里简化处理——超水位时一律丢弃新的非关键写入，由 drain 恢复。
+    // R4-C1: 背压时只丢弃 notification，response/error 必须写入（否则 GUI 永久冻结）
+    if (stdoutBackpressured && priority === 'notification') {
       return;
     }
     const ok = process.stdout.write(line);
@@ -92,8 +91,14 @@ function writeLine(msg: unknown): void {
       // 返回 false：内核缓冲满，进入背压。若累积超水位，进入丢弃模式。
       if (process.stdout.writableLength > STDOUT_HIGH_WATERMARK) {
         stdoutBackpressured = true;
-        logToStderr('warn', 'stdout 背压超水位，暂时丢弃非关键通知直到 drain');
+        logToStderr('warn', 'stdout 背压超水位，暂时丢弃 notification 直到 drain');
+        // R4-M1: drain 可能永不触发（host 永久慢），加 5s 超时兜底恢复
+        const drainTimeout = setTimeout(() => {
+          stdoutBackpressured = false;
+          logToStderr('warn', 'stdout 背压 5s 超时，强制恢复（可能丢失部分 notification）');
+        }, 5000);
         process.stdout.once('drain', () => {
+          clearTimeout(drainTimeout);
           stdoutBackpressured = false;
         });
       }
@@ -181,6 +186,8 @@ async function handleRequest(req: RpcRequest): Promise<void> {
   }
 
   // N7: schema 校验（信任边界）——在 dispatch 前拒绝非法 params
+  // R4-M2: 传 parsed.data 而非原始 req.params（原传未校验对象，zod 的 strip 无效）
+  let dispatchParams = req.params;
   if (entry.schema !== undefined) {
     const parsed = entry.schema.safeParse(req.params);
     if (!parsed.success) {
@@ -191,10 +198,11 @@ async function handleRequest(req: RpcRequest): Promise<void> {
       });
       return;
     }
+    dispatchParams = parsed.data as Record<string, unknown> | undefined;
   }
 
   try {
-    const result = await entry.handler(req.params);
+    const result = await entry.handler(dispatchParams);
     sendResponse(req.id, result);
   } catch (e) {
     const err = e as Error & { code?: string };
