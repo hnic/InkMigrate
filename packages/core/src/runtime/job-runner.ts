@@ -463,6 +463,8 @@ export async function runMigrationJob(
             relativePath: r.relativePath,
             contentKind: r.contentKind,
             collections,
+            // R4-M4: 从 source_metadata_json 解析 publishedAt（原不传，month 分片全落入"未知日期"）
+            ...(typeof meta.publishedAt === 'string' ? { publishedAt: meta.publishedAt } : {}),
           };
           return entry;
         });
@@ -772,10 +774,15 @@ async function processOneItem(
           });
         })();
       }
+      // R4-M3: 写 source_items.status='conflict'（原只更新 job 缓存列，DB 与报告不一致）
+      if (existingItem !== undefined) {
+        i.sourceItemsRepo.updateCommittedResult(existingItem.id, {
+          status: 'conflict',
+          updatedAt: now(),
+        });
+      }
       return 'conflict';
     }
-
-    // verify
     const verification = await i.targetAdapter.verify(
       writeResult,
       i.targetContext,
@@ -803,6 +810,13 @@ async function processOneItem(
             errorMessage: 'verification failed (possible user-modified mismatch)',
           });
         })();
+      }
+      // R4-M3: 写 source_items.status='conflict'
+      if (existingItem !== undefined) {
+        i.sourceItemsRepo.updateCommittedResult(existingItem.id, {
+          status: 'conflict',
+          updatedAt: now(),
+        });
       }
       return 'conflict';
     }
@@ -957,6 +971,13 @@ async function processOneItem(
     // better-sqlite3 在违反唯一约束时 errCode 形如 'SQLITE_CONSTRAINT_UNIQUE'。
     if (typeof err.code === 'string' && err.code.includes('CONSTRAINT')) {
       log('warn', `路径并发冲突（UNIQUE 约束），标记为 conflict：${errMsg}`);
+      // R4-M3: 写 source_items.status='conflict'
+      if (existingItem !== undefined) {
+        i.sourceItemsRepo.updateCommittedResult(existingItem.id, {
+          status: 'conflict',
+          updatedAt: now(),
+        });
+      }
       return 'conflict';
     }
 

@@ -38,21 +38,21 @@ export function isPathInside(child: string, parent: string): boolean {
  * target 等于 root（文件就位于 Vault 根目录）视为安全——isPathInside 严格区分
  * "在内部"与"相等"，但符号链接逃逸校验的语义是"不逃出 root"，相等即不逃出。
  *
- * R14/H-2（大小写不敏感 FS）：realpathSync 返回 OS 权威存储路径。在 APFS（默认
- * 不敏感）/NTFS 上，配置路径与磁盘存储大小写可能不符（如配置 MyVault，磁盘 myvault）。
- * isPathInside 用大小写敏感的 relative()，会对此误判逃逸（../MyVault/...）。
- * 修复：realpath 后统一 toLowerCase 比较——realpath 已是 OS 权威路径，大小写敏感
- * FS（Linux）上不同文件 lowercase 后仍是不同绝对路径，不会误放行。
+ * R14/H-2/R4-M6（大小写不敏感 FS）：realpathSync 返回 OS 权威存储路径（已规范化
+ * 大小写）。在 APFS（默认不敏感）/NTFS 上，配置路径 MyVault 和磁盘 myvault 经
+ * realpathSync 后都返回磁盘真实形式（如 /Users/x/myvault），直接比较即可，无需
+ * toLowerCase。
+ *
+ * R4-M6: 原 H-2 用 toLowerCase 全局比较，在 Linux（大小写敏感 FS）上造成安全漏洞——
+ * 不同目录 /vault/Bar 和 /vault/bar lowercase 相同 → isPathInside 误判 inside
+ * → symlink 逃逸被放行。回退到 realpath 直接比较（realpath 已规范化大小写）。
  */
 export function assertSymlinkSafe(root: string, target: string): void {
-  // R3-L5: 保留原始 realpath 用于错误消息（toLowerCase 会隐藏触发失败的大小写差异）
-  const rawRoot = realpathSync(root);
-  const rawTarget = realpathSync(target);
-  const realRoot = rawRoot.toLowerCase();
-  const realTarget = rawTarget.toLowerCase();
+  const realRoot = realpathSync(root);
+  const realTarget = realpathSync(target);
   if (realTarget !== realRoot && !isPathInside(realTarget, realRoot)) {
     throw new Error(
-      `resolved path "${rawTarget}" escapes root "${rawRoot}" via symlink`,
+      `resolved path "${realTarget}" escapes root "${realRoot}" via symlink`,
     );
   }
 }

@@ -82,7 +82,9 @@ export function resolveLazyLoadAndUrls(
         // M4/M-9: 最终 src 也校验 scheme，防御 data-* 提升或 DOMPurify 残留的危险 scheme。
         // M-9: 检测到危险 scheme 时移除 src（原仅 return，危险值残留在输出 HTML）。
         if (!isSafeUrlScheme(abs, baseUrl)) {
-          img.removeAttribute('src');
+          // R4-M5: 移除整个 img 元素（原仅 removeAttribute('src')，留下无 src 的
+          // <img> → turndown 产出破损 ![]() 链接）。
+          img.remove();
           return;
         }
         img.setAttribute('src', abs);
