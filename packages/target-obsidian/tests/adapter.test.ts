@@ -8,6 +8,7 @@ import {
   computeStableKey,
   deriveStableShortId,
   type TargetContext,
+  type SourceItem,
 } from '@inkmigrate/core';
 import type { ObsidianTargetConfig } from '../src/config.js';
 
@@ -298,6 +299,98 @@ describe('createObsidianTarget (§8.4 + §13)', () => {
       writeFileSync(abs, readFileSync(abs, 'utf8') + '\n\n用户编辑');
       const v = await adapter.verify(result, ctx(vault.vaultPath));
       expect(v.ok).toBe(false);
+    });
+  });
+
+  describe('§13.7 图片本地化（assets 链路）', () => {
+    /** 构造一个最小有效 PNG（1×1 透明），通过 magic bytes 校验。 */
+    const MIN_PNG = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, // PNG signature
+      0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, // IHDR chunk
+      0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+      0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+      0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41,
+      0x54, 0x78, 0x9c, 0x62, 0x00, 0x01, 0x00, 0x00,
+      0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00,
+      0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+      0x42, 0x60, 0x82,
+    ]);
+
+    function makeImageAssetItem(): SourceItem {
+      const { createHash } = require('node:crypto');
+      const sha = createHash('sha256').update(MIN_PNG).digest('hex');
+      return makeFullArticleItem({
+        bodyHtml:
+          '<p>正文带图。</p><p><img src="https://img.example.com/a.png"></p>' +
+          '<p>第二张<img src="https://img.example.com/b.png">图</p>',
+        assets: [
+          {
+            originalUrl: 'https://img.example.com/a.png',
+            mimeType: 'image/png',
+            byteSize: MIN_PNG.length,
+            sha256: `sha256:${sha}`,
+            kind: 'image' as const,
+            data: new Uint8Array(MIN_PNG),
+          },
+          {
+            originalUrl: 'https://img.example.com/b.png',
+            mimeType: 'image/png',
+            byteSize: MIN_PNG.length,
+            sha256: `sha256:${sha}`,
+            kind: 'image' as const,
+            data: new Uint8Array(MIN_PNG),
+          },
+        ],
+      });
+    }
+
+    it('planNote 生成 assets 清单并把正文图片替换为占位符', async () => {
+      const item = makeImageAssetItem();
+      const plan = await adapter.plan(item, ctx(vault.vaultPath));
+      const oplan = plan as { assets?: { relativePath: string; sha256: string }[] };
+      expect(oplan.assets).toBeDefined();
+      expect(oplan.assets!.length).toBe(2);
+      // 正文里不应再出现原始远程 URL
+      expect(plan.renderedContent).not.toContain('img.example.com');
+    });
+
+    it('planNote 生成的嵌入是 wikilink 风格 ![[...]]（默认 linkStyle）', async () => {
+      const item = makeImageAssetItem();
+      const plan = await adapter.plan(item, ctx(vault.vaultPath));
+      // renderBody 已把占位符替换为 ![[Attachments/...]]
+      expect(plan.renderedContent).toMatch(/!\[\[Attachments\/InkMigrate\//);
+      expect(plan.renderedContent).not.toContain('\x00IMG');
+    });
+
+    it('writeNote 把附件物理落盘到 Vault', async () => {
+      const item = makeImageAssetItem();
+      const plan = await adapter.plan(item, ctx(vault.vaultPath));
+      const oplan = plan as { assets?: { relativePath: string }[] };
+      const result = await adapter.write(plan, ctx(vault.vaultPath));
+      // 每个附件文件应物理存在
+      for (const a of oplan.assets!) {
+        const abs = join(vault.vaultPath, a.relativePath);
+        expect(existsSync(abs)).toBe(true);
+        const bytes = readFileSync(abs);
+        expect(bytes.length).toBe(MIN_PNG.length);
+        expect(bytes[0]).toBe(0x89); // PNG 签名首字节
+      }
+      // note 文件也写入了
+      expect(existsSync(join(vault.vaultPath, result.relativePath))).toBe(true);
+    });
+
+    it('下载失败的图片（无 data）保留远程 URL，不进 assets 清单', async () => {
+      const item = makeFullArticleItem({
+        bodyHtml: '<p><img src="https://img.example.com/failed.png"></p>',
+        assets: [
+          { originalUrl: 'https://img.example.com/failed.png', kind: 'image' },
+        ],
+      });
+      const plan = await adapter.plan(item, ctx(vault.vaultPath));
+      const oplan = plan as { assets?: unknown[] };
+      expect(oplan.assets).toBeUndefined();
+      // 远程 URL 保留在正文里
+      expect(plan.renderedContent).toContain('img.example.com/failed.png');
     });
   });
 });

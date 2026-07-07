@@ -1,5 +1,6 @@
 import {
   computeStableKey,
+  deriveItemKey,
   deriveStableShortId,
   sourceContentHash,
   targetContentHash,
@@ -13,11 +14,17 @@ import {
   type ValidationResult,
 } from '@inkmigrate/core';
 import { ObsidianTargetConfigSchema, type ObsidianTargetConfig } from './config.js';
-import { validateVault, noteRelativePath, noteAbsolutePath } from './paths.js';
+import {
+  validateVault,
+  noteRelativePath,
+  noteAbsolutePath,
+  assetRelativePath,
+} from './paths.js';
 import { stringifyFrontmatter } from './frontmatter.js';
 import { renderBody, htmlToMarkdown } from './body.js';
 import { atomicWrite, readTargetIfExists } from './atomic-write.js';
 import { decideOverwrite } from './overwrite-policy.js';
+import { writeAsset, verifyAsset, deriveMimeExtension } from './assets.js';
 import {
   generateShardIndexes,
   type IndexEntry,
@@ -60,6 +67,19 @@ export interface ObsidianTargetAdapter extends Omit<TargetAdapter, 'write'> {
 }
 
 /**
+ * §13.7 单个附件的写入计划。由 planNote 构造，writeNote 消费——
+ * 在写 note 之前先把附件字节落盘（content-addressed，覆写语义）。
+ */
+export interface AssetWriteRecord {
+  /** 附件在 Vault 内的相对路径（如 Attachments/InkMigrate/.../001.webp）。 */
+  relativePath: string;
+  /** 附件字节。 */
+  data: Uint8Array;
+  /** 附件 sha256（形如 sha256:<hex>），供 verifyAsset 校验。 */
+  sha256: string;
+}
+
+/**
  * §13.9/§17.5 plan 阶段预渲染好的完整文件内容。
  * write 阶段只接收 plan（§8.4 签名），所以 plan 必须携带渲染结果。
  */
@@ -68,6 +88,8 @@ export interface ObsidianTargetPlan extends TargetPlan {
   targetContentHash: string;
   sourceContentHash: string;
   isMetadataOnlyUpdate: boolean;
+  /** §13.7 要随 note 一起写入 Vault 的附件清单（已下载字节的图片）。 */
+  assets?: AssetWriteRecord[];
 }
 
 async function validateConfig(ctx: TargetContext): Promise<ValidationResult> {
@@ -145,17 +167,54 @@ async function planNote(
   if (markdownBody.length === 0) {
     markdownBody = item.bodyText ?? '';
   }
+
+  // §13.7 附件本地化：把已下载字节（asset.data）的图片替换为本地嵌入。
+  // 只处理 kind==='image' 且携带 data 的 asset；下载失败的（无 data）保留远程 URL。
+  const itemKey = deriveItemKey(stableKey);
+  const assetLinks: { markdownPlaceholder: string; relativePath: string }[] = [];
+  const assetRecords: AssetWriteRecord[] = [];
+  let imgIdx = 0;
+  for (const asset of item.assets) {
+    if (asset.kind !== 'image' || asset.data === undefined || asset.sha256 === undefined) {
+      continue;
+    }
+    if (asset.originalUrl === undefined) continue;
+    // 在 markdownBody 里定位这张图片的引用（![](url) 或 ![](url "title")），
+    // 替换为唯一占位符，renderBody 会再把占位符换成 ![[relativePath]]。
+    const placeholder = `\x00IMG${imgIdx}\x00`;
+    const before = markdownBody;
+    // 先匹配带 title 的形式（url 后有空格 + "..."），再匹配裸形式。
+    markdownBody = markdownBody
+      .split(`![](${asset.originalUrl} `).join(`${placeholder} `);
+    markdownBody = markdownBody.split(`![](${asset.originalUrl})`).join(placeholder);
+    if (markdownBody === before) {
+      // 正文里找不到该 url（可能是 css 背景图等未内联的资源），跳过本地化。
+      continue;
+    }
+    const ext = deriveMimeExtension(asset.mimeType ?? '');
+    const filename = `${String(imgIdx + 1).padStart(3, '0')}.${ext}`;
+    const relPath = assetRelativePath({
+      config,
+      sourceInstanceId: item.ref.sourceInstanceId,
+      itemKey,
+      filename,
+    });
+    assetLinks.push({ markdownPlaceholder: placeholder, relativePath: relPath });
+    assetRecords.push({ relativePath: relPath, data: asset.data, sha256: asset.sha256 });
+    imgIdx++;
+  }
+
   const body = renderBody({
     item,
     markdownBody,
-    assetLinks: [],
+    assetLinks,
     linkStyle: config.linkStyle,
   });
 
   const renderedContent = frontmatter + body;
   const targetHash = targetContentHash(renderedContent);
 
-  return {
+  const result: ObsidianTargetPlan = {
     relativePath,
     artifactKind: 'note',
     renderedContent,
@@ -163,6 +222,10 @@ async function planNote(
     sourceContentHash: srcHash,
     isMetadataOnlyUpdate: false,
   };
+  if (assetRecords.length > 0) {
+    result.assets = assetRecords;
+  }
+  return result;
 }
 
 async function writeNote(
@@ -173,6 +236,24 @@ async function writeNote(
   const config = parseConfig(ctx);
   validateVault(config.vaultPath);
   const oplan = plan as ObsidianTargetPlan;
+
+  // §13.7 先写附件（content-addressed，覆写语义），再写 note，
+  // 保证 note 里的 ![[...]] 引用在 Obsidian 打开时附件已落盘。
+  if (oplan.assets !== undefined && oplan.assets.length > 0) {
+    for (const a of oplan.assets) {
+      writeAsset({
+        vaultPath: config.vaultPath,
+        relativePath: a.relativePath,
+        bytes: Buffer.from(a.data),
+      });
+      verifyAsset({
+        vaultPath: config.vaultPath,
+        relativePath: a.relativePath,
+        expectedSha256: a.sha256,
+      });
+    }
+  }
+
   // §13.2 走 noteAbsolutePath（resolveWithin）确保路径不逃逸 Vault。
   const absPath = noteAbsolutePath(config.vaultPath, oplan.relativePath);
 

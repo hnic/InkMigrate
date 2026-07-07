@@ -77,6 +77,12 @@ export interface SourceAsset {
   byteSize?: number;
   sha256?: string;
   kind: 'image' | 'pdf' | 'audio' | 'video' | 'office' | 'other';
+  /**
+   * 瞬态：下载的资源字节（仅 image 下载成功时填充）。
+   * 不参与序列化、不进 sourceContentHash；只在同一次迁移的进程内从 extract
+   * 流到 plan/write（processOneItem 内串行完成）。跨进程/持久化后失效。
+   */
+  data?: Uint8Array;
 }
 
 export interface SourceLink {

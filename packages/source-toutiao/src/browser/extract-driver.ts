@@ -84,6 +84,9 @@ export async function driveExtractDetail(
       asset.mimeType = dl.mimeType;
       asset.byteSize = dl.byteSize;
       asset.sha256 = `sha256:${sha256}`;
+      // 瞬态保留字节，供下游 target adapter 写入本地附件。字节随 SourceItem
+      // 在 processOneItem 内同步流转（extract→plan→write），不跨进程/持久化。
+      asset.data = dl.bytes;
     }
     assets.push(asset);
   }
