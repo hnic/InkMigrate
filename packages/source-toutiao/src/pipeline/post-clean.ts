@@ -1,5 +1,6 @@
 import TurndownService from 'turndown';
 import { gfm } from 'turndown-plugin-gfm';
+import { decodeHtmlEntities } from '@inkmigrate/core';
 
 /**
  * §12.9 stage 8：Markdown 后清洗。
@@ -52,6 +53,10 @@ export function postCleanMarkdown(md: string): string {
   s = s.replace(RESIDUAL_HTML, '');
   s = s.replace(DANGEROUS_SCHEME, '()');
   s = s.replace(CONTROL_CHARS, '');
+  // §13.6 解码泄漏的 HTML 实体：HTML 经多次 innerHTML 序列化后，属性值里的
+  // `"` 被重编码为 `&quot;`，会漏进 Markdown。在代码块已占位后解码，避免误伤
+  // 代码内容；不解码 &lt;/&gt; 以免绕过 stage 5 的 HTML Sanitization。
+  s = decodeHtmlEntities(s);
   // 折叠异常嵌套链接（多次扫描，处理三层以上嵌套）
   for (let i = 0; i < 3; i++) {
     const before = s;

@@ -161,4 +161,34 @@ describe('runSafetyPipeline (§12.9 fixed 9-stage)', () => {
     // 不应保留为畸形双层链接
     expect(out.markdown).not.toMatch(/\]\(https:\/\/outer\.example\/\]\(/);
   });
+
+  it('§13.6 decodes &quot; leaked from attribute values into markdown', () => {
+    // HTML 经多次 innerHTML 序列化后，title/alt 属性值里的 " 被重编码为 &quot;。
+    // 链接 title 属性会被 turndown 输出为 [text](url "title")，未经解码时
+    // 会字面泄漏 &quot; 到 markdown。解码后 turndown 按 Markdown 规范把 title 内
+    // 的 " 转义为 \"（这是正确行为），关键是 &quot; 不再字面出现。
+    const out = runSafetyPipeline(
+      '<a href="https://example.com/" title="Tom &quot;Jerry&quot;">link</a>',
+      { baseUrl: 'https://www.toutiao.com/article/1/' },
+    );
+    expect(out.markdown).not.toContain('&quot;');
+    // 解码后的 " 被 turndown 转义为 \" 放进链接 title，证明已从 &quot; 还原
+    expect(out.markdown).toContain('\\"Jerry\\"');
+  });
+
+  it('§13.6 decodes &quot; in img alt text', () => {
+    const out = runSafetyPipeline(
+      '<img src="x.webp" alt="a&quot;b">',
+      { baseUrl: 'https://www.toutiao.com/article/1/' },
+    );
+    expect(out.markdown).not.toContain('&quot;');
+  });
+
+  it('§13.6 decodes &amp; in body text', () => {
+    const out = runSafetyPipeline('<p>Tom &amp; Jerry</p>', {
+      baseUrl: 'https://www.toutiao.com/article/1/',
+    });
+    expect(out.markdown).toContain('Tom & Jerry');
+    expect(out.markdown).not.toContain('&amp;');
+  });
 });

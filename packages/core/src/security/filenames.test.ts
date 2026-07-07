@@ -76,4 +76,19 @@ describe('filenames (§13.4)', () => {
     const out = sanitizeFilename('😀😀😀', { maxLength: 1 });
     expect(out).toBe('😀');
   });
+
+  it('§13.6 decodes &quot; then replaces the resulting quote with dash', () => {
+    // 标题经多次 innerHTML 序列化后，`"` 被编码为 `&quot;` 漏进文件名。
+    expect(sanitizeFilename('Tom &quot;Jerry&quot;')).toBe('Tom -Jerry-');
+    expect(sanitizeFilename('a&quot;b&quot;c')).toBe('a-b-c');
+    // &quot; 解码出的 " 与字面 " 走同一路径，结果一致
+    expect(sanitizeFilename('a&quot;b')).toBe(sanitizeFilename('a"b'));
+  });
+
+  it('§13.6 does NOT decode &amp; / &lt; in filenames', () => {
+    // 文件名场景下 & 是合法字符，原样保留；&lt; 不解码（解码出的 < 会触发
+    // ILLEGAL 替换，改变原义）。实体字符串本身不含非法字符，故原样保留。
+    expect(sanitizeFilename('Tom &amp; Jerry')).toBe('Tom &amp; Jerry');
+    expect(sanitizeFilename('a&lt;b')).toBe('a&lt;b');
+  });
 });

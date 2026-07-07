@@ -54,6 +54,7 @@ export {
 } from './security/paths.js';
 export { sanitizeFilename } from './security/filenames.js';
 export type { SanitizeOptions } from './security/filenames.js';
+export { decodeHtmlEntities } from './security/entities.js';
 
 // config
 export { ConfigSchema } from './config/schema.js';

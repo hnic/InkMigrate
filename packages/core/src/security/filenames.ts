@@ -5,6 +5,15 @@
 const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i;
 
 /**
+ * 文件名专用实体解码：仅解码 `&quot;`，不解码 `&amp;`。
+ *
+ * 正文解码（entities.ts）需要处理 `&amp;`，但文件名场景下 `&` 是合法字符、
+ * 不该被改动；而 `&quot;` 解码出的 `"` 会被随后的 ILLEGAL 正则替换为 `-`。
+ * 这里只针对 `&quot;` 一个实体，避免 `&amp;` / `&lt;` 等在文件名里被误改。
+ */
+const ENTITY_QUOT_RE = /&quot;/g;
+
+/**
  * §13.4 在 Windows/macOS/Linux 上都不允许出现在文件名中的字符。
  * 同时覆盖全角变体（`／`：`＼`：`＜`＞`｜`？`＊` 等），因为它们在终端/同步工具中
  * 容易造成歧义。L1: 原仅覆盖 ？＊，补齐 ／＼：＜＞｜＂ 全角形式。
@@ -36,6 +45,9 @@ export function sanitizeFilename(
 ): string {
   const max = opts.maxLength ?? 100;
   let s = input.normalize('NFC');
+  // §13.6 先解码标题里泄漏的 &quot;（HTML 多次序列化的副作用），解码出的 "
+  // 会被随后的 ILLEGAL 正则替换为 -。不解码 &amp;/&lt; 等（见 ENTITY_QUOT_RE 注释）。
+  s = s.replace(ENTITY_QUOT_RE, '"');
   s = s.replace(ILLEGAL, '-').replace(CONTROL, '');
   s = s.replace(/[\s.]+$/g, '');
   // 先截断（截断可能产生保留名，例如 'CONCEPT' → 'CON'），
