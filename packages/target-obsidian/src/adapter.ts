@@ -179,14 +179,30 @@ async function planNote(
       continue;
     }
     if (asset.originalUrl === undefined) continue;
-    // 在 markdownBody 里定位这张图片的引用（![](url) 或 ![](url "title")），
-    // 替换为唯一占位符，renderBody 会再把占位符换成 ![[relativePath]]。
+    // 在 markdownBody 里定位这张图片的引用，替换为唯一占位符。
+    //
+    // 匹配策略：头条 CDN 图片 URL 的子域名（p3/p9/p11 随机分配）和 query 参数
+    // （x-signature/x-expires 每次新签名）会变化，但内容路径
+    // `/tos-cn-i-xxx/<hash>~tplv-xxx` 是图片唯一标识，稳定不变。
+    // 即便 extract 拿到的 URL 和 bodyHtml 里的子域名/签名不同也能匹配。
+    // 内容路径不存在时（非头条图片）回退到完整 baseUrl（? 之前）精确匹配。
+    const contentPath = asset.originalUrl.match(/\/tos-cn-i-[^/]+\/[^?]+/)?.[0];
+    const baseUrl = asset.originalUrl.split('?')[0] ?? asset.originalUrl;
+    const matchKey = contentPath ?? baseUrl;
+    const escaped = matchKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const placeholder = `\x00IMG${imgIdx}\x00`;
     const before = markdownBody;
-    // 先匹配带 title 的形式（url 后有空格 + "..."），再匹配裸形式。
-    markdownBody = markdownBody
-      .split(`![](${asset.originalUrl} `).join(`${placeholder} `);
-    markdownBody = markdownBody.split(`![](${asset.originalUrl})`).join(placeholder);
+    // matchKey 可能是完整 URL（含 https://）或仅内容路径（/tos-cn-i-...）。
+    // 两种情况都用它在 url 位置匹配，前面允许任意协议+子域名，后面允许任意 query。
+    markdownBody = markdownBody.replace(
+      new RegExp(`!\\[[^\\]]*\\]\\([^)]*${escaped}[^)]*\\)`, 'g'),
+      placeholder,
+    );
+    // 匹配 <img src="url..."> HTML 标签形式（turndown 未转换的残留）。
+    markdownBody = markdownBody.replace(
+      new RegExp(`<img[^>]*src="[^"]*${escaped}[^"]*"[^>]*>`, 'g'),
+      placeholder,
+    );
     if (markdownBody === before) {
       // 正文里找不到该 url（可能是 css 背景图等未内联的资源），跳过本地化。
       continue;

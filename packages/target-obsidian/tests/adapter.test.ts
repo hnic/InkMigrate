@@ -392,5 +392,39 @@ describe('createObsidianTarget (§8.4 + §13)', () => {
       // 远程 URL 保留在正文里
       expect(plan.renderedContent).toContain('img.example.com/failed.png');
     });
+
+    it('§13.7 内容路径匹配：CDN 子域名不同 + query 签名不同也能匹配', async () => {
+      // 模拟真实场景：bodyHtml 里的图片 URL（p3 + 旧签名）与 extract 拿到的
+      // asset.originalUrl（p11 + 新签名）在子域名和 query 上都不同，但内容路径
+      // /tos-cn-i-xxx/<hash>~tplv-xxx 一致。必须靠内容路径匹配才能本地化。
+      const { createHash } = require('node:crypto');
+      const sha = createHash('sha256').update(MIN_PNG).digest('hex');
+      const item = makeFullArticleItem({
+        // bodyHtml 里是 p3 子域名 + 一组 query
+        bodyHtml:
+          '<p><img src="https://p3-sign.toutiaoimg.com/tos-cn-i-axegupay5k/abc123~tplv-tt-origin-web:gif.jpeg?_iz=58558&x-signature=OLD"></p>',
+        assets: [
+          {
+            // asset.originalUrl 是 p11 子域名 + 另一组 query（模拟重新 extract）
+            originalUrl:
+              'https://p11-sign.toutiaoimg.com/tos-cn-i-axegupay5k/abc123~tplv-tt-origin-web:gif.jpeg?_iz=58558&x-signature=NEW',
+            mimeType: 'image/png',
+            byteSize: MIN_PNG.length,
+            sha256: `sha256:${sha}`,
+            kind: 'image' as const,
+            data: new Uint8Array(MIN_PNG),
+          },
+        ],
+      });
+      const plan = await adapter.plan(item, ctx(vault.vaultPath));
+      const oplan = plan as { assets?: unknown[] };
+      expect(oplan.assets).toBeDefined();
+      expect(oplan.assets!.length).toBe(1);
+      // 两个子域名的远程 URL 都不应再出现
+      expect(plan.renderedContent).not.toContain('p3-sign.toutiaoimg.com');
+      expect(plan.renderedContent).not.toContain('p11-sign.toutiaoimg.com');
+      // 应包含本地嵌入
+      expect(plan.renderedContent).toMatch(/!\[\[Attachments\//);
+    });
   });
 });
