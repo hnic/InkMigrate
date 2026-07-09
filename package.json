@@ -12,6 +12,8 @@
     "test": "pnpm -r run test",
     "lint": "pnpm -r run lint",
     "check:stdio": "node scripts/check-no-stdout-log.mjs",
-    "inkmigrate": "node apps/cli/dist/index.js"
+    "inkmigrate": "node apps/cli/dist/index.js",
+    "sidecar:build": "node scripts/build-sidecar.mjs",
+    "bundle": "node scripts/build-sidecar.mjs && cd apps/gui && pnpm tauri build"
   }
 }

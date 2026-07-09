@@ -15,9 +15,18 @@ export interface OpenDbOptions {
 /**
  * §16 打开 SQLite 并启用 WAL、Foreign Keys、Busy Timeout 与 Schema Migration。
  * 调用方负责 `db.close()`。返回的 `DB` 是 better-sqlite3 原生实例。
+ *
+ * 打包模式：如果环境变量 BETTER_SQLITE3_BINDING 指向 .node 文件绝对路径，
+ * 通过 nativeBinding 选项显式加载，绕过 require('bindings') 的 __dirname 遍历
+ *（bundle 后 __dirname 不可靠）。
  */
 export function openDatabase(opts: OpenDbOptions): DB {
-  const db = new Database(opts.path, opts.options ?? {});
+  const bindingEnv = process.env.BETTER_SQLITE3_BINDING;
+  const options = { ...opts.options };
+  if (bindingEnv && options.nativeBinding === undefined) {
+    options.nativeBinding = bindingEnv;
+  }
+  const db = new Database(opts.path, options);
   db.pragma(`busy_timeout = ${opts.busyTimeoutMs ?? 5000}`);
   if (opts.wal !== false && opts.path !== ':memory:') {
     db.pragma('journal_mode = WAL');
