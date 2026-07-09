@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command, ChildStdin, ChildStdout};
 use tokio::sync::{Mutex, oneshot};
@@ -73,23 +73,31 @@ impl SidecarManager {
     }
 
     /// 启动 Node sidecar 进程。
+    ///
+    /// 开发模式（INKMIGRATE_ENGINE_PATH 环境变量存在）：用系统 node 运行指定的 engine。
+    /// 生产模式（打包后）：用 resource_dir 下的打包 Node + engine + chromium。
     pub async fn start(&self, app: AppHandle) -> Result<(), String> {
-        // 开发模式：直接用 node 运行 engine 的 dist/index.js
-        // 生产模式：用打包后的 sidecar 二进制
-        let engine_path = std::env::var("INKMIGRATE_ENGINE_PATH")
-            .unwrap_or_else(|_| {
-                // 默认指向 workspace 内的 engine dist
-                "../../engine/dist/index.js".to_string()
-            });
+        let (node_bin, engine_path, browsers_path, native_binding) = resolve_sidecar_paths(&app);
 
-        let mut child = Command::new("node")
-            .arg("--max-old-space-size=8192")
+        let mut cmd = Command::new(&node_bin);
+        cmd.arg("--max-old-space-size=8192")
             .arg(&engine_path)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        // 注入 PLAYWRIGHT_BROWSERS_PATH，让 engine 用打包的 chromium 而非系统缓存。
+        if let Some(bp) = &browsers_path {
+            cmd.env("PLAYWRIGHT_BROWSERS_PATH", bp);
+        }
+        // 注入 BETTER_SQLITE3_BINDING，让 better-sqlite3 用打包的 native 模块
+        // （bundle 后 __dirname 不可靠，用 nativeBinding 显式路径加载）。
+        if let Some(nb) = &native_binding {
+            cmd.env("BETTER_SQLITE3_BINDING", nb);
+        }
+
+        let mut child = cmd
             .spawn()
-            .map_err(|e| format!("启动 sidecar 失败: {} (path={})", e, engine_path))?;
+            .map_err(|e| format!("启动 sidecar 失败: {} (node={} path={})", e, node_bin, engine_path))?;
 
         let stdin = child.stdin.take().ok_or("无法获取 stdin")?;
         let stdout = child.stdout.take().ok_or("无法获取 stdout")?;
@@ -242,4 +250,42 @@ async fn read_stdout(
             "message": "sidecar 进程已退出，请重启应用"
         }));
     }
+}
+
+/// 解析 sidecar 的路径：node 二进制、engine 入口、chromium 目录、native binding。
+///
+/// 返回 (node_bin, engine_path, Option<browsers_path>, Option<native_binding>)。
+/// - 开发模式：INKMIGRATE_ENGINE_PATH 存在时，用系统 node + 该路径，不注入环境变量。
+/// - 生产模式：从 resource_dir()/sidecar/ 解析绝对路径，注入环境变量。
+fn resolve_sidecar_paths(app: &AppHandle) -> (String, String, Option<String>, Option<String>) {
+    // 开发模式逃生阀：环境变量指向 workspace 内的 engine
+    if let Ok(engine_path) = std::env::var("INKMIGRATE_ENGINE_PATH") {
+        return ("node".to_string(), engine_path, None, None);
+    }
+
+    // 生产模式：resource_dir/resources/sidecar/ 下的绝对路径
+    let sidecar_dir = match app.path().resource_dir() {
+        Ok(dir) => dir.join("resources").join("sidecar"),
+        Err(_) => {
+            eprintln!("[sidecar] 警告: resource_dir 解析失败，回退到相对路径");
+            return ("node".to_string(), "../../engine/dist/index.js".to_string(), None, None);
+        }
+    };
+
+    let node_bin = if cfg!(target_os = "windows") {
+        sidecar_dir.join("node/node.exe")
+    } else {
+        sidecar_dir.join("node/bin/node")
+    };
+
+    let engine_path = sidecar_dir.join("engine-bundle.cjs");
+    let browsers_path = sidecar_dir.join("browsers");
+    let native_binding = sidecar_dir.join("native/better_sqlite3.node");
+
+    (
+        node_bin.to_string_lossy().into_owned(),
+        engine_path.to_string_lossy().into_owned(),
+        Some(browsers_path.to_string_lossy().into_owned()),
+        Some(native_binding.to_string_lossy().into_owned()),
+    )
 }
