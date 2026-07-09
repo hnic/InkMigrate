@@ -43,7 +43,7 @@ export async function driveExtractDetail(
   try {
     await opts.page.goto(url, {
       waitUntil: 'domcontentloaded',
-      timeout: opts.navigationTimeoutMs ?? 30_000,
+      timeout: opts.navigationTimeoutMs ?? 60_000,
     });
     // 等正文容器出现（不等所有网络请求完成）
     await opts.page.waitForSelector('article, .article-content, .post-content, body', {
@@ -74,7 +74,7 @@ export async function driveExtractDetail(
   });
 
   // §12.10 best-effort 图片下载
-  const maxBytes = opts.maxImageBytes ?? 50 * 1024 * 1024;
+  const maxBytes = opts.maxImageBytes ?? 150 * 1024 * 1024;
   const assets: SourceAsset[] = [];
   for (const imgUrl of detail.images) {
     const asset: SourceAsset = { originalUrl: imgUrl, kind: 'image' };
