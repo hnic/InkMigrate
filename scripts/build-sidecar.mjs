@@ -16,7 +16,7 @@
  * 用法：node scripts/build-sidecar.mjs [--skip-node] [--skip-chromium]
  */
 import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, cpSync, readdirSync, lstatSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, cpSync, readdirSync, lstatSync, readFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { homedir, platform, arch } from "node:os";
 
@@ -233,29 +233,31 @@ function fetchChromium(targetDir, plat) {
     ? join(homedir(), "Library/Caches/ms-playwright")
     : join(homedir(), ".cache/ms-playwright");
 
-  let chromiumDir = null;
-  if (existsSync(cacheDir)) {
-    const dirs = execSync(`ls -d "${cacheDir}"/chromium-* 2>/dev/null`, { encoding: "utf8" })
-      .trim().split("\n").filter(Boolean);
-    chromiumDir = dirs.find(d => !d.includes("headless_shell")) || dirs[0] || null;
-  }
+  // 从 workspace 里 playwright-core 的 browsers.json 读出期望的 chromium revision。
+  // playwright 驱动运行时只认它自己 browsers.json 声明的 revision（如 chromium-1228），
+  // 缓存里若有多份旧版（1208/1217），"取第一个" 会拷错版本导致运行时报
+  // "Executable doesn't exist"。这里精确匹配当前 playwright-core 要求的 revision。
+  const pwCore = findDir(join(ROOT, "node_modules/.pnpm"), "playwright-core");
+  if (!pwCore) throw new Error("playwright-core 未找到，无法确定 chromium revision");
+  const browsersJson = JSON.parse(readFileSync(join(pwCore, "browsers.json"), "utf8"));
+  const expectedRev = browsersJson.browsers
+    .find(b => b.name === "chromium" && !b.name.includes("headless_shell"))?.revision;
+  if (!expectedRev) throw new Error(`playwright-core browsers.json 未声明 chromium revision`);
+  const expectedDirName = `chromium-${expectedRev}`;
+  const expectedDir = join(cacheDir, expectedDirName);
+  log(`  期望 chromium revision: ${expectedRev}（来自 ${pwCore}）`);
 
-  if (chromiumDir && existsSync(chromiumDir)) {
-    const rev = chromiumDir.split("/").pop();
-    log(`  复用缓存 ${chromiumDir}`);
-    mkdirSync(targetDir, { recursive: true });
-    cpSync(chromiumDir, join(targetDir, rev), { recursive: true });
-    log(`  ✓ chromium ${rev} 就绪 (${du(join(targetDir, rev))})`);
+  // 缓存里恰好有匹配 revision 的目录 → 直接复用
+  if (existsSync(expectedDir)) {
+    log(`  复用缓存 ${expectedDir}`);
   } else {
-    log(`  缓存未找到 chromium，用 npx playwright install chromium 下载...`);
+    log(`  缓存未找到 ${expectedDirName}，用 npx playwright install chromium 下载正确的 ${expectedRev}...`);
     run(`npx playwright install chromium`);
-    const dirs = execSync(`ls -d "${cacheDir}"/chromium-* 2>/dev/null`, { encoding: "utf8" })
-      .trim().split("\n").filter(Boolean);
-    chromiumDir = dirs.find(d => !d.includes("headless_shell")) || dirs[0] || null;
-    if (!chromiumDir) throw new Error("playwright install 后仍未找到 chromium");
-    const rev = chromiumDir.split("/").pop();
-    mkdirSync(targetDir, { recursive: true });
-    cpSync(chromiumDir, join(targetDir, rev), { recursive: true });
-    log(`  ✓ chromium ${rev} 就绪 (${du(join(targetDir, rev))})`);
+    if (!existsSync(expectedDir)) {
+      throw new Error(`playwright install 后仍未找到 ${expectedDirName}`);
+    }
   }
+  mkdirSync(targetDir, { recursive: true });
+  cpSync(expectedDir, join(targetDir, expectedDirName), { recursive: true });
+  log(`  ✓ chromium ${expectedDirName} 就绪 (${du(join(targetDir, expectedDirName))})`);
 }
