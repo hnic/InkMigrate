@@ -1,4 +1,5 @@
 import type { Database } from 'better-sqlite3';
+import { SOURCE_CONTENT_KINDS } from '../domain/models.js';
 
 /**
  * §16 当前 Schema 版本。每次 Migration 递增；本常量代表 v1.0 阶段 1 的初始 schema。
@@ -357,9 +358,9 @@ const SOURCE_ITEM_STATUSES = [
   'writing', 'written', 'verified', 'degraded', 'permanent_failed', 'unsupported',
   'blocked', 'conflict', 'skipped', 'retryable_failed', 'interrupted',
 ];
-const CONTENT_KINDS = [
-  'article', 'short-post', 'gallery', 'video', 'question-answer', 'note', 'unknown',
-];
+// 与 domain/models.ts 的 SOURCE_CONTENT_KINDS 同源，避免两份列表漂移
+// （此前 schema 漏了 'external-link'，适配器一旦产出该值会被 CHECK 拒绝）。
+const CONTENT_KINDS = SOURCE_CONTENT_KINDS as readonly string[];
 const CLEANUP_ITEM_PRECHECK_STATUSES = [
   'favorited', 'not_favorited', 'unknown',
   'login_required', 'challenge_required', 'content_unavailable',

@@ -19,6 +19,7 @@ import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, cpSync, readdirSync, lstatSync, readFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { homedir, platform, arch } from "node:os";
+import { createHash } from "node:crypto";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const SIDECAR_DIR = join(ROOT, "apps/gui/src-tauri/resources/sidecar");
@@ -189,6 +190,39 @@ function copyPnpmDeps(nmDest, pnpmDir, pkgName) {
   }
 }
 
+/**
+ * 供应链安全校验：下载 nodejs.org 官方 SHASUMS256.txt，提取目标文件的期望 SHA256，
+ * 与本地文件实际哈希比对。不匹配则抛错中止构建（防止被篡改的 Node 二进制打包进应用）。
+ */
+function verifySha256(filePath, fileName, shasumsUrl) {
+  log(`  校验 SHA256 (${fileName})...`);
+  // 下载 SHASUMS256.txt 到内存（不走磁盘，避免残留）
+  const shasums = execSync(`curl -fsSL "${shasumsUrl}"`, { encoding: "utf8", maxBuffer: 1024 * 1024 });
+  // 行格式：<64位hex>  <filename>
+  const re = new RegExp(`^([0-9a-f]{64})\\s+\\*?${escapeRegex(fileName)}$`, "m");
+  const m = re.exec(shasums);
+  if (!m) {
+    throw new Error(`SHASUMS256.txt 未找到 ${fileName} 的条目（${shasumsUrl}），拒绝继续：可能版本不存在或清单被篡改`);
+  }
+  const expected = m[1].toLowerCase();
+  const actual = sha256File(filePath).toLowerCase();
+  if (actual !== expected) {
+    throw new Error(
+      `SHA256 校验失败：${fileName}\n  期望: ${expected}\n  实际: ${actual}\n下载文件可能被篡改，拒绝打包。`,
+    );
+  }
+  log(`  ✓ SHA256 校验通过`);
+}
+
+function sha256File(filePath) {
+  const buf = readFileSync(filePath);
+  return createHash("sha256").update(buf).digest("hex");
+}
+
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function fetchNodeBinary(targetDir, plat, archName) {
   const nodeVersion = process.version.replace("v", "");
   let platformStr, archiveName;
@@ -203,12 +237,22 @@ function fetchNodeBinary(targetDir, plat, archName) {
   }
 
   const url = `https://nodejs.org/dist/v${nodeVersion}/${archiveName}`;
+  const shasumsUrl = `https://nodejs.org/dist/v${nodeVersion}/SHASUMS256.txt`;
   log(`  下载 ${url}`);
   mkdirSync(targetDir, { recursive: true });
   const archivePath = join(targetDir, archiveName);
 
   if (plat === "darwin") {
     run(`curl -fSL "${url}" -o "${archivePath}"`);
+  } else if (plat === "win32") {
+    run(`curl -fSL "${url}" -o "${archivePath}"`);
+  }
+
+  // 供应链安全：用 nodejs.org 官方 SHASUMS256.txt 校验下载的 archive，
+  // 防止 CDN 投毒/MITM 在打包进桌面应用前嵌入被篡改的 Node 二进制。
+  verifySha256(archivePath, archiveName, shasumsUrl);
+
+  if (plat === "darwin") {
     run(`tar xzf "${archivePath}" -C "${targetDir}"`);
     rmSync(archivePath, { force: true });
     const extracted = join(targetDir, `node-v${nodeVersion}-${platformStr}`);
@@ -218,7 +262,6 @@ function fetchNodeBinary(targetDir, plat, archName) {
     rmSync(extracted, { recursive: true });
     run(`chmod +x "${join(targetDir, "bin/node")}"`);
   } else if (plat === "win32") {
-    run(`curl -fSL "${url}" -o "${archivePath}"`);
     run(`cd "${targetDir}" && unzip -o "${archiveName}"`);
     rmSync(archivePath, { force: true });
     const extracted = join(targetDir, `node-v${nodeVersion}-${platformStr}`);

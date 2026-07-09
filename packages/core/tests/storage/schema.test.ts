@@ -7,6 +7,7 @@ import { makeMemoryDb } from '../helpers/db.js';
 import { migrate, getCurrentSchemaVersion, SCHEMA_VERSION } from '../../src/storage/database.js';
 import { applySchemaV1, applySchemaV2 } from '../../src/storage/schema.js';
 import { openDatabase, type DB } from '../../src/index.js';
+import { SOURCE_CONTENT_KINDS } from '../../src/domain/models.js';
 
 let db: DB;
 beforeEach(() => {
@@ -286,6 +287,25 @@ describe('schema enforcement (§16.12, §24.5)', () => {
            VALUES('s1','fp','sk','ik','sid','bogus_kind','t','verified','t','t')`,
         ).run(),
       ).toThrow(/CHECK/);
+    });
+
+    it('source_items.content_kind CHECK 与 SOURCE_CONTENT_KINDS 单一真相源同步', () => {
+      // regression: 此前 schema CONTENT_KINDS 漏了 'external-link'，与 domain 枚举不一致，
+      // 适配器一旦产出该值会被 CHECK 拒绝。修复后 schema 引用 SOURCE_CONTENT_KINDS，
+      // 此测试保证未来加类型只改 domain 一处，schema 自动同步。
+      seedInstancesAndJob();
+      let n = 0;
+      for (const kind of SOURCE_CONTENT_KINDS) {
+        db.prepare(
+          `INSERT INTO source_items(source_instance_id,fingerprint,stable_key,item_key,stable_short_id,content_kind,discovered_at,status,created_at,updated_at)
+           VALUES('s1',@fp,@sk,@ik,@sid,@kind,'t','verified','t','t')`,
+        ).run({ fp: `fp${n}`, sk: `sk${n}`, ik: `ik${n}`, sid: `sid${n}`, kind });
+        n++;
+      }
+      const count = (
+        db.prepare(`SELECT COUNT(*) c FROM source_items`).get() as { c: number }
+      ).c;
+      expect(count).toBe(SOURCE_CONTENT_KINDS.length);
     });
 
     it('R5: source_items.quality CHECK accepts NULL, full, degraded; rejects others', () => {

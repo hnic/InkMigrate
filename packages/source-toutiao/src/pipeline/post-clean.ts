@@ -36,18 +36,23 @@ const INLINE_CODE = /`[^`]+`/g;
 
 /** §12.9 stage 8：Markdown 后清洗。 */
 export function postCleanMarkdown(md: string): string {
-  // 先隔离代码块和行内代码，避免正则误杀代码中的尖括号（如 List<String>）
+  // 先隔离代码块和行内代码，避免正则误杀代码中的尖括号（如 List<String>）。
+  // 占位边界用 Unicode 私有区码点（U+E000/U+E001），绝不能用 C0 控制字符（\x00 等）——
+  // 下面的 CONTROL_CHARS 正则会删除所有 C0 字符，会吞掉占位符两端导致还原失配、代码块丢失。
+  const PH_OPEN = '\uE000CODE';
+  const PH_CLOSE = '\uE001';
+  const PH_RE = /\uE000CODE(\d+)\uE001/g;
   const placeholders: string[] = [];
   let s = md
     .replace(CODE_BLOCK, (m) => {
       const idx = placeholders.length;
       placeholders.push(m);
-      return `\x00CODE${idx}\x00`;
+      return `${PH_OPEN}${idx}${PH_CLOSE}`;
     })
     .replace(INLINE_CODE, (m) => {
       const idx = placeholders.length;
       placeholders.push(m);
-      return `\x00CODE${idx}\x00`;
+      return `${PH_OPEN}${idx}${PH_CLOSE}`;
     });
 
   s = s.replace(RESIDUAL_HTML, '');
@@ -78,7 +83,7 @@ export function postCleanMarkdown(md: string): string {
   s = s.replace(MULTI_BLANK, '\n\n');
 
   // 还原代码块和行内代码
-  s = s.replace(/\x00CODE(\d+)\x00/g, (_, idx) => placeholders[Number(idx)] ?? '');
+  s = s.replace(PH_RE, (_, idx) => placeholders[Number(idx)] ?? '');
 
   return s.trim();
 }

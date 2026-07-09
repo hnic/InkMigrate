@@ -191,4 +191,29 @@ describe('runSafetyPipeline (§12.9 fixed 9-stage)', () => {
     expect(out.markdown).toContain('Tom & Jerry');
     expect(out.markdown).not.toContain('&amp;');
   });
+
+  it('preserves code blocks through post-clean (regression: placeholder boundary bug)', () => {
+    // 此前代码块占位符用 \x00 作边界，被 CONTROL_CHARS 正则吞掉，还原失配后
+    // 代码块内容变成字面量 "CODE0"。改用私有区码点 U+E000/E001 后修复。
+    const out = runSafetyPipeline(
+      '<p>intro</p><pre><code class="language-js">const x = 1;</code></pre><p>inline <code>List&lt;String&gt;</code> here</p>',
+      { baseUrl: 'https://www.toutiao.com/article/1/' },
+    );
+    expect(out.markdown).toContain('const x = 1');
+    expect(out.markdown).toContain('List<String>');
+    // 不应出现未还原的占位字面量
+    expect(out.markdown).not.toMatch(/CODE\d+/);
+  });
+
+  it('preserves code blocks when input also contains control chars', () => {
+    // 控制字符必须被移除，但代码块占位符边界(U+E000/E001)不被误删。
+    const out = runSafetyPipeline(
+      '<p>bad\u0001char</p><pre><code>line1\nline2</code></pre>',
+      { baseUrl: 'https://www.toutiao.com/article/1/' },
+    );
+    expect(out.markdown).not.toContain('\u0001');
+    expect(out.markdown).toContain('line1');
+    expect(out.markdown).toContain('line2');
+    expect(out.markdown).not.toMatch(/CODE\d+/);
+  });
 });

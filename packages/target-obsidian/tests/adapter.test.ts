@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, symlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { createObsidianTarget } from '../src/adapter.js';
 import { makeTempVault } from './helpers/vault.js';
@@ -299,6 +299,30 @@ describe('createObsidianTarget (§8.4 + §13)', () => {
       writeFileSync(abs, readFileSync(abs, 'utf8') + '\n\n用户编辑');
       const v = await adapter.verify(result, ctx(vault.vaultPath));
       expect(v.ok).toBe(false);
+    });
+  });
+
+  describe('verifyNote symlink escape protection (C6 一致性)', () => {
+    it('verify rejects a note replaced by a symlink pointing outside the vault', async () => {
+      // 写一条笔记，然后把文件替换为指向 Vault 外的 symlink，验证 verifyNote
+      // 不读取外部内容（此前只做 resolveWithin 词法检查，缺 symlink 校验）。
+      const item = makeFullArticleItem();
+      const plan = await adapter.plan(item, ctx(vault.vaultPath));
+      const result = await adapter.write(plan, ctx(vault.vaultPath));
+      const abs = join(vault.vaultPath, result.relativePath);
+
+      // Vault 外的外部文件（模拟攻击者诱导读取的目标）
+      const outside = join(vault.vaultPath, '..', 'outside-secret.md');
+      writeFileSync(outside, 'SECRET FROM OUTSIDE\n');
+      // 替换笔记为指向外部的 symlink
+      const { unlinkSync } = await import('node:fs');
+      unlinkSync(abs);
+      symlinkSync(outside, abs);
+
+      const v = await adapter.verify(result, ctx(vault.vaultPath));
+      expect(v.ok).toBe(false);
+      // 不应读到外部内容（不会因 hash 比对外部文件而 ok=true）
+      expect(v.details).not.toMatchObject({ reason: 'hash mismatch (user-modified)' });
     });
   });
 

@@ -5,6 +5,7 @@ import {
   sourceContentHash,
   targetContentHash,
   writtenFileHash,
+  assertSymlinkSafe,
   type SourceItem,
   type TargetAdapter,
   type TargetContext,
@@ -380,6 +381,14 @@ async function verifyNote(
   const abs = noteAbsolutePath(config.vaultPath, result.relativePath);
   if (!existsSync(abs)) {
     return { ok: false, details: { reason: 'file missing' } };
+  }
+  // C6/一致性：读取前做 assertSymlinkSafe，与 verifyAsset 对齐。
+  // 若笔记路径被替换为指向 Vault 外的 symlink，此处拒绝读取外部文件内容。
+  // symlink 目标不存在或逃逸时归因为 ok:false，不向上抛错。
+  try {
+    assertSymlinkSafe(config.vaultPath, abs);
+  } catch {
+    return { ok: false, details: { reason: 'symlink escape' } };
   }
   const bytes = readFileSync(abs);
   if (bytes.length === 0) {

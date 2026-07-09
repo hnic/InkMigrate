@@ -16,8 +16,11 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(ws, { recursive: true, force: true }));
 
-/** 建内存库并 seed 必要的父表行 + N 条 status='verified' 的 source_items。 */
-function seedDb(itemCount: number): DB {
+/**
+ * 建内存库并 seed 必要的父表行 + N 条 status='verified' 的 source_items。
+ * items 参数可选：传入则按指定 content_kind 列表 seed（用于验证非 article 类型也被清理）。
+ */
+function seedDb(itemCount: number, items?: { kind: string; url: string }[]): DB {
   const db = openDatabase({ path: ':memory:' });
   const ts = '2026-06-01T00:00:00Z';
   db.prepare(
@@ -37,21 +40,29 @@ function seedDb(itemCount: number): DB {
     `INSERT INTO source_items(
        source_instance_id, fingerprint, stable_key, item_key, stable_short_id,
        canonical_url, title, content_kind, discovered_at, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'article', ?, 'verified', ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'verified', ?, ?)`,
   );
-  for (let i = 0; i < itemCount; i++) {
+  // 若传入显式 items，按其 seed（覆盖各种 content_kind）；否则按 itemCount seed article
+  const list = items ?? Array.from({ length: itemCount }, (_, i) => ({
+    kind: 'article' as string,
+    url: `/article/${i}/`,
+  }));
+  let i = 0;
+  for (const it of list) {
     ins.run(
       SOURCE_INSTANCE_ID,
       `fp-${i}`,
       `sk-${i}`,
       `ik-${i}`,
       `sid-${i}`,
-      `https://www.toutiao.com/article/${i}/`,
+      `https://www.toutiao.com${it.url}`,
       `标题${i}`,
+      it.kind,
       ts,
       ts,
       ts,
     );
+    i++;
   }
   return db;
 }
@@ -666,6 +677,59 @@ describe('runCleanupUnfavorite', () => {
       l.message.includes('collect button not found') && l.message.includes('标题0'),
     );
     expect(unknownLogs.length).toBe(1);
+
+    db.close();
+  });
+
+  it('regression: 非 article 类型（微头条/图集/问答）也纳入清理候选', async () => {
+    // 此前候选 SQL 硬编码 content_kind='article'，微头条/图集/问答等迁移成功后
+    // 收藏永久残留且用户无察觉。修复后应纳入所有文本类，仅排除 video/external-link。
+    const db = seedDb(0, [
+      { kind: 'short-post', url: '/w/1/' },
+      { kind: 'gallery', url: '/group/2/' },
+      { kind: 'question-answer', url: '/wenda/3/' },
+      { kind: 'note', url: '/note/4/' },
+      { kind: 'unknown', url: '/x/5/' },
+      { kind: 'video', url: '/video/6/' },          // 应被排除
+      { kind: 'external-link', url: '/ext/7/' },    // 应被排除
+    ]);
+    const adapter = mockAdapter([
+      { success: true, wasCollected: true, isCollected: false },
+      { success: true, wasCollected: true, isCollected: false },
+      { success: true, wasCollected: true, isCollected: false },
+      { success: true, wasCollected: true, isCollected: false },
+      { success: true, wasCollected: true, isCollected: false },
+    ]);
+
+    const result = await runCleanupUnfavorite({
+      db, sourceAdapter: adapter, sourceInstanceId: SOURCE_INSTANCE_ID,
+      migrationJobId: MIGRATION_JOB_ID, workspaceDir: ws,
+    });
+
+    // 5 条文本类全部成功清理；video/external-link 被排除
+    expect(result.successCount).toBe(5);
+
+    db.close();
+  });
+
+  it('§14.15 job 完成后生成清理报告（summary.json/md + csv）', async () => {
+    // regression：generateCleanupReport 此前是死代码（只被单测引用），job 完成后
+    // 无 summary 报告，违反规格 §14.15 审计完整性。现接入 orchestrator。
+    const db = seedDb(2);
+    const adapter = mockAdapter([
+      { success: true, wasCollected: true, isCollected: false },
+      { success: true, wasCollected: true, isCollected: false },
+    ]);
+
+    const result = await runCleanupUnfavorite({
+      db, sourceAdapter: adapter, sourceInstanceId: SOURCE_INSTANCE_ID,
+      migrationJobId: MIGRATION_JOB_ID, workspaceDir: ws,
+    });
+
+    const reportDir = join(ws, 'reports', 'cleanup', result.jobId);
+    expect(existsSync(join(reportDir, 'summary.json'))).toBe(true);
+    expect(existsSync(join(reportDir, 'summary.md'))).toBe(true);
+    expect(existsSync(join(reportDir, 'success.csv'))).toBe(true);
 
     db.close();
   });

@@ -12,6 +12,7 @@ import {
 } from '@inkmigrate/core';
 import { type PreActionState } from './cleanup-state-machine.js';
 import { generateCleanupPlan } from './plan-generator.js';
+import { generateCleanupReport, type CleanupReportItem } from './cleanup-report.js';
 
 export interface CleanupProgress {
   phase: 'cleanup';
@@ -108,7 +109,12 @@ export async function runCleanupUnfavorite(
     throw new Error('source adapter does not support cleanup');
   }
 
-  // 1. 查候选：status='verified' 的条目，排除已成功取消收藏的（根治重跑）
+  // 1. 查候选：status='verified' 的条目，排除已成功取消收藏的（根治重跑）。
+  // 候选范围与 scan 的迁移候选对称（scan-driver EXCLUDED_KINDS）：纳入所有文本类
+  //（article/short-post/gallery/question-answer/note/unknown），仅排除 video
+  //（无正文/无收藏语义）和 external-link（外部链接，头条收藏体系无取消收藏操作）。
+  // 此前硬编码 content_kind='article' 会永久遗漏微头条/图集/问答等收藏项——
+  // 这些内容迁移成功后收藏永久残留，用户无从察觉。
   const alreadyDone = new CleanupItems(db).findUnfavoritedSourceItemIds(sourceInstanceId);
   // maxItems 默认上限 200（防风控）；用户显式传值则尊重（含更大值=自担风险）
   const limit = opts.maxItems ?? DEFAULT_CLEANUP_MAX_ITEMS;
@@ -116,7 +122,8 @@ export async function runCleanupUnfavorite(
     .prepare(
       `SELECT id, canonical_url, title, external_id, content_kind, fingerprint, discovered_at, source_position
        FROM source_items
-       WHERE source_instance_id = ? AND status = 'verified' AND content_kind = 'article'
+       WHERE source_instance_id = ? AND status = 'verified'
+         AND content_kind NOT IN ('video', 'external-link')
        ORDER BY source_position ASC`,
     )
     .all(sourceInstanceId) as Array<{
@@ -213,6 +220,10 @@ export async function runCleanupUnfavorite(
   // §缺陷2：processedCount 记录"实际已落库的条目数"，与 candidateCount(rows.length)
   // 区分。取消 / 重试终止时二者不等，必须如实落库，否则 GUI 进度与状态看板会错算。
   let processedCount = 0;
+  // §14.15 收集每条 item 的报告数据，job 完成后写 summary.json/md/csv 审计报告。
+  // 此前 generateCleanupReport 是死代码（只被单测引用），job 完成后无 summary 报告，
+  // 违反规格 §14.15 审计完整性。现接入：循环内收集，收尾时生成。
+  const reportItems: CleanupReportItem[] = [];
   // 是否因取消或重试仍失败而提前终止。决定最终 status：terminated → 'interrupted'。
   let terminated = false;
   // §5/§14.12 受控中断原因（login_required / challenge_required）。区分于普通 cancel/重试终止。
@@ -419,6 +430,16 @@ export async function runCleanupUnfavorite(
         // I7: 走 UNIQUE(job_id, source_item_id) 索引的精确查询，替代 listByJob 全表扫描 + find
         //（原 O(n²)，批量清理数百条时显著降低 DB 负载）。
         const itemRow = itemsRepo.findByJobAndSourceItem(jobId, row.id);
+        // §14.15 收集报告数据（与审计落库同源，确保报告与 DB 一致）
+        const reportItem: CleanupReportItem = {
+          sourceItemId: row.id,
+          title: row.title ?? '(无标题)',
+          preState: o.precheckStatus,
+          actionStatus: o.actionStatus,
+          ...(o.lastErrorCode !== undefined && o.lastErrorCode !== null ? { errorCode: o.lastErrorCode } : {}),
+          ...(row.external_id ? { externalId: row.external_id } : {}),
+        };
+        reportItems.push(reportItem);
         if (itemRow !== undefined) {
           attemptsRepo.create({
             cleanupItemId: itemRow.id,
@@ -520,6 +541,23 @@ export async function runCleanupUnfavorite(
   });
   const finalStatus = terminated ? 'interrupted' : 'completed';
   new CleanupJobs(db).updateStatus(jobId, { status: finalStatus, finishedAt, updatedAt: finishedAt });
+
+  // §14.15 生成清理报告（summary.json/md + success/failed/unknown/skipped.csv）。
+  // 写到 reports/cleanup-<jobId>/ 下，与迁移侧的 reports/<migJobId>/ 对称。
+  // 即使任务被中断（terminated）也写报告，如实反映部分结果。
+  generateCleanupReport({
+    reportsDir: `${workspaceDir}/reports/cleanup`,
+    cleanupJobId: jobId,
+    planCount: rows.length,
+    processedCount,
+    successCount,
+    alreadyUnfavoritedCount: skippedCount,
+    skippedCount,
+    failedCount,
+    unknownCount,
+    loginPauseCount,
+    items: reportItems,
+  });
 
   opts.onLog?.({
     level: failedCount > 0 ? 'warn' : 'info',

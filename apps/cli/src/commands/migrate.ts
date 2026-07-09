@@ -45,7 +45,9 @@ export function createMigrateCommand(): Command {
     .option('--favorites-url <url>', '收藏列表 URL（真实模式）')
     .option('--max-items <n>', '限制扫描+迁移条目数（用于测试）')
     .option('--interval <ms>', '条目间请求间隔毫秒数（默认 1500，防风控）')
-    .option('--dry-run', '不写入目标（仅扫描+提取+计划）')
+    // 注：--dry-run 此前声明但从未实现（action 内不读 opts.dryRun，会真实写入 Vault），
+    // 误导用户。遵循"如实报告而非静默假装"原则移除该选项。如需不落盘测试，
+    // 请用 --fixture-dir 配合临时 vault-path。
     .action(async (opts: {
       source: string;
       target: string;
@@ -55,7 +57,6 @@ export function createMigrateCommand(): Command {
       favoritesUrl?: string;
       maxItems?: string;
       interval?: string;
-      dryRun?: boolean;
     }) => {
       const dbPath = join(opts.stateDir, 'inkmigrate.sqlite');
       // N1: openDatabase 会自动 migrate（不存在则建库），两个分支等价，去掉冗余三元。

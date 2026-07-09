@@ -6,8 +6,6 @@
   "permissions": [
     "core:default",
     "core:event:allow-listen",
-    "core:event:allow-emit",
-    "shell:allow-spawn",
-    "shell:allow-execute"
+    "core:event:allow-emit"
   ]
 }
