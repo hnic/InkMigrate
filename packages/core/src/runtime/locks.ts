@@ -162,6 +162,10 @@ export function acquireLock(opts: AcquireOptions): HeldLock {
     }
   };
   const timer = setInterval(beat, interval);
+  // unref：心跳定时器不应阻止进程退出。若 Job 因异常路径未调 release()（finally
+  // 未覆盖的崩溃），未 unref 的 setInterval 会让进程"挂住"。unref 后只要主任务完成，
+  // 进程即可退出，定时器在主循环活跃期间仍正常触发心跳。
+  timer.unref();
 
   return {
     path,

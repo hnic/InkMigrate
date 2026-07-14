@@ -113,7 +113,8 @@ export interface MigrateResumableResult {
 }
 
 export interface MigrateResult {
-  status: string;
+  /** 对齐 core 的 JobStatus：created|running|paused|interrupted|completed|failed */
+  status: 'created' | 'running' | 'paused' | 'interrupted' | 'completed' | 'failed';
   scanCount: number;
   reconciliationOk: boolean;
   reconciliationReason?: string;
@@ -134,6 +135,10 @@ export interface CleanupResult {
   skipCount: number;
   failCount: number;
   unknownCount: number;
+  /** §5/§14.12 因登录墙/风控挑战而受控中断的条目数。GUI 据此提示用户重新登录。 */
+  loginPauseCount: number;
+  /** §5/§14.12 受控中断原因（'login_required' | 'challenge_required'），无则 undefined。 */
+  pauseReason?: string;
 }
 
 export interface StatusQueryParams {
@@ -142,7 +147,8 @@ export interface StatusQueryParams {
 }
 
 export interface StatusQueryResult {
-  status: string;
+  /** 对齐 core 的 JobStatus */
+  status: 'created' | 'running' | 'paused' | 'interrupted' | 'completed' | 'failed';
   currentStage: string;
   scanCount: number;
   verifiedCount: number;
@@ -188,7 +194,12 @@ export interface RpcMethodMap {
   'migrate.resumable': { params: MigrateResumableParams; result: MigrateResumableResult };
   'cleanup.unfavorite': { params: CleanupUnfavoriteParams; result: CleanupResult };
   'status.query': { params: StatusQueryParams; result: StatusQueryResult };
-  'cancel.cancel': { params: Record<string, unknown>; result: { cancelling: boolean } };
+  'job.cancel': { params: JobCancelParams; result: { cancelling: boolean } };
+}
+
+/** 取消当前活跃任务。job 可选（留空 = 取消当前任务），为前向兼容指定 job 预留。 */
+export interface JobCancelParams {
+  job?: string;
 }
 
 export type RpcMethodName = keyof RpcMethodMap;

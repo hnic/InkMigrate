@@ -213,4 +213,33 @@ describe('generateShardIndexes (§13.8)', () => {
     expect(href).toContain('_索引/');
     expect(href).not.toMatch(/\\/); // 跨平台正斜杠
   });
+
+  it('regression: 多 collection 条目出现在每个所属收藏夹的分片中', () => {
+    // 此前 collection 维度只取 entry.collections[0]，多收藏夹条目只在第一个收藏夹
+    // 的分片中出现，其余收藏夹分片丢失该条目，索引完整性语义缺陷。
+    const multiCollectionEntries: IndexEntry[] = [
+      { title: '共享文章', relativePath: 'a/shared-xyz.md', contentKind: 'article', publishedAt: '2026-01-15T10:00:00+08:00', favoritedAt: '2026-01-16T12:00:00+08:00', collections: ['技术', '精选', '深度'] },
+      { title: '随笔', relativePath: 'b/note-def.md', contentKind: 'article', publishedAt: '2026-02-20T10:00:00+08:00', favoritedAt: '2026-02-21T12:00:00+08:00', collections: ['随笔'] },
+    ];
+    const result = generateShardIndexes({
+      config,
+      vaultPath: vault,
+      sourceInstanceId: 's1',
+      entries: multiCollectionEntries,
+      groupBy: ['collection'],
+    });
+    // 应产生 4 个分片（顺序无关，用集合比较）
+    const shardNames = new Set(result.shards.map((s) => s.shardKey));
+    expect(shardNames).toEqual(new Set(['技术', '精选', '深度', '随笔']));
+    // "共享文章"应同时出现在技术、精选、深度三个分片中
+    const tech = result.shards.find((s) => s.shardKey === '技术')!;
+    const curated = result.shards.find((s) => s.shardKey === '精选')!;
+    const deep = result.shards.find((s) => s.shardKey === '深度')!;
+    expect(tech.entries.map((e) => e.title)).toContain('共享文章');
+    expect(curated.entries.map((e) => e.title)).toContain('共享文章');
+    expect(deep.entries.map((e) => e.title)).toContain('共享文章');
+    // "随笔"只在随笔分片
+    const essay = result.shards.find((s) => s.shardKey === '随笔')!;
+    expect(essay.entries.map((e) => e.title)).toEqual(['随笔']);
+  });
 });

@@ -450,5 +450,69 @@ describe('createObsidianTarget (§8.4 + §13)', () => {
       // 应包含本地嵌入
       expect(plan.renderedContent).toMatch(/!\[\[Attachments\//);
     });
+
+    it('§13.7 边界：alt 文本含 URL 片段不误删正文', async () => {
+      // review 关注：![alt 含 /tos-cn-i-... 片段](url) 时，[^\]]* 会匹配 alt 里的内容，
+      // 加上 escaped matchKey 可能与 alt 文本交叉导致误匹配。验证当前行为：只替换图片标记，
+      // 不破坏正文文本。
+      const { createHash } = require('node:crypto');
+      const sha = createHash('sha256').update(MIN_PNG).digest('hex');
+      const item = makeFullArticleItem({
+        bodyHtml:
+          '<p>这是一段正文，提到图片地址 /tos-cn-i-axegupay5k/abc。</p>' +
+          '<p><img src="https://p3.toutiaoimg.com/tos-cn-i-axegupay5k/abc~tplv.jpeg"></p>',
+        assets: [
+          {
+            originalUrl: 'https://p9.toutiaoimg.com/tos-cn-i-axegupay5k/abc~tplv.jpeg',
+            mimeType: 'image/png',
+            byteSize: MIN_PNG.length,
+            sha256: `sha256:${sha}`,
+            kind: 'image' as const,
+            data: new Uint8Array(MIN_PNG),
+          },
+        ],
+      });
+      const plan = await adapter.plan(item, ctx(vault.vaultPath));
+      // 正文里的纯文本 "/tos-cn-i-axegupay5k/abc" 应保留（不是图片标记）
+      expect(plan.renderedContent).toContain('这是一段正文，提到图片地址');
+      // 图片应被本地化（远程 URL 不再出现）
+      expect(plan.renderedContent).not.toContain('p3.toutiaoimg.com');
+      expect(plan.renderedContent).not.toContain('p9.toutiaoimg.com');
+    });
+
+    it('§13.7 边界：两张图 contentPath 互为子串时各自正确本地化', async () => {
+      // contentPath 为 /tos-cn-i-x/hash 时，若另一张是 /tos-cn-i-x/hash2，
+      // matchKey 不会互为子串（因 hash 不同）。但若同 hash 不同 tplv 后缀，
+      // matchKey 的 /[^?]+ 会吃到 ~tplv 部分，两张图各匹配自身。
+      const { createHash } = require('node:crypto');
+      const sha = createHash('sha256').update(MIN_PNG).digest('hex');
+      const item = makeFullArticleItem({
+        bodyHtml:
+          '<p><img src="https://p3.toutiaoimg.com/tos-cn-i-x/hash1~tplv-a.jpeg"></p>' +
+          '<p><img src="https://p3.toutiaoimg.com/tos-cn-i-x/hash2~tplv-b.jpeg"></p>',
+        assets: [
+          {
+            originalUrl: 'https://p9.toutiaoimg.com/tos-cn-i-x/hash1~tplv-a.jpeg',
+            mimeType: 'image/png',
+            byteSize: MIN_PNG.length,
+            sha256: `sha256:${sha}`,
+            kind: 'image' as const,
+            data: new Uint8Array(MIN_PNG),
+          },
+          {
+            originalUrl: 'https://p9.toutiaoimg.com/tos-cn-i-x/hash2~tplv-b.jpeg',
+            mimeType: 'image/png',
+            byteSize: MIN_PNG.length,
+            sha256: `sha256:${sha}`,
+            kind: 'image' as const,
+            data: new Uint8Array(MIN_PNG),
+          },
+        ],
+      });
+      const plan = await adapter.plan(item, ctx(vault.vaultPath));
+      const oplan = plan as { assets?: unknown[] };
+      expect(oplan.assets!.length).toBe(2);
+      expect(plan.renderedContent).not.toContain('toutiaoimg.com');
+    });
   });
 });

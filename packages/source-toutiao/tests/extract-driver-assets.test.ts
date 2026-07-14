@@ -123,4 +123,57 @@ describe('driveExtractDetail — asset.data 瞬态字节保留（§13.7）', () 
     expect(asset.sha256).toBeUndefined();
     expect(asset.originalUrl).toBe('https://img.example.com/failed.png');
   });
+
+  it('regression: 多张图并发下载，结果顺序与输入一致', async () => {
+    // 此前串行下载；改为有界并发后须保证 assets 顺序与 detail.images 一致。
+    // 用不同延迟模拟并发：第 0 张最慢，但结果仍排第 0。
+    const urls = ['https://img.example.com/0.png', 'https://img.example.com/1.png', 'https://img.example.com/2.png'];
+    mockExtractDetail.mockReturnValue({
+      title: '图集',
+      quality: 'full',
+      degradations: [],
+      images: urls,
+      html: '<p>x</p>',
+      markdown: 'x',
+    });
+    // 每张返回不同字节（便于断言对应关系），延迟乱序验证并发不破坏顺序
+    const bufs = urls.map((_, i) => Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, i]));
+    const shas = bufs.map((b) => createHash('sha256').update(b).digest('hex'));
+    mockDownloadImage.mockImplementation(async ({ url }: { url: string }) => {
+      const idx = urls.indexOf(url);
+      // 后面的图先返回（延迟递减），验证顺序不乱
+      const delay = (urls.length - idx) * 10;
+      await new Promise((r) => setTimeout(r, delay));
+      return { ok: true, bytes: bufs[idx], mimeType: 'image/png', byteSize: bufs[idx]!.length };
+    });
+
+    const page = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      waitForSelector: vi.fn().mockResolvedValue(undefined),
+      content: vi.fn().mockResolvedValue('<html><body><p>x</p></body></html>'),
+    };
+
+    const item = await driveExtractDetail({
+      // @ts-expect-error mock page
+      page,
+      ref: {
+        sourceInstanceId: 'toutiao-main',
+        canonicalUrl: 'https://www.toutiao.com/article/1/',
+        originalUrl: 'https://www.toutiao.com/article/1/',
+        contentKind: 'gallery',
+        discoveredAt: '2026-06-24T10:00:00+08:00',
+        fingerprint: 'sha256:' + 'a'.repeat(64),
+        sourceMetadata: {},
+      },
+    });
+
+    expect(item.assets.length).toBe(3);
+    // 顺序与输入一致，sha256 对应正确的字节
+    for (let i = 0; i < 3; i++) {
+      expect(item.assets[i]!.originalUrl).toBe(urls[i]);
+      expect(item.assets[i]!.sha256).toBe(`sha256:${shas[i]}`);
+    }
+    // 并发下载：downloadImage 被调用 3 次
+    expect(mockDownloadImage).toHaveBeenCalledTimes(3);
+  });
 });

@@ -121,44 +121,59 @@ async function runBrowserScan(opts: {
     await session.launch();
     const page = await session.newPage();
 
-    const scanDriverOpts: Parameters<typeof driveScanFavorites>[0] = {
-      page,
-      favoritesUrl: opts.favoritesUrl,
-      baseUrl: 'https://www.toutiao.com/',
-      sourceInstanceId: opts.source,
+    // SIGINT 协作取消（与 migrate/cleanup 命令一致）。Ctrl+C 置标志，
+    // driveScanFavorites 在滚动间隙检查并优雅终止，关闭浏览器而非硬杀留孤儿进程。
+    let cancelled = false;
+    const onSigInt = () => {
+      cancelled = true;
+      console.log('\n收到终止信号，正在停止扫描...');
     };
-    if (opts.maxItems !== undefined) {
-      scanDriverOpts.maxItems = opts.maxItems;
+    process.on('SIGINT', onSigInt);
+
+    try {
+      const scanDriverOpts: Parameters<typeof driveScanFavorites>[0] = {
+        page,
+        favoritesUrl: opts.favoritesUrl,
+        baseUrl: 'https://www.toutiao.com/',
+        sourceInstanceId: opts.source,
+        isCancelled: () => cancelled,
+      };
+      if (opts.maxItems !== undefined) {
+        scanDriverOpts.maxItems = opts.maxItems;
+      }
+      const { refs, scanResult } = await driveScanFavorites(scanDriverOpts);
+
+      await page.close();
+
+      // 写入 scan-report.json
+      const reportPath = resolve(opts.stateDir, 'scan-report.json');
+      const report = {
+        sourceInstanceId: opts.source,
+        scannedAt: new Date().toISOString(),
+        uniqueItems: scanResult.uniqueItems,
+        duplicateObservations: scanResult.duplicateObservations,
+        scrollIterations: scanResult.scrollIterations,
+        terminationReason: cancelled ? 'cancelled' : scanResult.terminationReason,
+        items: refs.map((r) => ({
+          externalId: r.externalId,
+          canonicalUrl: r.canonicalUrl,
+          title: r.title,
+          contentKind: r.contentKind,
+        })),
+      };
+      writeFileSync(reportPath, JSON.stringify(report, null, 2));
+
+      console.log(`\n扫描${cancelled ? '已终止' : '完成'}：`);
+      console.log(`  唯一条目数: ${scanResult.uniqueItems}`);
+      console.log(`  重复观察数: ${scanResult.duplicateObservations}`);
+      console.log(`  滚动轮次: ${scanResult.scrollIterations}`);
+      console.log(`  终止原因: ${report.terminationReason}`);
+      console.log(`  报告: ${reportPath}`);
+    } finally {
+      process.off('SIGINT', onSigInt);
     }
-    const { refs, scanResult } = await driveScanFavorites(scanDriverOpts);
-
-    await page.close();
-
-    // 写入 scan-report.json
-    const reportPath = resolve(opts.stateDir, 'scan-report.json');
-    const report = {
-      sourceInstanceId: opts.source,
-      scannedAt: new Date().toISOString(),
-      uniqueItems: scanResult.uniqueItems,
-      duplicateObservations: scanResult.duplicateObservations,
-      scrollIterations: scanResult.scrollIterations,
-      terminationReason: scanResult.terminationReason,
-      items: refs.map((r) => ({
-        externalId: r.externalId,
-        canonicalUrl: r.canonicalUrl,
-        title: r.title,
-        contentKind: r.contentKind,
-      })),
-    };
-    writeFileSync(reportPath, JSON.stringify(report, null, 2));
-
-    console.log(`\n扫描完成：`);
-    console.log(`  唯一条目数: ${scanResult.uniqueItems}`);
-    console.log(`  重复观察数: ${scanResult.duplicateObservations}`);
-    console.log(`  滚动轮次: ${scanResult.scrollIterations}`);
-    console.log(`  终止原因: ${scanResult.terminationReason}`);
-    console.log(`  报告: ${reportPath}`);
   } finally {
     await session.close();
   }
 }
+

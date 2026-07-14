@@ -76,10 +76,13 @@ export function generateShardIndexes(i: GenerateIndexInput): GenerateIndexResult
 
   const groups = new Map<string, IndexEntry[]>();
   for (const entry of sortedEntries) {
-    const key = buildShardKey(entry, i.groupBy);
-    const arr = groups.get(key) ?? [];
-    arr.push(entry);
-    groups.set(key, arr);
+    // buildShardKeys 返回所有分片 key（collection 维度下，多收藏夹条目产出多个 key，
+    // 确保该条目在每个所属收藏夹的分片中都出现）。其它维度各返回单个 key。
+    for (const key of buildShardKeys(entry, i.groupBy)) {
+      const arr = groups.get(key) ?? [];
+      arr.push(entry);
+      groups.set(key, arr);
+    }
   }
 
   const shards: ShardResult[] = [];
@@ -129,11 +132,19 @@ export function generateShardIndexes(i: GenerateIndexInput): GenerateIndexResult
   };
 }
 
-function buildShardKey(
+/**
+ * 为一个 entry 生成所有应归属的分片 key。
+ * - collection 维度：条目属多个收藏夹时，为每个收藏夹生成一个 key（条目出现在每个
+ *   所属收藏夹的分片中）。无收藏夹则归入"未分组"。
+ * - 其它维度各产出单个值。
+ * - 多维度组合时，collection 维度可能展开为多个 key（笛卡尔积），其它维度单值。
+ */
+function buildShardKeys(
   entry: IndexEntry,
   groupBy: readonly string[],
-): string {
-  const parts: string[] = [];
+): string[] {
+  // 每个维度产出该维度的一组候选值（通常 1 个，collection 可能多个）
+  const dimValues: string[][] = [];
   for (const dim of groupBy) {
     if (dim === 'month') {
       const date = entry.favoritedAt ?? entry.publishedAt ?? '';
@@ -142,26 +153,47 @@ function buildShardKey(
       if (m) {
         const month = parseInt(m[2]!, 10);
         if (month >= 1 && month <= 12) {
-          parts.push(`${m[1]}-${m[2]}`);
+          dimValues.push([`${m[1]}-${m[2]}`]);
         } else {
-          parts.push('未知日期');
+          dimValues.push(['未知日期']);
         }
       } else {
-        parts.push('未知日期');
+        dimValues.push(['未知日期']);
       }
     } else if (dim === 'content-type') {
-      parts.push(entry.contentKind);
+      dimValues.push([entry.contentKind]);
     } else if (dim === 'collection') {
-      parts.push(entry.collections[0] ?? '未分组');
+      // §多收藏夹：条目属多个收藏夹时，每个收藏夹各产出一个 key，
+      // 使条目出现在每个所属收藏夹的分片中。无收藏夹 → "未分组"。
+      dimValues.push(entry.collections.length > 0 ? entry.collections : ['未分组']);
     } else {
       // 防御：config schema 已限制枚举，新增维度必须在此实现，
       // 否则该维度会被静默忽略，所有条目落入错误分片。
       throw new Error(
-        `buildShardKey: unsupported groupBy dimension "${dim}" (add implementation or extend schema)`,
+        `buildShardKeys: unsupported groupBy dimension "${dim}" (add implementation or extend schema)`,
       );
     }
   }
-  return parts.join('-') || '全部';
+  // 笛卡尔积：其它维度单值，collection 展开为多条
+  // 例：groupBy=['content-type','collection']，entry 属 [技术, 收藏A, 收藏B]
+  //   → [article-技术, article-收藏A, article-收藏B]
+  return cartesianProduct(dimValues).map((parts) => parts.join('-') || '全部');
+}
+
+/** 笛卡尔积：每组取一个元素的所有组合。空输入返回 [[]]（单个空 key）。 */
+function cartesianProduct(groups: readonly string[][]): string[][] {
+  if (groups.length === 0) return [[]];
+  let result: string[][] = [[]];
+  for (const group of groups) {
+    const next: string[][] = [];
+    for (const prefix of result) {
+      for (const val of group) {
+        next.push([...prefix, val]);
+      }
+    }
+    result = next;
+  }
+  return result;
 }
 
 function renderShardMarkdown(

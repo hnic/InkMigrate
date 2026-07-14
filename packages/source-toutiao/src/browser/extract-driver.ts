@@ -74,22 +74,30 @@ export async function driveExtractDetail(
   });
 
   // §12.10 best-effort 图片下载
-  const maxBytes = opts.maxImageBytes ?? 150 * 1024 * 1024;
-  const assets: SourceAsset[] = [];
-  for (const imgUrl of detail.images) {
-    const asset: SourceAsset = { originalUrl: imgUrl, kind: 'image' };
-    const dl = await downloadImage({ url: imgUrl, maxBytes, referer: url });
-    if (dl.ok) {
-      const sha256 = createHash('sha256').update(dl.bytes).digest('hex');
-      asset.mimeType = dl.mimeType;
-      asset.byteSize = dl.byteSize;
-      asset.sha256 = `sha256:${sha256}`;
-      // 瞬态保留字节，供下游 target adapter 写入本地附件。字节随 SourceItem
-      // 在 processOneItem 内同步流转（extract→plan→write），不跨进程/持久化。
-      asset.data = dl.bytes;
-    }
-    assets.push(asset);
-  }
+  // 默认上限与 ToutiaoSourceConfigSchema.maxImageBytes 一致（50MB），避免两份默认值漂移
+  //（此前此处硬编码 150MB，config 的 50MB 形同虚设——因 adapter 仅在显式传值时透传）。
+  const maxBytes = opts.maxImageBytes ?? 50 * 1024 * 1024;
+  // 有界并发下载：图集页常有数十张图，串行下载耗时数倍。并发度限制为 3，
+  // 平衡吞吐与内存（每张图字节短暂驻留 asset.data，并发过高易 OOM）。
+  const IMAGE_DOWNLOAD_CONCURRENCY = 3;
+  const assets: SourceAsset[] = await mapWithConcurrency(
+    detail.images,
+    IMAGE_DOWNLOAD_CONCURRENCY,
+    async (imgUrl: string): Promise<SourceAsset> => {
+      const asset: SourceAsset = { originalUrl: imgUrl, kind: 'image' };
+      const dl = await downloadImage({ url: imgUrl, maxBytes, referer: url });
+      if (dl.ok) {
+        const sha256 = createHash('sha256').update(dl.bytes).digest('hex');
+        asset.mimeType = dl.mimeType;
+        asset.byteSize = dl.byteSize;
+        asset.sha256 = `sha256:${sha256}`;
+        // 瞬态保留字节，供下游 target adapter 写入本地附件。字节随 SourceItem
+        // 在 processOneItem 内同步流转（extract→plan→write），不跨进程/持久化。
+        asset.data = dl.bytes;
+      }
+      return asset;
+    },
+  );
 
   const quality = detail.quality;
   const degradations = detail.degradations;
@@ -113,4 +121,28 @@ export async function driveExtractDetail(
   if (detail.markdown) item.bodyText = detail.markdown;
   if (detail.html) item.bodyHtml = detail.html;
   return item;
+}
+
+/**
+ * 有界并发 map：最多 `concurrency` 个 mapper 同时运行，结果按原数组顺序返回。
+ * 不引入 p-limit 依赖，用简单的"游标 + 活跃计数"实现。
+ */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let cursor = 0;
+  async function worker(): Promise<void> {
+    while (cursor < items.length) {
+      const idx = cursor++;
+      results[idx] = await mapper(items[idx]!, idx);
+    }
+  }
+  const workers: Promise<void>[] = [];
+  const n = Math.min(concurrency, items.length);
+  for (let i = 0; i < n; i++) workers.push(worker());
+  await Promise.all(workers);
+  return results;
 }

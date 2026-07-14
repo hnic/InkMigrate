@@ -96,6 +96,13 @@ function expandPaths<T>(
  */
 const ID_RE = /^[A-Za-z0-9_-]+$/;
 
+/**
+ * adapter.close() 超时泄漏计数。sidecar 是长驻进程，每次超时都可能留下孤儿 Chromium。
+ * 达到阈值强制退出（Tauri 会重启 sidecar），避免内存/FD 耗尽。
+ */
+let adapterLeakCount = 0;
+const ADAPTER_LEAK_EXIT_THRESHOLD = 3;
+
 /** 校验实例 ID / Job ID：非空且仅含合法字符。失败抛错。 */
 function requireId(value: unknown, field: string): asserts value is string {
   if (typeof value !== 'string' || value.length === 0) {
@@ -151,8 +158,9 @@ export function registerAllHandlers(): void {
   registerMethod('migrate.resumable', (p) => handleMigrateResumable(expandPaths(p as unknown as MigrateResumableParams, ['stateDir'])), MigrateResumableSchema);
   registerMethod('cleanup.unfavorite', (p) => handleCleanupUnfavorite(expandPaths(p as unknown as CleanupUnfavoriteParams, ['stateDir'])), CleanupUnfavoriteSchema);
   registerMethod('status.query', (p) => handleStatusQuery(expandPaths(p as unknown as StatusQueryParams, ['stateDir'])), StatusQuerySchema);
-  // 终止当前长任务：设置进程级 cancel flag，循环在下一次迭代边界退出
-  registerMethod('cancel.cancel', async () => {
+  // 终止当前长任务：设置进程级 cancel flag，循环在下一次迭代边界退出。
+  // job.cancel 取代此前语义重复的 cancel.cancel；params 可选 job id（当前实现为全局取消）
+  registerMethod('job.cancel', async () => {
     requestCancel();
     sendNotification('log', { level: 'warn', message: '收到终止请求，正在停止当前任务...' });
     return { cancelling: true };
@@ -652,6 +660,10 @@ async function handleCleanupUnfavorite(
         skipCount: result.skippedCount,
         failCount: result.failedCount,
         unknownCount: result.unknownCount,
+        // §5/§14.12 登录墙/风控挑战受控中断信息——GUI 据此提示用户重新登录，
+        // 此前被丢弃导致用户只看到"失败 N 条"不知是风控。
+        loginPauseCount: result.loginPauseCount,
+        ...(result.pauseReason !== undefined ? { pauseReason: result.pauseReason } : {}),
         ...(result.jobId ? { jobId: result.jobId } : {}),
       };
     } finally {
@@ -684,9 +696,17 @@ async function closeAdapterSafely(adapter: { close(): Promise<void> }): Promise<
     await Promise.race([adapter.close(), timer]);
     if (timed) {
       // L13: 超时后 adapter.close()（losing 分支）仍在后台运行，可能泄漏 Chromium 进程。
-      // Node 无法真正取消 promise，此处仅记录告警供运维诊断（真正强制终止需 adapter
-      // 提供 force-close 能力，留作后续增强）。
-      logToStderr('warn', 'adapter.close() 超时，后台 close 仍在运行，可能泄漏浏览器进程');
+      // Node 无法真正取消 promise，此处记录告警 + 累计泄漏计数。达到阈值时强制退出
+      // sidecar（让 Tauri 重启），避免长驻进程累积僵尸 Chromium 耗尽内存/FD。
+      adapterLeakCount++;
+      logToStderr(
+        'warn',
+        `adapter.close() 超时，后台 close 仍在运行，可能泄漏浏览器进程（累计泄漏 ${adapterLeakCount}/${ADAPTER_LEAK_EXIT_THRESHOLD}）`,
+      );
+      if (adapterLeakCount >= ADAPTER_LEAK_EXIT_THRESHOLD) {
+        logToStderr('error', `adapter 泄漏达阈值（${adapterLeakCount}），强制退出 sidecar 以释放资源`);
+        process.exit(1);
+      }
     }
   } catch (e) {
     logToStderr('warn', `adapter.close() 异常（已忽略）：${e instanceof Error ? e.message : String(e)}`);
@@ -721,7 +741,9 @@ async function handleStatusQuery(
       throw new Error(`Job 不存在：${params.job}`);
     }
     return {
-      status: job.status,
+      // DB 的 source_items/migration_jobs CHECK 约束保证 status ∈ JobStatus 合法值，
+      // 此处断言安全（运行时已被 schema 约束，编译期 DB 读出为 string 需窄化）。
+      status: job.status as 'created' | 'running' | 'paused' | 'interrupted' | 'completed' | 'failed',
       currentStage: job.currentStage,
       scanCount: job.scanCount ?? 0,
       verifiedCount: job.verifiedCount ?? 0,

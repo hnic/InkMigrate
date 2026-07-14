@@ -39,6 +39,16 @@ describe('redactor (§19.2)', () => {
     expect(r('id=00000000000')).toBe('id=00000000000');
   });
 
+  it('regression: 词边界防止腐蚀日志里的合法长数字串', () => {
+    // 此前 PHONE_RE 无词边界，会匹配任何含 11 位连续数字子串的中间 11 位，
+    // 腐蚀日志里的订单号、时间戳、字节大小等合法业务数据，影响诊断。
+    expect(r('订单号 12345678901234')).toBe('订单号 12345678901234'); // 14 位
+    expect(r('ts:1715000000000')).toBe('ts:1715000000000'); // 13 位时间戳
+    expect(r('id:123456789012345')).toBe('id:123456789012345'); // 15 位
+    // 恰好 11 位且前后非数字的仍正确脱敏
+    expect(r('手机 13800138000 已记录')).toBe('手机 [REDACTED_PHONE] 已记录');
+  });
+
   it('redacts emails', () => {
     expect(r('mail me a@b.com')).toBe('mail me [REDACTED_EMAIL]');
     expect(r('from john.doe@example.co.uk')).toBe(

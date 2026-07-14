@@ -12,7 +12,7 @@ import { RETRY_BACKOFF_JITTER } from '../../src/runtime/jitter.js';
 
 const fastPolicy: RetryPolicy = {
   maxRetries: 3,
-  backoffMs: [10, 30, 90],
+  backoffMs: [10, 30], // maxRetries-1=2 个值（首次不退避）
 };
 
 describe('withRetry (§18.1/§18.2)', () => {

@@ -28,7 +28,10 @@ const FAVORITES_TOKEN_RE = /(\/c\/user\/token\/)[^/?\s"']+/gi;
 const VERIFYCODE_RE =
   /(验证码|verification code|otp)(\s*[:=]?\s*)(\d{4,8})/gi;
 // 中国大陆 11 位手机号：1[3-9]xxxxxxxxx，可选 +86 前缀。
-const PHONE_RE = /(\+?86[- ]?)?1[3-9]\d{9}/g;
+// 词边界用前后非数字 lookaround（而非 \b），避免腐蚀日志里的合法数字串
+//（订单号、时间戳、字节大小等超 11 位的数字串会被无边界正则误匹配中间 11 位）。
+// (?<!\d) 要求前一个字符不是数字（或位于串首），(?!\d) 要求后一个字符不是数字。
+const PHONE_RE = /(?<!\d)(\+?86[- ]?)?1[3-9]\d{9}(?!\d)/g;
 const EMAIL_RE = /[\w.+-]+@[\w-]+\.[\w.-]+/g;
 
 export function createRedactor(): Redactor {

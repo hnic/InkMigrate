@@ -9,8 +9,13 @@ import { withJitter, RETRY_BACKOFF_JITTER } from './jitter.js';
  * - §18.1 退避时长叠加抖动（±50%），避免固定退避被风控识别为自动化。
  */
 export interface RetryPolicy {
+  /**
+   * 最多尝试次数（含首次）。名为 maxRetries 是沿用通用惯例，但此处的语义是
+   * "总尝试上限"：maxRetries=3 表示首次 + 最多 2 次重试 = 总 3 次调用。
+   *（循环 `for attempt < maxRetries` 据此实现。）
+   */
   maxRetries: number;
-  /** 每次重试前的退避毫秒；长度应 >= maxRetries。 */
+  /** 每次重试前的退避毫秒；长度应 >= maxRetries - 1（首次不退避）。 */
   backoffMs: readonly number[];
 }
 
@@ -129,8 +134,13 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-/** §18.1 默认抓取重试策略。 */
+/**
+ * §18.1 默认抓取重试策略。
+ * maxRetries=3：首次 + 最多 2 次重试。backoffMs 对应每次重试前的退避
+ *（首次不退避，故只需 maxRetries-1=2 个值）。此前 backoffMs 有 3 个值，
+ * 第 3 个（30000ms）因循环只跑 maxRetries 次而永不使用，是死配置——已修正。
+ */
 export const DEFAULT_RETRY_POLICY: RetryPolicy = {
   maxRetries: 3,
-  backoffMs: [3000, 10000, 30000],
+  backoffMs: [3000, 10000],
 };

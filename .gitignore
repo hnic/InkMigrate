@@ -5,6 +5,7 @@
 .inkmigrate/
 /reports/
 logs/
+*.log
 playwright/.auth/
 *.sqlite
 *.sqlite-shm

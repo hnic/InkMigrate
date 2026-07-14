@@ -21,14 +21,14 @@ async fn send_rpc(
 
 /// Tauri command: 终止当前正在运行的长任务（scan/migrate/cleanup）。
 ///
-/// 转发 cancel.cancel RPC 给 sidecar。sidecar 收到后设置进程级 cancel flag，
+/// 转发 job.cancel RPC 给 sidecar。sidecar 收到后设置进程级 cancel flag，
 /// 长任务循环在下一次迭代边界优雅退出。这是转发型命令，不直接操作子进程。
 #[tauri::command]
 async fn cancel_job(
     state: State<'_, Arc<SidecarManager>>,
 ) -> Result<serde_json::Value, String> {
     state
-        .send_rpc("cancel.cancel".into(), serde_json::json!({}))
+        .send_rpc("job.cancel".into(), serde_json::json!({}))
         .await
 }
 
