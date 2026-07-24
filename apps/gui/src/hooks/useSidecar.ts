@@ -2,6 +2,7 @@ import { useEffect, useRef, useCallback, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { ProgressEvent, LogEntry } from '../lib/types.js';
+import type { HealthDegradedNotification } from '@inkmigrate/protocol';
 
 export function useSidecar() {
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
@@ -10,6 +11,8 @@ export function useSidecar() {
   /** 当前正在运行的 RPC 对应的 phase（由发起者声明），用于让每个页面判断
    * "是不是我自己发起的任务在跑"，避免 A 任务跑时 B 页面误显示"运行中"。 */
   const [activePhase, setActivePhase] = useState<string | null>(null);
+  /** 引擎健康降级状态。uncaughtException 后由 engine 推送，仅重启应用可解除。 */
+  const [healthDegraded, setHealthDegraded] = useState<HealthDegradedNotification | null>(null);
   const unlistenRefs = useRef<UnlistenFn[]>([]);
   /** I30: 进度条 2 秒清除定时器，避免与新任务进度条竞态。 */
   const progressClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -45,6 +48,22 @@ export function useSidecar() {
     }).then((fn) => { if (cancelled) fn(); else unlistenRefs.current.push(fn); })
       .catch((e) => console.error('crashed listen 失败', e));
 
+    listen<HealthDegradedNotification>('sidecar://health', (e) => {
+      setHealthDegraded(e.payload);
+      setLogs((prev) => [
+        ...prev.slice(-199),
+        {
+          level: 'error',
+          message: `⚠️ 引擎状态降级：${e.payload.message}`,
+          timestamp: Date.now(),
+        },
+      ]);
+      // 降级意味着当前长任务结果不可信，重置 busy/activePhase（同 crashed 语义）
+      setBusy(false);
+      setActivePhase(null);
+    }).then((fn) => { if (cancelled) fn(); else unlistenRefs.current.push(fn); })
+      .catch((e) => console.error('health listen 失败', e));
+
     return () => {
       cancelled = true;
       for (const fn of unlistenRefs.current) {
@@ -69,6 +88,11 @@ export function useSidecar() {
     // 读操作（status.query / migrate.resumable 等）不应影响全局 busy，否则查询报告时
     // 顶栏误显示「处理中」且清空进度条。
     const isLongTask = method in METHOD_PHASE;
+    if (isLongTask && healthDegraded !== null) {
+      throw new Error('引擎状态已降级，请重启应用后再操作');
+    }
+    // 注意：rpcCall 依赖 healthDegraded（见下方 useCallback deps）。降级翻转时
+    // rpcCall 重建以拦截新长任务；勿把 deps 改回 []，否则冻结会因闭包过期失效。
     if (isLongTask) {
       setBusy(true);
       setProgress(null);
@@ -95,7 +119,7 @@ export function useSidecar() {
         setActivePhase(null);
       }
     }
-  }, []);
+  }, [healthDegraded]);
 
   const addLog = useCallback((level: LogEntry['level'], message: string) => {
     setLogs((prev) => [...prev.slice(-199), { level, message, timestamp: Date.now() }]);
@@ -112,5 +136,5 @@ export function useSidecar() {
     }
   }, [addLog]);
 
-  return { rpcCall, progress, logs, busy, activePhase, addLog, cancel };
+  return { rpcCall, progress, logs, busy, activePhase, healthDegraded, addLog, cancel };
 }
