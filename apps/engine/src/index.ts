@@ -11,8 +11,9 @@
  * - stderr：日志输出（不干扰 JSON 通道）
  */
 import { registerAllHandlers } from './rpc-handlers.js';
-import { startStdinLoop, logToStderr } from './transport.js';
+import { startStdinLoop, logToStderr, sendNotification } from './transport.js';
 import { getHeapStatistics } from 'node:v8';
+import { createUncaughtExceptionHandler } from './health-events.js';
 
 function main(): void {
   // I26: 长驻 sidecar 进程必须有兜底，否则任何 handler 外的异步 reject
@@ -21,13 +22,12 @@ function main(): void {
   process.on('unhandledRejection', (reason) => {
     logToStderr('error', `未处理的 Promise 拒绝：${String(reason)}`);
   });
-  process.on('uncaughtException', (err) => {
-    // M-10: L12 改为 exit(1) 但 Tauri sidecar 无重启机制 → 一次未捕获异常永久杀死
-    // sidecar，所有后续 RPC 失败。回退到记录后继续运行（与 unhandledRejection 一致）。
-    // Node 官方警告 uncaughtException 后状态可能损坏，但 sidecar 死亡比状态不确定
-    // 更糟（用户必须重启整个应用）。日志记录让问题可诊断。
-    logToStderr('error', `未捕获异常（已恢复，sidecar 继续运行）：${err.message}\n${err.stack ?? ''}`);
-  });
+  // 健康降级：uncaughtException 后进程状态可能损坏（锁未释放、事务未完结），
+  // 但直接 exit(1) 会杀死 sidecar 且 crashed 事件只对"进程退出"有效——
+  // 这里选择继续运行 + 主动发 health_degraded 通知，让 GUI 冻结新长任务并提示重启。
+  // 节流/兜底逻辑见 health-events.ts。
+  const handleUncaughtException = createUncaughtExceptionHandler({ sendNotification, logToStderr });
+  process.on('uncaughtException', handleUncaughtException);
 
   // 检查堆大小是否足够（全量迁移数千条需要大量内存）
   const heapStats = getHeapStatistics();
