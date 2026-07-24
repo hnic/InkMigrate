@@ -28,9 +28,9 @@
 
 新增 JSON-RPC notification method：`health_degraded`。
 
-**Payload**：
+**Payload**（命名为 `HealthDegradedNotification`，遵循项目通知类型以 `Notification` 结尾的惯例）：
 ```typescript
-interface HealthDegradedPayload {
+interface HealthDegradedNotification {
   /** 降级原因类别。当前固定 "uncaughtException"；为将来扩展其他降级源预留。 */
   reason: 'uncaughtException';
   /** err.message */
@@ -39,6 +39,8 @@ interface HealthDegradedPayload {
   stack?: string;
 }
 ```
+
+**类型定义位置**：`packages/protocol/src/index.ts`，与 `ProgressNotification`（`:163`）/ `LogNotification`（`:180`）平级，置于"通知类型（GUI 监听 sidecar 事件用）"分区下。engine 与 GUI 均从 `@inkmigrate/protocol` 导入——遵循该包已建立的"单一真相源"原则，避免两侧各自声明导致类型漂移。
 
 GUI 侧映射为 Tauri 事件 `sidecar://health`，与现有 `sidecar://log` / `sidecar://progress` / `sidecar://crashed` 命名一致。
 
@@ -78,9 +80,9 @@ UI 层：rpcCall 发起长任务前检查 healthDegraded 标志 → 冻结
 ### 1. `apps/engine/src/index.ts`
 
 - 新增进程级标志 `let healthDegradedSent = false`。
-- `uncaughtException` 处理器内：先 `logToStderr`（保持现状），然后若 `!healthDegradedSent`，调用 `sendNotification('health_degraded', { reason: 'uncaughtException', message: err.message, ...(err.stack ? { stack: err.stack } : {}) })` 并置标志。
+- `uncaughtException` 处理器内：先 `logToStderr`（保持现状），然后若 `!healthDegradedSent`，调用 `sendNotification('health_degraded', { reason: 'uncaughtException', message: err.message, ...(err.stack ? { stack: err.stack } : {}) })` 并置标志；对 `sendNotification` 调用包一层 try/catch（见"风险"）。
 - **修正过时注释**（`index.ts:25-28`）：删除"Tauri sidecar 无重启机制"的错误论述，改为说明"sidecar 有 `crashed` 感知但仅对进程退出有效；uncaughtException 后进程继续运行，故需主动发 `health_degraded` 通知 GUI 冻结新长任务"。
-- `sendNotification` 已从 `./transport.js` 导出，直接 import。
+- `sendNotification` 已从 `./transport.js` 导出，直接 import。`HealthDegradedNotification` 类型从 `@inkmigrate/protocol` 导入（仅用于类型标注，运行时 payload 为内联对象字面量）。
 
 ### 2. `apps/gui/src-tauri/src/sidecar.rs`
 
@@ -92,13 +94,13 @@ UI 层：rpcCall 发起长任务前检查 healthDegraded 标志 → 冻结
 
 ### 3. `apps/gui/src/hooks/useSidecar.ts`
 
-- 新增 state：`const [healthDegraded, setHealthDegraded] = useState<HealthDegradedPayload | null>(null)`。
-- 新增 `listen<HealthDegradedPayload>('sidecar://health', ...)`：
+- 新增 state：`const [healthDegraded, setHealthDegraded] = useState<HealthDegradedNotification | null>(null)`。
+- 新增 `listen<HealthDegradedNotification>('sidecar://health', ...)`：
   - 收到后 `setHealthDegraded(payload)`；
   - `setLogs` 追加一条 `level: 'error'`、`message: ⚠️ 引擎状态降级：${payload.message}` 的日志；
   - 重置 `busy`/`activePhase`（与 `crashed` 处理一致——降级意味着当前长任务结果不可信）。
 - `rpcCall` 内：若 `isLongTask && healthDegraded !== null`，提前 `throw new Error('引擎状态已降级，请重启应用后再操作')`（读操作不受影响，仍可发起）。
-- `HealthDegradedPayload` 类型加入 `lib/types.ts`。
+- `HealthDegradedNotification` 类型从 `@inkmigrate/protocol` 导入（单一真相源，不在 `lib/types.ts` 重复声明）。
 - `useSidecar` 返回值新增 `healthDegraded`，供 UI 层决定如何展示提示。
 
 ### 4. UI 层展示
