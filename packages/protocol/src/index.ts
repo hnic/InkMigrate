@@ -182,6 +182,15 @@ export interface LogNotification {
   message: string;
 }
 
+export interface HealthDegradedNotification {
+  /** 降级原因类别。当前固定 "uncaughtException"；为将来扩展其他降级源预留。 */
+  reason: 'uncaughtException';
+  /** err.message */
+  message: string;
+  /** err.stack，完整不脱敏（本地诊断用，不落盘不分享） */
+  stack?: string;
+}
+
 // ─── 方法映射（类型安全 dispatch 用） ───
 
 export interface RpcMethodMap {
