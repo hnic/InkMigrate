@@ -18,3 +18,6 @@ dist/
 *.tsbuildinfo
 
 docs/superpowers/
+
+# § ui-ux-pro-max skill: bundled binary fonts (TTF) — keep skill, skip fonts in git
+.zcode/skills/ui-styling/canvas-fonts/

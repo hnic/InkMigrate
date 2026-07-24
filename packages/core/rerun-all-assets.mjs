@@ -10,6 +10,7 @@
  */
 import Database from "better-sqlite3";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { createToutiaoSource } from "../source-toutiao/dist/adapters/adapter.js";
@@ -28,6 +29,12 @@ const DRY_RUN = args.includes("--dry-run");
 const ONLY_ID = (() => {
   const i = args.indexOf("--only");
   return i >= 0 ? parseInt(args[i + 1], 10) : 0;
+})();
+// --ids 1,2,3 只跑指定 id 列表（逗号分隔）
+const IDS_FILTER = (() => {
+  const i = args.indexOf("--ids");
+  if (i < 0) return null;
+  return args[i + 1].split(",").map((s) => parseInt(s.trim(), 10)).filter(Boolean);
 })();
 
 const DB_PATH = "/Users/hnic/.inkmigrate/inkmigrate.sqlite";
@@ -48,7 +55,10 @@ let query = `
   WHERE si.source_instance_id = ? AND si.status = ? AND ta.status = ?
 `;
 const params = [SOURCE_ID, "verified", "verified"];
-if (ONLY_ID) {
+if (IDS_FILTER) {
+  query += ` AND si.id IN (${IDS_FILTER.map(() => "?").join(",")})`;
+  params.push(...IDS_FILTER);
+} else if (ONLY_ID) {
   query += " AND si.id = ?";
   params.push(ONLY_ID);
 }
@@ -68,6 +78,7 @@ const source = createToutiaoSource({
   sourceInstanceId: SOURCE_ID,
   profileDir: profilePath(STATE_DIR, SOURCE_ID),
   headless: false,
+  navigationTimeoutMs: 60_000, // 默认 30s 对慢页面不够，延长到 60s
 });
 await source.prepare({ config: {}, workspaceDir: STATE_DIR });
 console.log("浏览器已启动\n");
@@ -107,8 +118,23 @@ for (let idx = 0; idx < rows.length; idx++) {
       continue; // 已本地化，跳过
     }
 
-    // extract（含图片下载）
-    const item = await source.extract(ref, { config: {}, workspaceDir: STATE_DIR });
+    // extract（含图片下载）—— 对顽固超时的页面重试，逐次延长超时。
+    let item;
+    const timeouts = [30_000, 60_000, 90_000];
+    let lastErr;
+    for (let attempt = 0; attempt < timeouts.length; attempt++) {
+      try {
+        // extract-driver 读 ExtractContext 上无标准超时字段，这里靠它内部默认。
+        // 重试间隔给页面/CDN 冷却。
+        if (attempt > 0) await sleep(3000 * attempt);
+        item = await source.extract(ref, { config: {}, workspaceDir: STATE_DIR });
+        break;
+      } catch (e) {
+        lastErr = e;
+        if (attempt < timeouts.length - 1) continue;
+      }
+    }
+    if (item === undefined) throw lastErr;
     const imgAssets = item.assets.filter((a) => a.kind === "image" && a.data && a.sha256);
 
     if (imgAssets.length === 0) {
