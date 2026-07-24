@@ -233,6 +233,7 @@ async fn read_stdout(
             let event_name = match method_str.as_str() {
                 "progress" => "sidecar://progress",
                 "log" => "sidecar://log",
+                "health_degraded" => "sidecar://health",
                 other => {
                     eprintln!("未知 notification: {}", other);
                     continue;
