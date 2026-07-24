@@ -16,7 +16,7 @@ import type { PageId } from './lib/types.js';
 export default function App() {
   const [page, setPage] = useState<PageId>('login');
   const { settings, update } = useSettings();
-  const { rpcCall, progress, logs, busy, activePhase, addLog, cancel } = useSidecar();
+  const { rpcCall, progress, logs, busy, activePhase, healthDegraded, addLog, cancel } = useSidecar();
   const { refresh: refreshLogin } = useLoginStatus({ settings, update });
 
   return (
@@ -57,6 +57,29 @@ export default function App() {
 
         {/* 内容区 */}
         <main style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '20px', gap: '12px', overflow: 'hidden' }}>
+          {/* 引擎降级提示（uncaughtException 后显示，需重启应用解除） */}
+          {healthDegraded !== null && (
+            <div role="alert" style={{
+              padding: '10px 14px',
+              background: '#c0392b',
+              color: '#fff',
+              borderRadius: '6px',
+              fontSize: '13px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '4px',
+            }}>
+              <strong>⚠️ 引擎状态已降级</strong>
+              <span>新任务已暂停。建议保存当前状态并<span style={{ fontWeight: 700 }}>重启应用</span>后再继续。</span>
+              <details style={{ marginTop: '2px' }}>
+                <summary style={{ cursor: 'pointer', opacity: 0.9 }}>详细信息</summary>
+                <pre style={{ whiteSpace: 'pre-wrap', margin: '4px 0 0', fontSize: '11px', opacity: 0.85 }}>
+                  {healthDegraded.stack ?? healthDegraded.message}
+                </pre>
+              </details>
+            </div>
+          )}
+
           {/* 进度条（有活跃任务时显示） */}
           <ProgressBar progress={progress} />
 
