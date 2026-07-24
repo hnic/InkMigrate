@@ -152,8 +152,6 @@ title: 文章标题
 source_url: https://www.toutiao.com/article/xxxxx/
 ---
 
-# 文章标题
-
 > [!info] 来源信息
 > - 来源：今日头条
 > - 作者：作者名

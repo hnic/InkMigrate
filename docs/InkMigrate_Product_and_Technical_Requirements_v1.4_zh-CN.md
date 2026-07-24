@@ -1388,17 +1388,15 @@ source_content_hash: "sha256:..."
 
 ### 13.6 正文模板
 
-```markdown
-# 人工智能如何改变软件开发
+标题统一由 §13.5 的 frontmatter `title` 字段维护，正文不再注入 `# 标题` 一级标题（避免与 frontmatter 重复）。正文以来源信息 callout 开头：
 
+```markdown
 > [!info] 来源信息
 > - 来源：今日头条
 > - 作者：示例作者
 > - 发布时间：2025-12-20 10:35
 > - 收藏时间：2026-01-04 21:13
 > - [打开原文](https://www.toutiao.com/article/7428193012345678901/)
-
-## 正文
 
 正文第一段。
 
@@ -3524,6 +3522,7 @@ examples/
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 1.4.1 | 2026-07-24 | 正文格式变更（破坏性）：§13.6 正文模板移除 `# 标题` 一级标题注入，标题统一由 frontmatter `title` 字段维护（`renderBody` 不再输出 H1）；同步更新 README 笔记格式示例。数据运维：对存量 vault 的 6574 篇 `toutiao` 笔记批量删除重复 H1 标头（已备份 `toutiao-md-backup-20260724-143943.tar.gz`）；以 `source_url` 为桥梁重算并更新 `target_artifacts` 中 6566 条记录的 `target_content_hash` 与 `written_file_hash`，使 `target_content_hash == written_file_hash == 磁盘哈希` 三者一致（DB 已备份 `inkmigrate-db-backup-20260724-150042.sqlite`）；`source_items.source_content_hash` 因哈希来源内容而未动。已知问题：排查发现 105 条 `status='verified'` 的 artifact（103 video + 2 article）磁盘文件缺失，证实为视频排除规则（`EXCLUDED_KINDS`）上线前（commit `fb12dcd`，2026-06-27）的最后一批遗留，文件消失发生在 InkMigrate 进程之外（含 `#` 文件名占 31.4%，远高于存量 1.8%，疑为 Obsidian 对特殊字符文件名的处理），代码内无删除逻辑；DB 哈希未为这 105 条更新（无磁盘文件可重算），`status='verified'` 在默认 `preserve` 策略下不会触发静默覆盖，留作历史记录。 |
 | 1.4 | 2026-06-22 | 根据第四轮工程复评完成契约一致性收口：统一 `replace` 的执行措辞；明确强制覆盖审计的独立列与 `audit_metadata_json` 字段归属；把 Job 级认证和安全验证显式回引至状态边界；定义 `action_code` 在普通更新、质量升级、元数据更新、`write-new` 和强制覆盖中的阶段使用；为 `target_artifacts.status` 增加受控值、CHECK 约束、转换语义及清理资格边界。 |
 | 1.3 | 2026-06-22 | 根据第三轮工程复评收口实现契约：将条目状态拆为可恢复状态与完成终态并定义 `blocked` 边界；为不可重试条目错误增加显式 `itemDisposition`；为 `migration_attempts` 增加 Job/条目作用域、CHECK 约束及两个部分唯一索引；定义 `artifact_kind` 受控值和 `note`/`note_variant` 清理语义；澄清 `write-new` 行为，并把 `replace` 强制覆盖审计落到目标 Artifact 与覆盖前后三类哈希字段。 |
 | 1.2 | 2026-06-22 | 根据第二轮工程复评修订：采用聚合 `failed_count` 方案并使完整性方程与数据库列完全一致；定义失败明细派生口径和 CLI/报告展示；补充受控 `paused` 与 `interrupted` 的触发及恢复语义；定义跨 Job 的 `degraded → verified` 质量升级、覆盖策略和旧 Artifact 保护；明确清理候选通过指定 Job 的 `target_artifacts` 判定；概括 Foreign Key 删除策略；修正文档目录记号，并为 `source_item_id IS NULL` 的索引 Artifact 增加唯一性契约。 |
