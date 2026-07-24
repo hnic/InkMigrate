@@ -33,13 +33,14 @@ describe('htmlToMarkdown (§13.6 turndown)', () => {
 describe('renderBody (§13.6 正文模板)', () => {
   const item = makeFullArticleItem();
 
-  it('includes H1 title and 来源信息 callout', () => {
+  it('includes 来源信息 callout without H1 title', () => {
     const body = renderBody({
       item,
       markdownBody: '正文第一段。',
       assetLinks: [],
     });
-    expect(body).toContain('# 人工智能如何改变软件开发');
+    // 标题仅在 frontmatter 中保留，正文不再注入 H1 标头。
+    expect(body).not.toContain('# 人工智能如何改变软件开发');
     expect(body).toContain('> [!info] 来源信息');
     expect(body).toContain('今日头条'); // source label
     expect(body).toContain('示例作者');
@@ -114,14 +115,15 @@ describe('renderBody (§13.6 正文模板)', () => {
     expect(body).toContain('![](a/b.webp)');
   });
 
-  it('renders degraded item with title and source info but empty body', () => {
+  it('renders degraded item with source info but no H1 title and empty body', () => {
     const degraded = makeDegradedItem();
     const body = renderBody({
       item: degraded,
       markdownBody: '',
       assetLinks: [],
     });
-    expect(body).toContain('# 人工智能如何改变软件开发');
+    // 标题仅在 frontmatter 中，正文不注入 H1。
+    expect(body).not.toContain('# 人工智能如何改变软件开发');
     expect(body).toContain('来源信息');
   });
 });

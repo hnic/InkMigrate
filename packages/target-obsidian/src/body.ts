@@ -45,10 +45,6 @@ export function renderBody(i: RenderBodyInput): string {
   const linkStyle = i.linkStyle ?? 'wikilink';
 
   const lines: string[] = [];
-  // N4: 标题去换行，避免多行标题破坏 H1 结构。
-  const safeTitle = item.title.replace(/[\r\n]+/g, ' ').trim() || '(无标题)';
-  lines.push(`# ${safeTitle}`);
-  lines.push('');
 
   // 来源信息 callout
   const infoLines: string[] = [];

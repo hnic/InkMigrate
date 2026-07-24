@@ -87,7 +87,8 @@ describe('createObsidianTarget (§8.4 + §13)', () => {
       expect(content.startsWith('---\n')).toBe(true);
       expect(content).toContain('人工智能如何改变软件开发');
       expect(content).toContain('source_url:');
-      expect(content).toContain('# 人工智能如何改变软件开发');
+      // 标题仅出现在 frontmatter，正文不再注入 H1 标头。
+      expect(content).not.toContain('# 人工智能如何改变软件开发');
       expect(content).toContain('正文第一段');
       expect(content).toContain('正文第一段。');
       // 三类哈希齐全
@@ -232,7 +233,8 @@ describe('createObsidianTarget (§8.4 + §13)', () => {
         join(vault.vaultPath, result.relativePath),
         'utf8',
       );
-      expect(content).toContain('# 人工智能如何改变软件开发');
+      // 标题仅出现在 frontmatter，正文不注入 H1 标头。
+      expect(content).not.toContain('# 人工智能如何改变软件开发');
       expect(content).toContain('来源信息');
     });
   });
