@@ -1,6 +1,12 @@
 import Database from 'better-sqlite3';
 import type { Database as DB, Options } from 'better-sqlite3';
-import { SCHEMA_VERSION, applySchemaV1, applySchemaV2, applySchemaV3 } from './schema.js';
+import {
+  SCHEMA_VERSION,
+  applySchemaV1,
+  applySchemaV2,
+  applySchemaV3,
+  REQUIRED_TABLES,
+} from './schema.js';
 
 export interface OpenDbOptions {
   /** 文件路径，或 ':memory:'。 */
@@ -27,20 +33,18 @@ export function openDatabase(opts: OpenDbOptions): DB {
     options.nativeBinding = bindingEnv;
   }
   const db = new Database(opts.path, options);
-  db.pragma(`busy_timeout = ${opts.busyTimeoutMs ?? 5000}`);
-  if (opts.wal !== false && opts.path !== ':memory:') {
-    db.pragma('journal_mode = WAL');
-  }
   // 迁移期间临时关闭 FK 检查：v3 的表重建（DROP+RENAME）在 foreign_keys=ON 下
   // 会因子表引用而失败（FOREIGN KEY constraint failed）。SQLite 的标准做法是
   // 表重建迁移在 FK 关闭时执行（见 SQLite docs "Making Other Kinds Of Table Schema Changes"）。
   // 迁移完成后重新开启 FK（migrate 内每个迁移各自在事务中保证原子性）。
   // 仅当 schema_version 表已存在且有未应用的迁移时才需要关 FK（全新库无需）。
-  const hasSchemaTable = db
-    .prepare("SELECT COUNT(*) c FROM sqlite_master WHERE type='table' AND name='schema_version'")
-    .get() as { c: number };
   try {
-    if (hasSchemaTable.c > 0 && getCurrentSchemaVersion(db) < SCHEMA_VERSION) {
+    db.pragma(`busy_timeout = ${opts.busyTimeoutMs ?? 5000}`);
+    // WAL 需要写 DB 头：readonly 连接（非 WAL 库）会抛 SQLITE_READONLY，跳过。
+    if (opts.wal !== false && opts.path !== ':memory:' && !options.readonly) {
+      db.pragma('journal_mode = WAL');
+    }
+    if (tableExists(db, 'schema_version') && getCurrentSchemaVersion(db) < SCHEMA_VERSION) {
       db.pragma('foreign_keys = OFF');
       try {
         migrate(db);
@@ -48,31 +52,31 @@ export function openDatabase(opts: OpenDbOptions): DB {
         db.pragma('foreign_keys = ON');
       }
     } else {
-      // 全新库或已是最新版本：FK 保持开启，migrate 安全（CREATE IF NOT EXISTS 不重建表）
+      // 全新库或已是最新版本：SQLite 连接级 FK 默认 OFF，迁移（含 v2/v3 在空表上的
+      // 重建 DDL）在 FK OFF 下安全执行，迁移完成后统一开启 FK。
       migrate(db);
       db.pragma('foreign_keys = ON');
     }
     // M-1/R3-M4: 迁移后完整性检查——确认全部业务表存在。防止损坏库（schema_version
     // 存在但表缺失）静默"成功"（CREATE IF NOT EXISTS 不重建已缺失的表）。
-    const REQUIRED_TABLES = [
-      'source_instances', 'target_instances', 'migration_jobs', 'source_items',
-      'assets', 'target_artifacts', 'migration_attempts',
-      'cleanup_plans', 'cleanup_jobs', 'cleanup_items', 'cleanup_action_attempts',
-    ];
     for (const t of REQUIRED_TABLES) {
-      const exists = db
-        .prepare("SELECT COUNT(*) c FROM sqlite_master WHERE type='table' AND name=?")
-        .get(t) as { c: number };
-      if (exists.c === 0) {
+      if (!tableExists(db, t)) {
         throw new Error(`数据库完整性检查失败：关键表 ${t} 不存在（数据库可能已损坏）`);
       }
     }
   } catch (e) {
-    // M-1: migrate 或完整性检查失败时关闭 DB，避免泄漏处于不确定状态的连接
+    // M-1: 上面的 pragma / migrate / 完整性检查任一失败时关闭 DB，避免泄漏连接
     db.close();
     throw e;
   }
   return db;
+}
+
+function tableExists(db: DB, name: string): boolean {
+  const row = db
+    .prepare("SELECT COUNT(*) c FROM sqlite_master WHERE type='table' AND name=?")
+    .get(name) as { c: number };
+  return row.c > 0;
 }
 
 /**
@@ -98,6 +102,10 @@ const MIGRATIONS: ReadonlyArray<{ version: number; apply: (db: DB) => void }> = 
  * 逐版本而非单步：确保从任意旧版本（含跳版本场景）都能正确升级到目标版本。
  * 每个迁移在独立事务中执行；失败时事务回滚，schema_version 不递增，下次启动
  * 从断点续跑。better-sqlite3 是同步 API，事务回滚由 db.transaction 保证。
+ *
+ * 前置条件：包含表重建（DROP+RENAME）的迁移要求连接 foreign_keys = OFF，
+ * 否则重建会因子表引用失败。openDatabase 已处理；直接调用方需自行保证
+ *（注意 PRAGMA foreign_keys 在事务内是 no-op，必须在事务外切换）。
  *
  * 校验：注册表必须连续覆盖 1..SCHEMA_VERSION，缺失或乱序会抛错（fail-fast，
  * 避免生产库因迁移表配置错误而部分升级到不一致状态）。

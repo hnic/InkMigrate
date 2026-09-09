@@ -51,6 +51,16 @@ export interface UpdateCommittedResultInput {
   updatedAt: string;
 }
 
+/** 列清单常量：findByFingerprint 与 findByExternalId 共用，避免两份 SELECT 漂移。 */
+const SOURCE_ITEM_COLUMNS = `id, source_instance_id AS sourceInstanceId, external_id AS externalId,
+                fingerprint, stable_key AS stableKey, item_key AS itemKey,
+                stable_short_id AS stableShortId, canonical_url AS canonicalUrl,
+                original_url AS originalUrl, title, content_kind AS contentKind,
+                source_position AS sourcePosition, discovered_at AS discoveredAt,
+                status, quality, degradations_json AS degradationsJson,
+                source_content_hash AS sourceContentHash,
+                source_metadata_json AS sourceMetadataJson`;
+
 /**
  * §16.4 source_items 仓储。
  *
@@ -67,16 +77,18 @@ export class SourceItems {
          VALUES(@sourceInstanceId,@externalId,@fingerprint,@stableKey,@itemKey,@stableShortId,@canonicalUrl,@originalUrl,@title,@contentKind,@sourcePosition,@discoveredAt,@status,@quality,@degradationsJson,@sourceContentHash,@sourceMetadataJson,@createdAt,@updatedAt)`,
       )
       .run({
-        externalId: null,
-        canonicalUrl: null,
-        originalUrl: null,
-        title: null,
-        sourcePosition: null,
-        quality: null,
-        degradationsJson: '[]',
-        sourceContentHash: null,
-        sourceMetadataJson: '{}',
         ...i,
+        // 逐字段 ?? 归一：显式传入的 undefined（可选属性合法，如源侧 title 缺失）
+        // 不能覆盖默认值，否则 better-sqlite3 拒绝 undefined 绑定值而在运行期抛错。
+        externalId: i.externalId ?? null,
+        canonicalUrl: i.canonicalUrl ?? null,
+        originalUrl: i.originalUrl ?? null,
+        title: i.title ?? null,
+        sourcePosition: i.sourcePosition ?? null,
+        quality: i.quality ?? null,
+        degradationsJson: i.degradationsJson ?? '[]',
+        sourceContentHash: i.sourceContentHash ?? null,
+        sourceMetadataJson: i.sourceMetadataJson ?? '{}',
       });
   }
 
@@ -86,14 +98,7 @@ export class SourceItems {
   ): SourceItemRow | undefined {
     return this.db
       .prepare(
-        `SELECT id, source_instance_id AS sourceInstanceId, external_id AS externalId,
-                fingerprint, stable_key AS stableKey, item_key AS itemKey,
-                stable_short_id AS stableShortId, canonical_url AS canonicalUrl,
-                original_url AS originalUrl, title, content_kind AS contentKind,
-                source_position AS sourcePosition, discovered_at AS discoveredAt,
-                status, quality, degradations_json AS degradationsJson,
-                source_content_hash AS sourceContentHash,
-                source_metadata_json AS sourceMetadataJson
+        `SELECT ${SOURCE_ITEM_COLUMNS}
          FROM source_items
          WHERE source_instance_id=? AND fingerprint=?`,
       )
@@ -115,14 +120,7 @@ export class SourceItems {
   ): SourceItemRow | undefined {
     return this.db
       .prepare(
-        `SELECT id, source_instance_id AS sourceInstanceId, external_id AS externalId,
-                fingerprint, stable_key AS stableKey, item_key AS itemKey,
-                stable_short_id AS stableShortId, canonical_url AS canonicalUrl,
-                original_url AS originalUrl, title, content_kind AS contentKind,
-                source_position AS sourcePosition, discovered_at AS discoveredAt,
-                status, quality, degradations_json AS degradationsJson,
-                source_content_hash AS sourceContentHash,
-                source_metadata_json AS sourceMetadataJson
+        `SELECT ${SOURCE_ITEM_COLUMNS}
          FROM source_items
          WHERE source_instance_id=? AND external_id=?`,
       )
@@ -131,10 +129,10 @@ export class SourceItems {
 
   /**
    * §11.5 / §16.4 在目标写入和验证成功后，把候选 quality/degradations/hash
-   * 提交为本表的最新已验证结果。
+   * 提交为本表的最新已验证结果。行不存在时抛错，避免调用方误以为结果已落库。
    */
   updateCommittedResult(id: number, u: UpdateCommittedResultInput): void {
-    this.db
+    const result = this.db
       .prepare(
         `UPDATE source_items
          SET status=@status,
@@ -152,5 +150,8 @@ export class SourceItems {
         sourceContentHash: u.sourceContentHash ?? null,
         updatedAt: u.updatedAt,
       });
+    if (result.changes === 0) {
+      throw new Error(`source_items 行不存在：id=${id}，提交结果未落库`);
+    }
   }
 }

@@ -47,6 +47,23 @@ export const ACTION_STATUS_UNFAVORITED = 'unfavorited_verified';
  */
 export const ACTION_STATUS_ALREADY_UNFAVORITED = 'already_unfavorited';
 
+/** 尝试后仍无法确认取消成功（点击了但仍收藏），重试上限耗尽后放弃（终态）。 */
+export const ACTION_STATUS_VERIFICATION_FAILED = 'verification_failed';
+
+/** 异常路径终态（如执行抛异常），不应重试。 */
+export const ACTION_STATUS_PERMANENT_FAILED = 'permanent_failed';
+
+/** 列清单常量：listByJob 与 findByJobAndSourceItem 共用，避免两份 SELECT 漂移。 */
+const CLEANUP_ITEM_COLUMNS = `id, job_id AS jobId, source_item_id AS sourceItemId,
+                precheck_status AS precheckStatus, pre_action_state AS preActionState,
+                action_status AS actionStatus, post_action_state AS postActionState,
+                attempt_count AS attemptCount,
+                action_started_at AS actionStartedAt, action_finished_at AS actionFinishedAt,
+                verified_at AS verifiedAt,
+                last_error_code AS lastErrorCode, last_error_message AS lastErrorMessage,
+                diagnostic_path AS diagnosticPath,
+                created_at AS createdAt, updated_at AS updatedAt`;
+
 /**
  * §16.10 cleanup_items 仓储。单条目清理明细，UNIQUE(job_id, source_item_id) 支持断点续跑。
  */
@@ -74,26 +91,25 @@ export class CleanupItems {
            updated_at=excluded.updated_at`,
       )
       .run({
-        preActionState: null, postActionState: null,
-        attemptCount: 1,
-        actionStartedAt: null, actionFinishedAt: null, verifiedAt: null,
-        lastErrorCode: null, lastErrorMessage: null, diagnosticPath: null,
         ...i,
+        // 逐字段 ?? 归一：显式传入的 undefined（可选属性合法）不能覆盖默认值，
+        // 否则 better-sqlite3 拒绝 undefined 绑定值而在运行期抛错。
+        preActionState: i.preActionState ?? null,
+        postActionState: i.postActionState ?? null,
+        attemptCount: i.attemptCount ?? 1,
+        actionStartedAt: i.actionStartedAt ?? null,
+        actionFinishedAt: i.actionFinishedAt ?? null,
+        verifiedAt: i.verifiedAt ?? null,
+        lastErrorCode: i.lastErrorCode ?? null,
+        lastErrorMessage: i.lastErrorMessage ?? null,
+        diagnosticPath: i.diagnosticPath ?? null,
       });
   }
 
   listByJob(jobId: string): CleanupItemRow[] {
     return this.db
       .prepare(
-        `SELECT id, job_id AS jobId, source_item_id AS sourceItemId,
-                precheck_status AS precheckStatus, pre_action_state AS preActionState,
-                action_status AS actionStatus, post_action_state AS postActionState,
-                attempt_count AS attemptCount,
-                action_started_at AS actionStartedAt, action_finished_at AS actionFinishedAt,
-                verified_at AS verifiedAt,
-                last_error_code AS lastErrorCode, last_error_message AS lastErrorMessage,
-                diagnostic_path AS diagnosticPath,
-                created_at AS createdAt, updated_at AS updatedAt
+        `SELECT ${CLEANUP_ITEM_COLUMNS}
          FROM cleanup_items WHERE job_id=? ORDER BY id`,
       )
       .all(jobId) as CleanupItemRow[];
@@ -110,15 +126,7 @@ export class CleanupItems {
   ): CleanupItemRow | undefined {
     return this.db
       .prepare(
-        `SELECT id, job_id AS jobId, source_item_id AS sourceItemId,
-                precheck_status AS precheckStatus, pre_action_state AS preActionState,
-                action_status AS actionStatus, post_action_state AS postActionState,
-                attempt_count AS attemptCount,
-                action_started_at AS actionStartedAt, action_finished_at AS actionFinishedAt,
-                verified_at AS verifiedAt,
-                last_error_code AS lastErrorCode, last_error_message AS lastErrorMessage,
-                diagnostic_path AS diagnosticPath,
-                created_at AS createdAt, updated_at AS updatedAt
+        `SELECT ${CLEANUP_ITEM_COLUMNS}
          FROM cleanup_items WHERE job_id=? AND source_item_id=?`,
       )
       .get(jobId, sourceItemId) as CleanupItemRow | undefined;
@@ -147,8 +155,8 @@ export class CleanupItems {
         sourceInstanceId,
         ACTION_STATUS_UNFAVORITED,
         ACTION_STATUS_ALREADY_UNFAVORITED,
-        'verification_failed',
-        'permanent_failed',
+        ACTION_STATUS_VERIFICATION_FAILED,
+        ACTION_STATUS_PERMANENT_FAILED,
       ) as Array<{ id: number }>;
     return new Set(rows.map((r) => r.id));
   }

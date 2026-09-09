@@ -59,12 +59,20 @@ export class CleanupJobs {
   constructor(private db: DB) {}
 
   create(i: CleanupJobInput): void {
+    // N4：与 updateStatus 同源校验——create 也不能绕过状态机写入任意字符串
+    //（schema 无 CHECK，拼写错误会静默持久化并使 updateStatus 守卫失效）。
+    if (!isCleanupJobStatus(i.status)) {
+      throw new Error(
+        `非法 cleanup_job status 值："${i.status}"（id=${i.id}）；合法值：created/running/completed/interrupted`,
+      );
+    }
     this.db
       .prepare(
         `INSERT INTO cleanup_jobs(id, plan_id, plan_hash, action, status, candidate_count, processed_count, success_count, skipped_count, failed_count, unknown_count, started_at, finished_at, created_at, updated_at)
          VALUES(@id, @planId, @planHash, @action, @status, @candidateCount, 0, 0, 0, 0, 0, @startedAt, NULL, @createdAt, @updatedAt)`,
       )
-      .run({ startedAt: null, ...i });
+      // ?? 归一：显式传入的 undefined 不能覆盖 null 默认值（better-sqlite3 拒绝 undefined 绑定值）。
+      .run({ ...i, startedAt: i.startedAt ?? null });
   }
 
   get(id: string): CleanupJobRow | undefined {
@@ -87,7 +95,12 @@ export class CleanupJobs {
     const params: Record<string, unknown> = { id };
     for (const [k, v] of Object.entries(c)) {
       if (v === undefined) continue;
-      sets.push(`${toSnake(k)} = @${k}`);
+      // 白名单映射：SET 片段由键名拼接进 SQL，不能依赖调用方类型约束兜底
+      const col = UPDATE_COUNT_COLUMNS[k];
+      if (col === undefined) {
+        throw new Error(`updateCounts: 未知计数字段 "${k}"（id=${id}）`);
+      }
+      sets.push(`${col} = @${k}`);
       params[k] = v;
     }
     if (sets.length === 0) return;
@@ -114,13 +127,21 @@ export class CleanupJobs {
       const current = this.db
         .prepare('SELECT status FROM cleanup_jobs WHERE id=?')
         .get(id) as { status: string } | undefined;
-      if (current !== undefined && isCleanupJobStatus(current.status)) {
-        if (!canCleanupJobTransition(current.status, targetStatus)) {
-          throw new Error(
-            `非法 cleanup_job 状态转换：${current.status} → ${targetStatus}（id=${id}）。` +
-              `终态（completed/interrupted）不可再转换。`,
-          );
-        }
+      // 行不存在时抛错而非静默 no-op：UPDATE 影响 0 行会让调用方误以为已落库。
+      if (current === undefined) {
+        throw new Error(`cleanup_job 不存在：id=${id}，updateStatus 未生效`);
+      }
+      // 存量 status 非法（脏数据/绕过校验写入）同样拒绝：跳过守卫直写等于放弃状态机保护。
+      if (!isCleanupJobStatus(current.status)) {
+        throw new Error(
+          `cleanup_job 存量 status 非法："${current.status}"（id=${id}），拒绝无守卫更新`,
+        );
+      }
+      if (!canCleanupJobTransition(current.status, targetStatus)) {
+        throw new Error(
+          `非法 cleanup_job 状态转换：${current.status} → ${targetStatus}（id=${id}）。` +
+            `终态（completed/interrupted）不可再转换。`,
+        );
       }
       this.db
         .prepare(
@@ -143,6 +164,11 @@ export class CleanupJobs {
   }
 }
 
-function toSnake(s: string): string {
-  return s.replace(/[A-Z]/g, (m) => `_${m.toLowerCase()}`);
-}
+/** updateCounts 可更新的计数列白名单（camelCase → snake_case），亦防未知键注入 SET 片段。 */
+const UPDATE_COUNT_COLUMNS: Record<string, string> = {
+  processedCount: 'processed_count',
+  successCount: 'success_count',
+  skippedCount: 'skipped_count',
+  failedCount: 'failed_count',
+  unknownCount: 'unknown_count',
+};

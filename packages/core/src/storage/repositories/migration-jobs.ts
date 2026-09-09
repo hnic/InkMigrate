@@ -76,12 +76,20 @@ export class MigrationJobs {
   constructor(private db: DB) {}
 
   create(i: MigrationJobInput): void {
+    // M1: 与 updateStatus 同源校验——create 也不能绕过状态机写入任意字符串
+    //（schema 的 CHECK 仅在 v2+ 存在，且拼写错误在此拦截更早）。
+    if (!isJobStatus(i.status)) {
+      throw new Error(
+        `非法 Job status 值："${i.status}"（id=${i.id}）；合法值：created/running/paused/interrupted/completed/failed`,
+      );
+    }
     this.db
       .prepare(
         `INSERT INTO migration_jobs(id,source_instance_id,target_instance_id,plan_id,status,current_stage,scan_count,candidate_count,verified_count,degraded_count,failed_count,conflict_count,skipped_count,created_at,updated_at)
          VALUES(@id,@sourceInstanceId,@targetInstanceId,@planId,@status,@currentStage,0,0,0,0,0,0,0,@createdAt,@updatedAt)`,
       )
-      .run({ planId: null, ...i });
+      // ?? 归一：显式传入的 undefined 不能覆盖 null 默认值（better-sqlite3 拒绝 undefined 绑定值）。
+      .run({ ...i, planId: i.planId ?? null });
   }
 
   get(id: string): MigrationJobRow | undefined {
@@ -106,7 +114,12 @@ export class MigrationJobs {
     const params: Record<string, unknown> = { id };
     for (const [k, v] of Object.entries(c)) {
       if (v === undefined) continue;
-      sets.push(`${toSnake(k)} = @${k}`);
+      // 白名单映射：SET 片段由键名拼接进 SQL，不能依赖调用方类型约束兜底
+      const col = COUNT_COLUMNS[k];
+      if (col === undefined) {
+        throw new Error(`updateCounts: 未知计数字段 "${k}"（id=${id}）`);
+      }
+      sets.push(`${col} = @${k}`);
       params[k] = v;
     }
     if (sets.length === 0) return;
@@ -120,9 +133,11 @@ export class MigrationJobs {
   /**
    * §11.1 更新 Job 生命周期 status、current_stage 与暂停相关字段。
    *
-   * 可清空字段（pauseReasonCode/pausedAt/startedAt/finishedAt）使用显式 SET 而非 COALESCE：
-   * 调用方传 null 即清空该字段，传值即覆盖，省略（undefined）经 `?? null` 归一为 null。
-   * 这样 paused→running 的恢复能正确清除 pause_reason_code/paused_at，避免审计污染。
+   * 字段语义（M-修正：原注释声称四个时间/暂停字段均为显式 SET，与实现不符）：
+   * - pauseReasonCode/pausedAt：传值即覆盖；省略时若目标 status 仍为 paused 则保留
+   *   原值（paused 自环推进 current_stage 不丢暂停审计），离开 paused（如恢复 running）
+   *   则清空，避免审计污染。
+   * - startedAt/finishedAt：COALESCE 保留旧值，只能补写、不可清空。
    *
    * §11.1 状态转换守卫：读取当前 status，按 JOB_TRANSITIONS 校验目标 status 合法性。
    * 终态（completed/failed）的 Job 无法再被改写，断点续跑只能从 paused/interrupted 恢复。
@@ -146,21 +161,29 @@ export class MigrationJobs {
       const current = this.db
         .prepare('SELECT status FROM migration_jobs WHERE id=?')
         .get(id) as { status: string } | undefined;
-      if (current !== undefined && isJobStatus(current.status)) {
-        if (!canTransitionTo(current.status, targetStatus)) {
-          throw new Error(
-            `非法 Job 状态转换：${current.status} → ${targetStatus}（id=${id}）。` +
-              `终态（completed/failed）不可再转换；resume 只能从 paused/interrupted 恢复。`,
-          );
-        }
+      // 行不存在时抛错而非静默 no-op：UPDATE 影响 0 行会让调用方误以为已落库。
+      if (current === undefined) {
+        throw new Error(`migration_jobs 不存在：id=${id}，updateStatus 未生效`);
+      }
+      // 存量 status 非法（脏数据/绕过校验写入）同样拒绝：跳过守卫直写等于放弃状态机保护。
+      if (!isJobStatus(current.status)) {
+        throw new Error(
+          `DB 中存在非法 Job status 值："${current.status}"（id=${id}），拒绝更新以避免绕过状态机`,
+        );
+      }
+      if (!canTransitionTo(current.status, targetStatus)) {
+        throw new Error(
+          `非法 Job 状态转换：${current.status} → ${targetStatus}（id=${id}）。` +
+            `终态（completed/failed）不可再转换；resume 只能从 paused/interrupted 恢复。`,
+        );
       }
       this.db
         .prepare(
           `UPDATE migration_jobs
            SET status=@status,
                current_stage=COALESCE(@currentStage, current_stage),
-               pause_reason_code=@pauseReasonCode,
-               paused_at=@pausedAt,
+               pause_reason_code=COALESCE(@pauseReasonCode, CASE WHEN @status='paused' THEN pause_reason_code END),
+               paused_at=COALESCE(@pausedAt, CASE WHEN @status='paused' THEN paused_at END),
                started_at=COALESCE(@startedAt, started_at),
                finished_at=COALESCE(@finishedAt, finished_at),
                updated_at=@updatedAt
@@ -181,6 +204,13 @@ export class MigrationJobs {
   }
 }
 
-function toSnake(s: string): string {
-  return s.replace(/[A-Z]/g, (m) => `_${m.toLowerCase()}`);
-}
+/** updateCounts 可更新的计数列白名单（camelCase → snake_case），亦防未知键注入 SET 片段。 */
+const COUNT_COLUMNS: Record<string, string> = {
+  scanCount: 'scan_count',
+  candidateCount: 'candidate_count',
+  verifiedCount: 'verified_count',
+  degradedCount: 'degraded_count',
+  failedCount: 'failed_count',
+  conflictCount: 'conflict_count',
+  skippedCount: 'skipped_count',
+};

@@ -74,6 +74,14 @@ export interface AttemptRow {
   created_at: string;
 }
 
+/** 显式列清单：固定 AttemptRow 契约，schema 改名/删列时在 prepare 期即报错。 */
+const ATTEMPT_COLUMNS = `id, migration_job_id, attempt_scope, source_item_id, target_artifact_id,
+                stage, action_code, attempt_no, candidate_quality, candidate_degradations_json,
+                candidate_source_content_hash, overwrite_policy, expected_written_file_hash,
+                observed_prewrite_file_hash, result_written_file_hash, audit_metadata_json,
+                started_at, finished_at, success, error_code, error_message, http_status,
+                diagnostic_path, created_at`;
+
 /**
  * §16.7 migration_attempts 仓储。
  *
@@ -90,15 +98,17 @@ export class MigrationAttempts {
          VALUES(@migrationJobId,'item',@sourceItemId,@targetArtifactId,@stage,@actionCode,@attemptNo,@candidateQuality,@candidateDegradationsJson,@candidateSourceContentHash,@overwritePolicy,@auditMetadataJson,@httpStatus,@diagnosticPath,@startedAt,@createdAt)`,
       )
       .run({
-        targetArtifactId: null,
-        candidateQuality: null,
-        candidateDegradationsJson: null,
-        candidateSourceContentHash: null,
-        overwritePolicy: null,
-        auditMetadataJson: '{}',
-        httpStatus: null,
-        diagnosticPath: null,
         ...i,
+        // 逐字段 ?? 归一：显式传入的 undefined（可选属性合法）不能覆盖默认值，
+        // 否则 better-sqlite3 拒绝 undefined 绑定值而在运行期抛错。
+        targetArtifactId: i.targetArtifactId ?? null,
+        candidateQuality: i.candidateQuality ?? null,
+        candidateDegradationsJson: i.candidateDegradationsJson ?? null,
+        candidateSourceContentHash: i.candidateSourceContentHash ?? null,
+        overwritePolicy: i.overwritePolicy ?? null,
+        auditMetadataJson: i.auditMetadataJson ?? '{}',
+        httpStatus: i.httpStatus ?? null,
+        diagnosticPath: i.diagnosticPath ?? null,
       });
     return Number(result.lastInsertRowid);
   }
@@ -115,7 +125,8 @@ export class MigrationAttempts {
   listByItem(migrationJobId: string, sourceItemId: number): AttemptRow[] {
     return this.db
       .prepare(
-        `SELECT * FROM migration_attempts
+        `SELECT ${ATTEMPT_COLUMNS}
+         FROM migration_attempts
          WHERE migration_job_id=? AND source_item_id=? ORDER BY id`,
       )
       .all(migrationJobId, sourceItemId) as AttemptRow[];
@@ -138,20 +149,21 @@ export class MigrationAttempts {
   listByJob(migrationJobId: string): AttemptRow[] {
     return this.db
       .prepare(
-        `SELECT * FROM migration_attempts WHERE migration_job_id=? ORDER BY id`,
+        `SELECT ${ATTEMPT_COLUMNS} FROM migration_attempts WHERE migration_job_id=? ORDER BY id`,
       )
       .all(migrationJobId) as AttemptRow[];
   }
 
-  /** 关闭一条尝试：写入 success/finishedAt 与可选错误信息或覆盖哈希。 */
+  /** 关闭一条尝试：写入 success/finishedAt 与可选错误信息或覆盖哈希。
+   *  id 不存在（或已被级联删除）时抛错，避免审计行停留在未关闭状态而无任何信号。 */
   finishAttempt(id: number, f: FinishAttemptInput): void {
-    this.db
+    const result = this.db
       .prepare(
         `UPDATE migration_attempts
          SET success=@success,
              finished_at=@finishedAt,
-             error_code=@errorCode,
-             error_message=@errorMessage,
+             error_code=COALESCE(@errorCode, error_code),
+             error_message=COALESCE(@errorMessage, error_message),
              expected_written_file_hash=COALESCE(@expectedWrittenFileHash, expected_written_file_hash),
              observed_prewrite_file_hash=COALESCE(@observedPrewriteFileHash, observed_prewrite_file_hash),
              result_written_file_hash=COALESCE(@resultWrittenFileHash, result_written_file_hash),
@@ -171,5 +183,8 @@ export class MigrationAttempts {
         httpStatus: f.httpStatus ?? null,
         diagnosticPath: f.diagnosticPath ?? null,
       });
+    if (result.changes === 0) {
+      throw new Error(`finishAttempt: migration_attempts id=${id} 不存在，尝试未被关闭`);
+    }
   }
 }

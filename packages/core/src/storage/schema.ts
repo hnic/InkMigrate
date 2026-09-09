@@ -1,17 +1,38 @@
 import type { Database } from 'better-sqlite3';
 import { SOURCE_CONTENT_KINDS } from '../domain/models.js';
+import {
+  ARTIFACT_STATUSES,
+  CLEANUP_JOB_STATUS,
+  ITEM_FINAL_STATES,
+  ITEM_PROCESSING_STATES,
+  ITEM_RECOVERABLE_STATES,
+  JOB_STATUS,
+} from '../domain/states.js';
 
 /**
- * §16 当前 Schema 版本。每次 Migration 递增；本常量代表 v1.0 阶段 1 的初始 schema。
+ * §16 当前 Schema 版本（= 最新已应用的 Migration 版本，须与 database.ts 的
+ * MIGRATIONS 注册表最大 version 一致）。每次新增 applySchemaVN 时递增。
  */
 export const SCHEMA_VERSION = 3;
+
+/**
+ * openDatabase 迁移后完整性检查用的关键表清单。维护在 DDL 旁作为单一真相源：
+ * 新增迁移建新表时必须同步更新，否则完整性检查会静默漏检新表。
+ */
+export const REQUIRED_TABLES = [
+  'source_instances', 'target_instances', 'migration_jobs', 'source_items',
+  'assets', 'target_artifacts', 'migration_attempts',
+  'cleanup_plans', 'cleanup_jobs', 'cleanup_items', 'cleanup_action_attempts',
+] as const;
 
 /**
  * §16 全部表的最小字段契约 + CHECK 约束 + 部分唯一索引。
  * Migration 文件按 SCHEMA_VERSION 递增；此处为 v1。
  *
  * 注意事项：
- * - 启动连接时已开启 `PRAGMA foreign_keys = ON`，下方 FK 子句才实际生效。
+ * - FK 生命周期由 openDatabase 管理（迁移期间 OFF，迁移后统一 ON）。
+ *   本函数经 migrate() 包在事务中执行，PRAGMA foreign_keys 在事务内是 no-op，
+ *   不应在此设置——且表重建迁移（v2/v3）本就要求 FK OFF 才能安全执行。
  * - §16.7 `migration_attempts` 与 §16.6 `target_artifacts` 含可空 `source_item_id`，
  *   因 SQLite 对 UNIQUE 中的 NULL 采用 distinct 语义，使用部分唯一索引分别约束。
  * - `schema_version` 表在 `database.ts#migrate` 中也会 IF NOT EXISTS 创建一次，
@@ -19,8 +40,6 @@ export const SCHEMA_VERSION = 3;
  */
 export function applySchemaV1(db: Database): void {
   db.exec(`
-PRAGMA foreign_keys = ON;
-
 CREATE TABLE IF NOT EXISTS schema_version (
   version INTEGER PRIMARY KEY,
   applied_at TEXT NOT NULL
@@ -149,7 +168,7 @@ CREATE TABLE IF NOT EXISTS target_artifacts (
   target_content_hash TEXT,
   written_file_hash TEXT,
   status TEXT NOT NULL
-    CHECK(status IN ('planned','written','verified','conflict','superseded','invalid')),
+    CHECK(status IN (${sqlList(ARTIFACT_STATUSES)})),
   verified_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -309,7 +328,7 @@ CREATE TABLE IF NOT EXISTS migration_jobs_v2 (
   target_instance_id TEXT NOT NULL
     REFERENCES target_instances(id) ON DELETE RESTRICT,
   plan_id TEXT,
-  status TEXT NOT NULL CHECK(status IN ('created','running','paused','interrupted','completed','failed')),
+  status TEXT NOT NULL CHECK(status IN (${sqlList(JOB_STATUS)})),
   current_stage TEXT NOT NULL DEFAULT 'preflight',
   pause_reason_code TEXT,
   paused_at TEXT,
@@ -326,7 +345,9 @@ CREATE TABLE IF NOT EXISTS migration_jobs_v2 (
   updated_at TEXT NOT NULL
 );
 
-INSERT INTO migration_jobs_v2 SELECT * FROM migration_jobs;
+-- 显式列出列名：SELECT * 按位置绑定，未来若调整列序/同型列对调会静默错位拷贝。
+INSERT INTO migration_jobs_v2(id, source_instance_id, target_instance_id, plan_id, status, current_stage, pause_reason_code, paused_at, scan_count, candidate_count, verified_count, degraded_count, failed_count, conflict_count, skipped_count, started_at, finished_at, created_at, updated_at)
+SELECT id, source_instance_id, target_instance_id, plan_id, status, current_stage, pause_reason_code, paused_at, scan_count, candidate_count, verified_count, degraded_count, failed_count, conflict_count, skipped_count, started_at, finished_at, created_at, updated_at FROM migration_jobs;
 DROP TABLE migration_jobs;
 ALTER TABLE migration_jobs_v2 RENAME TO migration_jobs;
 `);
@@ -343,6 +364,13 @@ ALTER TABLE migration_jobs_v2 RENAME TO migration_jobs;
   db.exec(`CREATE INDEX IF NOT EXISTS idx_target_artifacts_source_item ON target_artifacts(source_item_id);`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cleanup_items_job_source ON cleanup_items(job_id, source_item_id);`);
 
+  // SQLite 官方表重建流程：FK 关闭下重建后，用 foreign_key_check 验证引用完整性，
+  // 有违规则直接失败（迁移整体在事务中会回滚），避免提交引用断裂的库。
+  const fkViolationsV2 = db.pragma('foreign_key_check') as unknown[];
+  if (fkViolationsV2.length > 0) {
+    throw new Error(`foreign_key_check failed after v2 rebuild: ${JSON.stringify(fkViolationsV2)}`);
+  }
+
   db.prepare(
     `INSERT INTO schema_version(version, applied_at)
      VALUES (?, ?)
@@ -351,12 +379,17 @@ ALTER TABLE migration_jobs_v2 RENAME TO migration_jobs;
 }
 
 /**
- * 合法值常量，供 applySchemaV3 的 CHECK 约束引用（避免魔法字符串重复）。
+ * 合法值常量，供 CHECK 约束引用（避免魔法字符串重复）。
+ * 状态类清单均从 domain/states.ts 派生（单一真相源，同 CONTENT_KINDS 的做法）：
+ * 此前 schema 手抄列表漏过 'external-link'，适配器一旦产出该值即被 CHECK 拒绝；
+ * 新增状态时若只改 domain 不改这里，同样会在运行期拒绝写入。
  */
 const SOURCE_ITEM_STATUSES = [
-  'discovered', 'queued', 'extracting', 'extracted', 'normalized', 'assets_ready',
-  'writing', 'written', 'verified', 'degraded', 'permanent_failed', 'unsupported',
-  'blocked', 'conflict', 'skipped', 'retryable_failed', 'interrupted',
+  ...new Set([
+    ...ITEM_PROCESSING_STATES,
+    ...ITEM_FINAL_STATES,
+    ...ITEM_RECOVERABLE_STATES,
+  ]),
 ];
 // 与 domain/models.ts 的 SOURCE_CONTENT_KINDS 同源，避免两份列表漂移
 // （此前 schema 漏了 'external-link'，适配器一旦产出该值会被 CHECK 拒绝）。
@@ -413,7 +446,9 @@ CREATE TABLE IF NOT EXISTS source_items_v3 (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
-INSERT INTO source_items_v3 SELECT * FROM source_items;
+-- 显式列出列名：SELECT * 按位置绑定，未来若调整列序/同型列对调会静默错位拷贝。
+INSERT INTO source_items_v3(id, source_instance_id, external_id, fingerprint, stable_key, item_key, stable_short_id, canonical_url, original_url, title, content_kind, source_position, discovered_at, status, quality, degradations_json, retry_count, last_error_code, last_error_message, source_content_hash, source_metadata_json, created_at, updated_at)
+SELECT id, source_instance_id, external_id, fingerprint, stable_key, item_key, stable_short_id, canonical_url, original_url, title, content_kind, source_position, discovered_at, status, quality, degradations_json, retry_count, last_error_code, last_error_message, source_content_hash, source_metadata_json, created_at, updated_at FROM source_items;
 DROP TABLE source_items;
 ALTER TABLE source_items_v3 RENAME TO source_items;
 `);
@@ -434,7 +469,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_source_items_ext
   // target_artifacts.source_item_id 和 cleanup_items.source_item_id 的 FK 指向
   // source_items(id)，DROP+RENAME 后 FK 仍有效（SQLite FK 按表名解析）。
   // 但 migration_attempts.source_item_id 和 assets.source_item_id 同理。
-  // 确认外键完整性：重建后重新启用 FK 检查（迁移在事务中，FK 已开启）。
+  // 引用完整性由函数末尾的 foreign_key_check 显式验证（迁移在 FK=OFF 下执行，
+  // 该 pragma 不依赖连接的 FK 开关，可直接使用）。
 
   // --- cleanup_jobs: 加 status CHECK ---
   db.exec(`
@@ -444,7 +480,7 @@ CREATE TABLE IF NOT EXISTS cleanup_jobs_v3 (
     REFERENCES cleanup_plans(id) ON DELETE RESTRICT,
   plan_hash TEXT NOT NULL,
   action TEXT NOT NULL,
-  status TEXT NOT NULL CHECK(status IN ('created','running','completed','interrupted')),
+  status TEXT NOT NULL CHECK(status IN (${sqlList(CLEANUP_JOB_STATUS)})),
   candidate_count INTEGER NOT NULL,
   processed_count INTEGER NOT NULL DEFAULT 0,
   success_count INTEGER NOT NULL DEFAULT 0,
@@ -456,7 +492,9 @@ CREATE TABLE IF NOT EXISTS cleanup_jobs_v3 (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
-INSERT INTO cleanup_jobs_v3 SELECT * FROM cleanup_jobs;
+-- 显式列出列名：SELECT * 按位置绑定，未来若调整列序/同型列对调会静默错位拷贝。
+INSERT INTO cleanup_jobs_v3(id, plan_id, plan_hash, action, status, candidate_count, processed_count, success_count, skipped_count, failed_count, unknown_count, started_at, finished_at, created_at, updated_at)
+SELECT id, plan_id, plan_hash, action, status, candidate_count, processed_count, success_count, skipped_count, failed_count, unknown_count, started_at, finished_at, created_at, updated_at FROM cleanup_jobs;
 DROP TABLE cleanup_jobs;
 ALTER TABLE cleanup_jobs_v3 RENAME TO cleanup_jobs;
 `);
@@ -484,12 +522,21 @@ CREATE TABLE IF NOT EXISTS cleanup_items_v3 (
   updated_at TEXT NOT NULL,
   UNIQUE(job_id, source_item_id)
 );
-INSERT INTO cleanup_items_v3 SELECT * FROM cleanup_items;
+-- 显式列出列名：SELECT * 按位置绑定，未来若调整列序/同型列对调会静默错位拷贝。
+INSERT INTO cleanup_items_v3(id, job_id, source_item_id, precheck_status, pre_action_state, action_status, post_action_state, attempt_count, action_started_at, action_finished_at, verified_at, last_error_code, last_error_message, diagnostic_path, created_at, updated_at)
+SELECT id, job_id, source_item_id, precheck_status, pre_action_state, action_status, post_action_state, attempt_count, action_started_at, action_finished_at, verified_at, last_error_code, last_error_message, diagnostic_path, created_at, updated_at FROM cleanup_items;
 DROP TABLE cleanup_items;
 ALTER TABLE cleanup_items_v3 RENAME TO cleanup_items;
 `);
   // 重建 cleanup_items 索引
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cleanup_items_job_source ON cleanup_items(job_id, source_item_id);`);
+
+  // SQLite 官方表重建流程：FK 关闭下重建后，用 foreign_key_check 验证引用完整性，
+  // 有违规则直接失败（迁移整体在事务中会回滚），避免提交引用断裂的库。
+  const fkViolationsV3 = db.pragma('foreign_key_check') as unknown[];
+  if (fkViolationsV3.length > 0) {
+    throw new Error(`foreign_key_check failed after v3 rebuild: ${JSON.stringify(fkViolationsV3)}`);
+  }
 
   db.prepare(
     `INSERT INTO schema_version(version, applied_at)

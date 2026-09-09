@@ -27,6 +27,12 @@ export interface TargetArtifactRow {
   verifiedAt?: string;
 }
 
+/** 列清单常量：所有返回整行的查询共用，避免多份 SELECT 投影漂移。 */
+const TARGET_ARTIFACT_COLUMNS = `id, migration_job_id AS migrationJobId, source_item_id AS sourceItemId,
+                artifact_kind AS artifactKind, target_instance_id AS targetInstanceId,
+                relative_path AS relativePath, target_content_hash AS targetContentHash,
+                written_file_hash AS writtenFileHash, status, verified_at AS verifiedAt`;
+
 /** §16.6 target_artifacts 仓储。 */
 export class TargetArtifacts {
   constructor(private db: DB) {}
@@ -38,21 +44,21 @@ export class TargetArtifacts {
          VALUES(@migrationJobId,@sourceItemId,@artifactKind,@targetInstanceId,@relativePath,@targetContentHash,@writtenFileHash,@status,@verifiedAt,@createdAt,@updatedAt)`,
       )
       .run({
-        sourceItemId: null,
-        targetContentHash: null,
-        writtenFileHash: null,
-        verifiedAt: null,
         ...i,
+        // 逐字段 ?? 归一：显式传入的 undefined（可选属性合法，如 index artifact 的
+        // targetContentHash/writtenFileHash 可能缺省）不能覆盖 NULL 默认值，
+        // 否则 better-sqlite3 拒绝 undefined 绑定值而在运行期抛错。
+        sourceItemId: i.sourceItemId ?? null,
+        targetContentHash: i.targetContentHash ?? null,
+        writtenFileHash: i.writtenFileHash ?? null,
+        verifiedAt: i.verifiedAt ?? null,
       });
   }
 
   listByJob(migrationJobId: string): TargetArtifactRow[] {
     return this.db
       .prepare(
-        `SELECT id, migration_job_id AS migrationJobId, source_item_id AS sourceItemId,
-                artifact_kind AS artifactKind, target_instance_id AS targetInstanceId,
-                relative_path AS relativePath, target_content_hash AS targetContentHash,
-                written_file_hash AS writtenFileHash, status, verified_at AS verifiedAt
+        `SELECT ${TARGET_ARTIFACT_COLUMNS}
          FROM target_artifacts WHERE migration_job_id=? ORDER BY id`,
       )
       .all(migrationJobId) as TargetArtifactRow[];
@@ -62,10 +68,7 @@ export class TargetArtifacts {
   findBySourceItem(sourceItemId: number): TargetArtifactRow | undefined {
     return this.db
       .prepare(
-        `SELECT id, migration_job_id AS migrationJobId, source_item_id AS sourceItemId,
-                artifact_kind AS artifactKind, target_instance_id AS targetInstanceId,
-                relative_path AS relativePath, target_content_hash AS targetContentHash,
-                written_file_hash AS writtenFileHash, status, verified_at AS verifiedAt
+        `SELECT ${TARGET_ARTIFACT_COLUMNS}
          FROM target_artifacts
          WHERE source_item_id=? AND status='verified'
          ORDER BY id DESC LIMIT 1`,
@@ -88,10 +91,7 @@ export class TargetArtifacts {
   ): TargetArtifactRow | undefined {
     return this.db
       .prepare(
-        `SELECT id, migration_job_id AS migrationJobId, source_item_id AS sourceItemId,
-                artifact_kind AS artifactKind, target_instance_id AS targetInstanceId,
-                relative_path AS relativePath, target_content_hash AS targetContentHash,
-                written_file_hash AS writtenFileHash, status, verified_at AS verifiedAt
+        `SELECT ${TARGET_ARTIFACT_COLUMNS}
          FROM target_artifacts
          WHERE target_instance_id=? AND relative_path=?`,
       )
@@ -121,7 +121,12 @@ export class TargetArtifacts {
     };
     for (const [k, v] of Object.entries(u)) {
       if (v === undefined) continue;
-      sets.push(`${map[k]} = @${k}`);
+      // 白名单守卫：未知键拼进 SET 会生成 `undefined = @x` 这类难解的语法错误
+      const column = map[k];
+      if (column === undefined) {
+        throw new Error(`updateCommitted: 未知字段 "${k}"（id=${id}）`);
+      }
+      sets.push(`${column} = @${k}`);
       params[k] = v;
     }
     if (sets.length === 0) return;
@@ -166,28 +171,12 @@ export class TargetArtifacts {
     }[];
   }
 
-  /** §13.8 列出某 Job 下所有 index artifact（relativePath + 哈希），用于索引重跑保护。 */
-  listIndexArtifacts(
-    migrationJobId: string,
-  ): { relativePath: string; writtenFileHash: string | null }[] {
-    // R6: better-sqlite3 对 SQL NULL 返回 null（非 undefined）。原类型标注 string | undefined
-    // 是类型谎言，下游 job-runner 用 !== undefined 过滤会漏掉 null 值。
-    return this.db
-      .prepare(
-        `SELECT relative_path AS relativePath, written_file_hash AS writtenFileHash
-         FROM target_artifacts
-         WHERE migration_job_id = ? AND artifact_kind = 'index'`,
-      )
-      .all(migrationJobId) as {
-      relativePath: string;
-      writtenFileHash: string | null;
-    }[];
-  }
-
   /**
    * R4-M9: 列出某 target_instance 下所有 index artifact（跨 job），用于索引重跑保护。
    * 原按 migration_job_id 查询 → 新 job 的 listIndexArtifacts 返回空 →
    * 用户编辑的索引文件被静默覆盖。改为按 target_instance_id 查询。
+   *（R6: writtenFileHash 为 SQL NULL 时 better-sqlite3 返回 null 而非 undefined，
+   *  下游需用 != null 过滤；按 job 查询的旧变体已删除，统一走本方法。）
    */
   listIndexArtifactsByTarget(
     targetInstanceId: string,
