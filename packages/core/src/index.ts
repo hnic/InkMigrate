@@ -56,6 +56,12 @@ export { sanitizeFilename } from './security/filenames.js';
 export type { SanitizeOptions } from './security/filenames.js';
 export { decodeHtmlEntities } from './security/entities.js';
 
+// assets
+// §12.10 图片下载管线（SSRF 防护/Magic Bytes/流式上限/退避重试）。
+// 由 source-toutiao 迁入：PRD §15.6 要求 Evernote 正文远程 <img> 走同一管线。
+export { downloadImage } from './assets/image-downloader.js';
+export type { DownloadInput, DownloadResult } from './assets/image-downloader.js';
+
 // config
 export { ConfigSchema } from './config/schema.js';
 export type { InkMigrateConfig } from './config/schema.js';
