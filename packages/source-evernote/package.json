@@ -28,7 +28,6 @@
   "devDependencies": {
     "@inkmigrate/target-obsidian": "workspace:*",
     "@inkmigrate/testkit": "workspace:*",
-    "@types/dompurify": "^3.0.5",
     "@types/jsdom": "^21.1.7",
     "@types/node": "^24.0.0",
     "@types/sax": "^1.2.5",

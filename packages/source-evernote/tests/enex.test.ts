@@ -372,15 +372,16 @@ describe('streamNotes 游标续读（§15.3 大文件顺序提取）', () => {
     expect(all).toHaveLength(2);
 
     // 顺序提取：先 #1，再从游标续读 #2
+    // （停止窗口与续读窗口一样，同块内可能多解析一条：按 ordinal 断言，不在回调内 expect）
+    const first: RawNote[] = [];
     const cursorOut = await streamNotes(path, {
       stopAfterOrdinal: 1,
-      onNote: (n) => {
-        expect(n.ordinal).toBe(1);
-      },
+      onNote: (n) => first.push(n),
     });
     const cursor = cursorOut.cursor!;
     // 小文件单块即完：游标保守停在块前边界（ordinal 可能仍为 0）——续读正确性为准
     expect(typeof cursor.offset).toBe('number');
+    expect(first.map((n) => n.ordinal)).toContain(1);
 
     const second: RawNote[] = [];
     const out2 = await streamNotes(path, {

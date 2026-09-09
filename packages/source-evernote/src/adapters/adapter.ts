@@ -2,6 +2,7 @@ import {
   computeFingerprint,
   downloadImage,
   type SourceAdapter,
+  type SourceAsset,
   type SourceItem,
   type SourceItemRef,
   type SourceLink,
@@ -30,7 +31,7 @@ import { enmlToHtml } from '../enml/enml-to-html.js';
 import { extractHtmlNote, scanHtmlNote } from '../html/html-export.js';
 import { createHash } from 'node:crypto';
 import { createReadStream, statSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
 
 /**
  * §15 Evernote 来源适配器.
@@ -90,11 +91,15 @@ interface ScanState {
 
 /** HTML 文件的导出根：包含它的那个输入路径（文件输入取其父目录）。 */
 function exportRootFor(htmlPath: string, inputRoots: readonly string[]): string {
-  let best = dirname(htmlPath);
+  const absHtml = resolve(htmlPath);
+  let best = dirname(absHtml);
   for (const root of inputRoots) {
-    if (htmlPath === root || htmlPath.startsWith(`${root}/`)) {
-      if (root.length >= best.length) best = root;
-    }
+    // 两侧统一绝对化后按 path.relative 判定包含，避免 ./ 前缀、尾斜杠、
+    // 分隔符差异等形态不一致导致误判回退到父目录
+    const absRoot = resolve(root);
+    const rel = relative(absRoot, absHtml);
+    const contains = rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+    if (contains && absRoot.length >= best.length) best = absRoot;
   }
   return best;
 }
@@ -109,6 +114,29 @@ function refMetaOf(ref: SourceItemRef): { enex?: EnexRefMetadata; html?: HtmlRef
   return meta;
 }
 
+/**
+ * §15.10 GUID 映射项：scan 与跨进程懒重建（ensureGuidMap）共用同一条目构造，
+ * 保证两侧指纹输入（含 createdIso）与覆盖语义（重复 GUID 后者覆盖）完全一致，
+ * 避免 resume 后内部链接解析到不同目标。
+ */
+function guidMapEntryOf(
+  file: EnexFileInfo,
+  n: Pick<RawNote, 'guid' | 'ordinal' | 'title' | 'created'>,
+): { title: string; fingerprint: string } {
+  const { fingerprint } = buildNoteIdentity({
+    guid: n.guid,
+    fileSha256: file.sha256,
+    ordinal: n.ordinal,
+    title: n.title,
+    createdIso: enexTimeToIso(n.created),
+    fileBaseName: file.baseName,
+  });
+  return {
+    title: n.title.length > 0 ? n.title : `未命名笔记 #${n.ordinal}`,
+    fingerprint,
+  };
+}
+
 async function sha256FileQuick(path: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const h = createHash('sha256');
@@ -117,6 +145,41 @@ async function sha256FileQuick(path: string): Promise<string> {
     s.on('error', reject);
     s.on('end', () => resolve(h.digest('hex')));
   });
+}
+
+/**
+ * §15.6 远程图片下载（ENEX 与 HTML 导出共用同一管线）：各请求相互独立，
+ * 并行执行以免逐张串行累加网络延迟；失败按张计数，由调用方记降级。
+ */
+async function downloadRemoteImages(
+  remotes: readonly { url: string }[],
+  cfg: EvernoteSourceConfig,
+): Promise<{ assets: SourceAsset[]; okCount: number; failCount: number }> {
+  const results = await Promise.all(
+    remotes.map((remote) =>
+      downloadImage({ url: remote.url, maxBytes: cfg.assets.maxImageBytes, maxRetries: 1 }),
+    ),
+  );
+  const assets: SourceAsset[] = [];
+  let okCount = 0;
+  let failCount = 0;
+  for (let i = 0; i < remotes.length; i += 1) {
+    const r = results[i];
+    if (r.ok) {
+      okCount += 1;
+      assets.push({
+        originalUrl: remotes[i].url,
+        mimeType: r.mimeType,
+        byteSize: r.byteSize,
+        sha256: `sha256:${createHash('sha256').update(r.bytes).digest('hex')}`,
+        kind: 'image',
+        data: r.bytes,
+      });
+    } else {
+      failCount += 1;
+    }
+  }
+  return { assets, okCount, failCount };
 }
 
 type EvernoteAdapter = SourceAdapter & { __scanState?: ScanState };
@@ -137,7 +200,11 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
    * 新实例、映射为空——首次 extract 懒重建（ensureGuidMap），内部链接不降级。
    */
   const guidMap = new Map<string, { title: string; fingerprint: string }>();
-  let guidMapBuilt = false;
+  /**
+   * 映射就绪承诺：缓存进行中的重建，并发 extract 共享同一次重建而非各自空跑；
+   * 失败时清空，下次调用可重试（不缓存半成品映射）。
+   */
+  let guidMapReady: Promise<void> | undefined;
   /**
    * §15.3 大文件顺序提取游标：文件 → 已解析到的换行对齐字节边界。
    * job-runner 按扫描顺序提取 → 单调推进 → 每文件总读取 ≈ 一次全量 + 每条一块。
@@ -146,34 +213,28 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
   const cursors = new Map<string, import('../enex/sax-notes.js').StreamCursor>();
 
   /** 懒重建 GUID 映射：流式重读全部 ENEX 的轻量头（仅当 scan 未构建过）。 */
-  const ensureGuidMap = async (workspaceDir: string): Promise<void> => {
-    if (guidMapBuilt) return;
-    guidMapBuilt = true;
-    const inputRoots = resolveInputPaths(cfg.inputPaths, workspaceDir);
-    const { files } = await collectEnexFiles(inputRoots, cfg.stackSeparator, {
-      includeHtml: cfg.formats.includes('html'),
-    });
-    for (const file of files) {
-      await streamNotes(file.path, {
-        headerOnly: true,
-        onNote: (n) => {
-          if (n.guid === undefined) return;
-          const key = n.guid.toLowerCase();
-          if (guidMap.has(key)) return;
-          const { fingerprint } = buildNoteIdentity({
-            guid: n.guid,
-            fileSha256: file.sha256,
-            ordinal: n.ordinal,
-            title: n.title,
-            fileBaseName: file.baseName,
+  const ensureGuidMap = (workspaceDir: string): Promise<void> => {
+    if (guidMapReady === undefined) {
+      guidMapReady = (async () => {
+        const inputRoots = resolveInputPaths(cfg.inputPaths, workspaceDir);
+        const { files } = await collectEnexFiles(inputRoots, cfg.stackSeparator, {
+          includeHtml: cfg.formats.includes('html'),
+        });
+        for (const file of files) {
+          await streamNotes(file.path, {
+            headerOnly: true,
+            onNote: (n) => {
+              if (n.guid === undefined) return;
+              guidMap.set(n.guid.toLowerCase(), guidMapEntryOf(file, n));
+            },
           });
-          guidMap.set(key, {
-            title: n.title.length > 0 ? n.title : `未命名笔记 #${n.ordinal}`,
-            fingerprint,
-          });
-        },
+        }
+      })().catch((err: unknown) => {
+        guidMapReady = undefined; // 失败不缓存半成品映射，允许下次重试
+        throw err;
       });
     }
+    return guidMapReady;
   };
 
   const adapter: EvernoteAdapter = {
@@ -199,6 +260,7 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
       scanState.issues = [];
       scanState.skippedInputs = [];
       guidMap.clear();
+      guidMapReady = undefined;
       const inputRoots = resolveInputPaths(cfg.inputPaths, ctx.workspaceDir);
       const includeHtml = cfg.formats.includes('html');
       const { files, htmlFiles, skipped, warnings } = await collectEnexFiles(
@@ -213,7 +275,7 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
         const notes: Array<{
           ordinal: number;
           title: string;
-          createdIso: string | undefined;
+          created: RawNote['created'];
           guid: string | undefined;
         }> = [];
         const outcome = await streamNotes(file.path, {
@@ -222,7 +284,7 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
             notes.push({
               ordinal: n.ordinal,
               title: n.title,
-              createdIso: enexTimeToIso(n.created),
+              created: n.created,
               guid: n.guid,
             }),
           onIssue: (msg) => scanState.issues.push(`${file.baseName}.enex: ${msg}`),
@@ -238,11 +300,11 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
             fileSha256: file.sha256,
             ordinal: n.ordinal,
             title: n.title,
-            createdIso: n.createdIso,
+            createdIso: enexTimeToIso(n.created),
             fileBaseName: file.baseName,
           });
           if (n.guid !== undefined) {
-            guidMap.set(n.guid.toLowerCase(), { title: refTitle, fingerprint });
+            guidMap.set(n.guid.toLowerCase(), guidMapEntryOf(file, n));
           }
           const meta: EnexRefMetadata = {
             path: file.path,
@@ -273,39 +335,47 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
       // §15.12 HTML 导出：每条 .html 一个笔记
       if (includeHtml) {
         for (const htmlPath of htmlFiles) {
-          const exportRoot = exportRootFor(htmlPath, inputRoots);
-          const header = scanHtmlNote(htmlPath, exportRoot);
-          const fingerprint = computeFingerprint({
-            raw: [header.fileSha256, header.title].join('\0'),
-          });
-          // §15.5 notebookKey 对 HTML 导出按目录维度推导（目录路径 + 笔记本名）
-          const relDir = dirname(header.relPath);
-          const htmlNotebookKey = createHash('sha256')
-            .update(`${relDir}\0${header.notebook}`)
-            .digest('hex');
-          yield {
-            sourceInstanceId: cfg.sourceInstanceId,
-            externalId: `html:${header.relPath}`,
-            title: header.title,
-            contentKind: 'note',
-            discoveredAt: new Date().toISOString(),
-            fingerprint,
-            sourceMetadata: {
-              html: {
-                path: header.path,
-                relPath: header.relPath,
-                fileSha256: header.fileSha256,
-                notebook: header.notebook,
-                ...(header.resourcesDir !== undefined ? { resourcesDir: header.resourcesDir } : {}),
-                exportRoot,
-                notePathSegments: buildNotePathSegments(header.notebook, htmlNotebookKey, undefined, cfg.notebookShortId),
+          let htmlRef: SourceItemRef;
+          try {
+            const exportRoot = exportRootFor(htmlPath, inputRoots);
+            const header = scanHtmlNote(htmlPath, exportRoot);
+            const fingerprint = computeFingerprint({
+              raw: [header.fileSha256, header.title].join('\0'),
+            });
+            // §15.5 notebookKey 对 HTML 导出按目录维度推导（目录路径 + 笔记本名）
+            const relDir = dirname(header.relPath);
+            const htmlNotebookKey = createHash('sha256')
+              .update(`${relDir}\0${header.notebook}`)
+              .digest('hex');
+            htmlRef = {
+              sourceInstanceId: cfg.sourceInstanceId,
+              externalId: `html:${header.relPath}`,
+              title: header.title,
+              contentKind: 'note',
+              discoveredAt: new Date().toISOString(),
+              fingerprint,
+              sourceMetadata: {
+                html: {
+                  path: header.path,
+                  relPath: header.relPath,
+                  fileSha256: header.fileSha256,
+                  notebook: header.notebook,
+                  ...(header.resourcesDir !== undefined ? { resourcesDir: header.resourcesDir } : {}),
+                  exportRoot,
+                  notePathSegments: buildNotePathSegments(header.notebook, htmlNotebookKey, undefined, cfg.notebookShortId),
+                },
               },
-            },
-          };
+            };
+          } catch (err) {
+            // §15.3 损坏隔离：HTML 文件不可读/解析失败时记录问题，文件级继续
+            scanState.issues.push(`${htmlPath}: ${(err as Error).message}`);
+            continue;
+          }
+          yield htmlRef;
         }
       }
       // scan 已完整构建 GUID 映射；后续 extract 不再懒重建
-      guidMapBuilt = true;
+      guidMapReady = Promise.resolve();
     },
 
     async extract(ref, ctx): Promise<SourceItem> {
@@ -318,10 +388,15 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
       // 大文件（GB 级）逐条全文件 SHA 不可行：size+mtime 未变走快速路径，变化再算 SHA 终判。
       const filePath = meta.enex?.path ?? meta.html?.path;
       const expectedSha = meta.enex?.fileSha256 ?? meta.html?.fileSha256;
+      if (filePath === undefined || expectedSha === undefined) {
+        throw new Error(
+          `ref ${ref.externalId} 的 sourceMetadata 缺少文件路径/哈希（非本适配器产出的 ref）`,
+        );
+      }
       let integrityOk = false;
       if (meta.enex !== undefined) {
         try {
-          const st = statSync(filePath!);
+          const st = statSync(filePath);
           if (st.size === meta.enex.sizeBytes && st.mtimeMs === meta.enex.mtimeMs) {
             integrityOk = true;
           }
@@ -330,10 +405,10 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
         }
       }
       if (!integrityOk) {
-        const currentSha = await sha256FileQuick(filePath!);
+        const currentSha = await sha256FileQuick(filePath);
         if (currentSha !== expectedSha) {
           throw new Error(
-            `导出文件在扫描后被修改：${filePath}（期望 ${expectedSha!.slice(0, 8)}，实际 ${currentSha.slice(0, 8)}），请重新扫描`,
+            `导出文件在扫描后被修改：${filePath}（期望 ${expectedSha.slice(0, 8)}，实际 ${currentSha.slice(0, 8)}），请重新扫描`,
           );
         }
       }
@@ -342,7 +417,12 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
       if (meta.html !== undefined) {
         return extractHtmlAsItem(ref, meta.html, cfg);
       }
-      const enexMeta = meta.enex!;
+      const enexMeta = meta.enex;
+      if (enexMeta === undefined) {
+        throw new Error(
+          `ref ${ref.externalId} is missing sourceMetadata.enex/.html (not produced by this adapter)`,
+        );
+      }
 
       let raw: RawNote | undefined;
       const prevCursor = cursors.get(enexMeta.path) ?? { ordinal: 0, offset: 0 };
@@ -398,28 +478,11 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
       const degradations: SourceItem['degradations'] = [];
       const warnings: string[] = [];
       if (cfg.assets.downloadImages && transform.remoteImages.length > 0) {
-        let okCount = 0;
-        let failCount = 0;
-        for (const remote of transform.remoteImages) {
-          const r = await downloadImage({
-            url: remote.url,
-            maxBytes: cfg.assets.maxImageBytes,
-            maxRetries: 1,
-          });
-          if (r.ok) {
-            okCount += 1;
-            assets.push({
-              originalUrl: remote.url,
-              mimeType: r.mimeType,
-              byteSize: r.byteSize,
-              sha256: `sha256:${createHash('sha256').update(r.bytes).digest('hex')}`,
-              kind: 'image',
-              data: r.bytes,
-            });
-          } else {
-            failCount += 1;
-          }
-        }
+        const { assets: downloaded, okCount, failCount } = await downloadRemoteImages(
+          transform.remoteImages,
+          cfg,
+        );
+        assets.push(...downloaded);
         if (failCount > 0) {
           degradations.push({
             code: 'asset-incomplete',
@@ -516,16 +579,15 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
           : {}),
       };
 
+      // §15.8 updatedAt 缺失时回退 createdAt
+      const effectiveUpdatedAt = updatedIso ?? createdIso;
+
       return {
         ref,
         title: ref.title ?? (note.title.length > 0 ? note.title : '未命名笔记'),
         ...(attrs.author !== undefined ? { author: attrs.author } : {}),
         ...(createdIso !== undefined ? { createdAt: createdIso } : {}),
-        ...(updatedIso !== undefined
-          ? { updatedAt: updatedIso }
-          : createdIso !== undefined
-            ? { updatedAt: createdIso }
-            : {}),
+        ...(effectiveUpdatedAt !== undefined ? { updatedAt: effectiveUpdatedAt } : {}),
         bodyHtml: transform.html,
         ...(transform.html.length > 0
           ? { bodyText: transform.html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() }
@@ -568,28 +630,11 @@ async function extractHtmlAsItem(
 
   // §15.6 远程图片下载（与 ENEX 路径同一管线；默认关闭不发起网络请求）
   if (cfg.assets.downloadImages && result.remoteImages.length > 0) {
-    let okCount = 0;
-    let failCount = 0;
-    for (const remote of result.remoteImages) {
-      const r = await downloadImage({
-        url: remote.url,
-        maxBytes: cfg.assets.maxImageBytes,
-        maxRetries: 1,
-      });
-      if (r.ok) {
-        okCount += 1;
-        assets.push({
-          originalUrl: remote.url,
-          mimeType: r.mimeType,
-          byteSize: r.byteSize,
-          sha256: `sha256:${createHash('sha256').update(r.bytes).digest('hex')}`,
-          kind: 'image',
-          data: r.bytes,
-        });
-      } else {
-        failCount += 1;
-      }
-    }
+    const { assets: downloaded, okCount, failCount } = await downloadRemoteImages(
+      result.remoteImages,
+      cfg,
+    );
+    assets.push(...downloaded);
     if (failCount > 0) {
       degradations.push({
         code: 'asset-incomplete',

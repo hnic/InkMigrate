@@ -150,7 +150,14 @@ export function extractHtmlNote(path: string, exportRoot: string): HtmlExtractRe
     if (ref.startsWith('http://') || ref.startsWith('https://') || ref.startsWith('evernote://') || ref.startsWith('#')) {
       return null;
     }
-    const abs = resolve(noteDir, decodeURIComponent(ref.split('#')[0] ?? ref));
+    // 剥离 ?query/#fragment 后解码；非法百分号编码（如 src="file%zz.png"）按缺失处理
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(ref.split(/[?#]/)[0]);
+    } catch {
+      return null;
+    }
+    const abs = resolve(noteDir, decoded);
     if (!isPathInside(abs, exportRoot)) return null;
     try {
       const st = lstatSync(abs);
@@ -162,7 +169,11 @@ export function extractHtmlNote(path: string, exportRoot: string): HtmlExtractRe
     }
   };
 
+  // 同一文件的重复引用只读取/哈希一次，共用同一 asset 与 URI
+  const assetByPath = new Map<string, { asset: SourceAsset; uri: string }>();
   const buildAsset = (abs: string): { asset: SourceAsset; uri: string } => {
+    const cached = assetByPath.get(abs);
+    if (cached !== undefined) return cached;
     const bytes = readFileSync(abs);
     const sha256Hex = createHash('sha256').update(bytes).digest('hex');
     const sniffed = sniffMime(new Uint8Array(bytes));
@@ -174,7 +185,7 @@ export function extractHtmlNote(path: string, exportRoot: string): HtmlExtractRe
       fileName = `${stem}-${sha256Hex.slice(0, 8)}${ext}`;
     }
     seenNames.add(fileName.toLowerCase());
-    return {
+    const built = {
       asset: {
         externalId: sha256Hex.slice(0, 32),
         originalUrl: evernoteResourceUri(sha256Hex),
@@ -187,6 +198,8 @@ export function extractHtmlNote(path: string, exportRoot: string): HtmlExtractRe
       },
       uri: evernoteResourceUri(sha256Hex),
     };
+    assetByPath.set(abs, built);
+    return built;
   };
 
   // PASS 1（未清洗 DOM）：定位本地资源引用并标记，收集外链
@@ -204,11 +217,12 @@ export function extractHtmlNote(path: string, exportRoot: string): HtmlExtractRe
       continue;
     }
     const { asset, uri } = buildAsset(abs);
+    // 先标记：去重命中的引用也要重写 src（否则重复引用保留失效的相对路径）
+    img.setAttribute(markAttr, uri);
     if (seenSha.has(asset.sha256!)) continue; // 同内容去重（引用走同一 URI）
     seenSha.add(asset.sha256!);
     result.assets.push(asset);
     result.resolvedResources += 1;
-    img.setAttribute(markAttr, uri);
   }
 
   for (const a of [...doc.querySelectorAll('a')]) {
@@ -260,12 +274,15 @@ export function extractHtmlNote(path: string, exportRoot: string): HtmlExtractRe
   }
 
   const body = doc.body;
+  // 标题从当前 DOM 一次提取（PASS 1/2 仅处理 img/a，标题节点原样），
+  // 避免为一次比对再对原始 HTML 做完整的第二次 JSDOM 解析；
+  // <title> 位于 <head>，本就不会进入 body.innerHTML，无需移除
   const titleEl = doc.querySelector('title');
   const h1 = doc.querySelector('h1');
-  // 标题节点不重复进正文（文件名 <title> 与 h1 与正文头重复）
-  if (titleEl !== null) titleEl.remove();
-  if (h1 !== null && (h1.textContent ?? '').trim() === extractTitleFromHtml(html)) {
-    h1.remove();
+  let titleText = titleEl?.textContent?.trim() ?? '';
+  if (titleText.length === 0) titleText = h1?.textContent?.trim() ?? '';
+  if (h1 !== null && (h1.textContent ?? '').trim() === titleText) {
+    h1.remove(); // 标题节点不重复进正文（文件名 <title> 与 h1 与正文头重复）
   }
 
   result.bodyHtml = sanitizeNoteHtml(body.innerHTML);

@@ -42,11 +42,19 @@ export function buildNoteIdentity(i: NoteIdentityInput): NoteIdentity {
       fingerprint: computeFingerprint({ raw: `guid:${guid}` }),
     };
   }
-  // App Link 优先（§15.4）；否则 file#ordinal（数据库 external_id 在来源实例内唯一）
-  const externalId =
-    i.appLink !== undefined && i.appLink.length > 0
-      ? `evernote-link:${i.appLink}`
-      : `enex:${i.fileBaseName}#${i.ordinal}`;
+  // App Link 优先（§15.4）：去空白并统一小写（同一链接不因大小写/空白差异分裂身份），
+  // 仅接受 evernote:// 链接，非 Evernote URL 不得冒充第 2 级身份
+  const appLink = i.appLink?.trim().toLowerCase();
+  if (appLink !== undefined && appLink.startsWith('evernote://')) {
+    return {
+      externalId: `evernote-link:${appLink}`,
+      // 与第 1 级同理：externalId 跨导出稳定 → 指纹同样不含易变的文件哈希，
+      // 否则重复导出时 externalId 相同而指纹变化，去重/已验证跳过失效
+      fingerprint: computeFingerprint({ raw: `link:${appLink}` }),
+    };
+  }
+  // 否则 file#ordinal（数据库 external_id 在来源实例内唯一）
+  const externalId = `enex:${i.fileBaseName}#${i.ordinal}`;
   const raw = [i.fileSha256, String(i.ordinal), i.title, i.createdIso ?? ''].join('\0');
   return {
     externalId,

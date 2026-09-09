@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { createReadStream, readdirSync, statSync, lstatSync } from 'node:fs';
+import { createReadStream, readdirSync, lstatSync } from 'node:fs';
+import type { Dirent, Stats } from 'node:fs';
 import { basename, extname, resolve } from 'node:path';
 
 /**
@@ -70,6 +71,17 @@ function isResourcesDir(name: string): boolean {
   return name.endsWith('.resources') || name === '_resources';
 }
 
+type ExportKind = 'enex' | 'notes' | 'html' | 'other';
+
+/** 统一的扩展名分类：walk() 目录遍历与 collectEnexFiles() 直接文件输入共用，避免两份逻辑漂移。 */
+function classifyExportFile(name: string, includeHtml: boolean): ExportKind {
+  const ext = extname(name).toLowerCase();
+  if (ext === '.enex') return 'enex';
+  if (ext === '.notes') return 'notes';
+  if (ext === '.html' && includeHtml) return 'html';
+  return 'other';
+}
+
 /** 递归收集 .enex/.notes/.html 文件；符号链接一律跳过（防路径逃逸）。
  * dirStack：子文件的缺省 Stack——evernote-backup 导出把 Stack 输出为目录
  * （`<Stack>/<笔记本>.enex`，§15.5 目录约定），文件名 Stack@@@ 分隔符仍优先。 */
@@ -83,11 +95,19 @@ function walk(
   dirStack: string | undefined,
   dirStackByFile: Map<string, string | undefined>,
 ): void {
-  let entries;
+  let entries: Dirent[];
   try {
     entries = readdirSync(root, { withFileTypes: true });
-  } catch {
-    skipped.push(`${root}/ (不可读)`);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    // 权限错误意味着目录内容未知（其中可能藏有 .notes），按 §15.2.1 显式失败，
+    // 不得静默跳过——skip 记录比抛错更容易被漏看
+    if (code === 'EACCES' || code === 'EPERM') {
+      throw new Error(
+        `无法读取目录 ${root}（${code}）：无法确认其中是否包含 .notes 导出文件，请修正目录权限后重试`,
+      );
+    }
+    skipped.push(`${root}/ (不可读: ${code ?? 'unknown'})`);
     return;
   }
   // 排序保证扫描顺序确定（同目录下按名字），重跑幂等
@@ -105,14 +125,20 @@ function walk(
       continue;
     }
     if (!e.isFile()) continue;
-    const ext = extname(e.name).toLowerCase();
-    if (ext === '.enex') {
-      enex.push(full);
-      dirStackByFile.set(full, dirStack);
+    switch (classifyExportFile(e.name, includeHtml)) {
+      case 'enex':
+        enex.push(full);
+        dirStackByFile.set(full, dirStack);
+        break;
+      case 'notes':
+        notes.push(full);
+        break;
+      case 'html':
+        html.push(full);
+        break;
+      default:
+        skipped.push(full);
     }
-    else if (ext === '.notes') notes.push(full);
-    else if (ext === '.html' && includeHtml) html.push(full);
-    else skipped.push(full);
   }
 }
 
@@ -161,13 +187,20 @@ export async function collectEnexFiles(
     if (st.isDirectory()) {
       walk(p, enexPaths, notesPaths, htmlPaths, skipped, includeHtml, undefined, dirStackByFile);
     } else if (st.isFile()) {
-      const ext = extname(p).toLowerCase();
-      if (ext === '.enex') {
-        enexPaths.push(p);
-        dirStackByFile.set(p, undefined); // 输入根直连文件：无目录 Stack
-      } else if (ext === '.notes') notesPaths.push(p);
-      else if (ext === '.html' && includeHtml) htmlPaths.push(p);
-      else skipped.push(p);
+      switch (classifyExportFile(p, includeHtml)) {
+        case 'enex':
+          enexPaths.push(p);
+          dirStackByFile.set(p, undefined); // 输入根直连文件：无目录 Stack
+          break;
+        case 'notes':
+          notesPaths.push(p);
+          break;
+        case 'html':
+          htmlPaths.push(p);
+          break;
+        default:
+          skipped.push(p);
+      }
     } else {
       skipped.push(`${p} (非普通文件)`);
     }
@@ -184,13 +217,26 @@ export async function collectEnexFiles(
     stack: string | undefined;
     notebook: string;
     mergeKey: string | null;
-    sha: string;
     sizeBytes: number;
     mtimeMs: number;
   }
   const drafts: Draft[] = [];
   const matchedMappingKeys = new Set<string>();
   for (const p of enexPaths) {
+    let st: Stats;
+    try {
+      // lstat：walk 后文件被删除或被替换为符号链接时不跟随（防路径逃逸/TOCTOU），
+      // 不可访问的文件记入 skipped 文件级继续，与遍历阶段的隔离行为一致
+      st = lstatSync(p);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      skipped.push(`${p} (扫描后不可访问${code !== undefined ? `: ${code}` : ''})`);
+      continue;
+    }
+    if (!st.isFile()) {
+      skipped.push(`${p} (非普通文件)`);
+      continue;
+    }
     const baseName = basename(p, extname(p));
     let { stack, notebook } = splitStackNotebook(baseName, stackSeparator);
     // evernote-backup Stack 目录约定：文件名无 Stack 分隔符时取父目录名
@@ -212,14 +258,12 @@ export async function collectEnexFiles(
         `${baseName}.enex：无 Stack 信息，无法自动还原笔记本组层级（可用 notebookMappings 手动指定）`,
       );
     }
-    const st = statSync(p);
     drafts.push({
       path: p,
       baseName,
       stack,
       notebook,
       mergeKey,
-      sha: await sha256File(p),
       sizeBytes: st.size,
       mtimeMs: st.mtimeMs,
     });
@@ -250,19 +294,40 @@ export async function collectEnexFiles(
       createHash('sha256').update(`merge\0${mk}\0${info.stack ?? ''}\0${info.notebook}`).digest('hex'),
     );
   }
-  const files: EnexFileInfo[] = drafts.map((d) => ({
-    path: d.path,
-    baseName: d.baseName,
-    stack: d.stack,
-    notebook: d.notebook,
-    notebookKey:
-      d.mergeKey !== null
-        ? (mergeKeys.get(d.mergeKey)!)
-        : createHash('sha256').update(`${d.sha}\0${d.stack ?? ''}\0${d.notebook}`).digest('hex'),
-    sha256: d.sha,
-    sizeBytes: d.sizeBytes,
-    mtimeMs: d.mtimeMs,
-  }));
+  // 各文件的 SHA-256 相互独立：并行计算并用固定并发上限约束句柄/内存占用
+  // （大导出数百个 .enex 时避免逐文件串行浪费 I/O 与 CPU 重叠）；
+  // 单文件读取失败记入 skipped，文件级继续
+  const HASH_CONCURRENCY = 8;
+  const shas = new Map<string, string>();
+  for (let i = 0; i < drafts.length; i += HASH_CONCURRENCY) {
+    await Promise.all(
+      drafts.slice(i, i + HASH_CONCURRENCY).map(async (d) => {
+        try {
+          shas.set(d.path, await sha256File(d.path));
+        } catch (err) {
+          skipped.push(`${d.path} (读取失败: ${(err as Error).message})`);
+        }
+      }),
+    );
+  }
+  const files: EnexFileInfo[] = [];
+  for (const d of drafts) {
+    const sha = shas.get(d.path);
+    if (sha === undefined) continue; // 读取失败的已记入 skipped
+    files.push({
+      path: d.path,
+      baseName: d.baseName,
+      stack: d.stack,
+      notebook: d.notebook,
+      notebookKey:
+        d.mergeKey !== null
+          ? (mergeKeys.get(d.mergeKey)!)
+          : createHash('sha256').update(`${sha}\0${d.stack ?? ''}\0${d.notebook}`).digest('hex'),
+      sha256: sha,
+      sizeBytes: d.sizeBytes,
+      mtimeMs: d.mtimeMs,
+    });
+  }
   return {
     files,
     htmlFiles: htmlPaths.sort((a, b) => a.localeCompare(b, 'en')),
@@ -277,13 +342,15 @@ export function splitStackNotebook(
   separator: string,
 ): { stack?: string | undefined; notebook: string } {
   const idx = baseName.indexOf(separator);
+  // 守卫保证分隔符两侧均有内容（空分隔符时 indexOf 返回 0，同样被 idx <= 0 拦截）；
+  // 仅按第一个分隔符拆分（`Stack@@@Notebook` 命名约定，后续分隔符归笔记本名）
   if (idx <= 0 || idx >= baseName.length - separator.length) {
     return { notebook: baseName };
   }
-  const stack = baseName.slice(0, idx);
-  const notebook = baseName.slice(idx + separator.length);
-  if (stack.length === 0 || notebook.length === 0) return { notebook: baseName };
-  return { stack, notebook };
+  return {
+    stack: baseName.slice(0, idx),
+    notebook: baseName.slice(idx + separator.length),
+  };
 }
 
 /** 相对输入路径锚定 workspaceDir（绝对路径原样保留）。 */

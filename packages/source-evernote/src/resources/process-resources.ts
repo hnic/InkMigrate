@@ -66,6 +66,13 @@ const EXT_BY_MIME: Record<string, string> = {
   'application/zip': 'zip',
 };
 
+/** 常见 MIME 别名 → 规范形式（仅用于一致性比对，不改写 actualMime/文件名）。 */
+const MIME_ALIASES: Record<string, string> = {
+  'image/jpg': 'image/jpeg',
+  'image/pjpeg': 'image/jpeg',
+  'image/x-png': 'image/png',
+};
+
 export function extForMime(mime: string): string {
   return EXT_BY_MIME[mime] ?? 'bin';
 }
@@ -80,7 +87,9 @@ export function decodeBase64Strict(b64Text: string): Base64DecodeResult {
     return { ok: false, error: 'base64 contains illegal characters' };
   }
   if (compact.length % 4 !== 0) return { ok: false, error: 'base64 length not a multiple of 4' };
-  const padding = compact.endsWith('==') ? 2 : compact.endsWith('=') ? 1 : 0;
+  let padding = 0;
+  if (compact.endsWith('==')) padding = 2;
+  else if (compact.endsWith('=')) padding = 1;
   const expectedLen = (compact.length / 4) * 3 - padding;
   const bytes = Buffer.from(compact, 'base64');
   // 防御：Node 解码器对非法字符静默忽略，长度对不上时按解码失败处理
@@ -127,6 +136,20 @@ export function processResources(
   let mimeMismatches = 0;
 
   raws.forEach((raw, index) => {
+    // 预估解码后大小（含填充修正），超限直接拒绝——否则超大 <data> 会先把
+    // base64 字符串与解码 Buffer 全量物化进内存，限制起不到约束峰值内存的作用
+    const compact = raw.dataBase64.replace(/\s+/g, '');
+    let padding = 0;
+    if (compact.endsWith('==')) padding = 2;
+    else if (compact.endsWith('=')) padding = 1;
+    const estBytes = Math.floor(compact.length / 4) * 3 - padding;
+    if (estBytes > opts.maxResourceBytes) {
+      failures.push({
+        index,
+        reason: `resource ~${estBytes}B exceeds maxResourceBytes ${opts.maxResourceBytes}B`,
+      });
+      return;
+    }
     const decoded = decodeBase64Strict(raw.dataBase64);
     if (!decoded.ok) {
       failures.push({ index, reason: decoded.error });
@@ -149,14 +172,18 @@ export function processResources(
     const md5Hex = createHash('md5').update(bytes).digest('hex');
     if (seenSha.has(sha256Hex)) {
       duplicates += 1;
-      return; // §15.7.6：同笔记内去重，引用走同一 enex-resource URI
+      // §15.7.6：同笔记内去重，引用走同一 enex-resource URI；
+      // 保留首个副本的元数据（attachment/fileName 等），后续副本的差异被丢弃
+      return;
     }
     seenSha.add(sha256Hex);
 
     const declaredMime = raw.mime.trim().toLowerCase() || 'application/octet-stream';
     const sniffed = sniffMime(bytes);
     const actualMime = sniffed ?? declaredMime;
-    const mimeMismatch = sniffed !== null && sniffed !== declaredMime;
+    // 比对前归一常见别名（image/jpg 声明 + image/jpeg 嗅探不算不一致）
+    const normalizedDeclared = MIME_ALIASES[declaredMime] ?? declaredMime;
+    const mimeMismatch = sniffed !== null && sniffed !== normalizedDeclared;
     if (mimeMismatch) mimeMismatches += 1;
     const kind = assetKindOf(actualMime);
     const ext = extForMime(actualMime);
@@ -170,16 +197,24 @@ export function processResources(
     if (cleanedOriginal.length > 0) {
       fileName = cleanedOriginal;
       if (!fileName.toLowerCase().endsWith(`.${ext}`)) {
-        // 原扩展名与实际类型不符：以实际类型为准（保留主名，替换扩展名）
+        // 原扩展名与实际类型不符：以实际类型为准（保留主名，替换扩展名）；
+        // dotfile（如 ".gitignore"）主名会被替换为空，此时保留原名追加扩展
         const stem = fileName.replace(/\.[^.]+$/, '');
-        fileName = `${stem}.${ext}`;
+        fileName = stem.length > 0 ? `${stem}.${ext}` : `${fileName}.${ext}`;
       }
     } else {
       fileName = `${String(resources.length + 1).padStart(3, '0')}.${ext}`;
     }
     if (seenNames.has(fileName.toLowerCase())) {
+      // 后缀消歧可能仍撞名（前一个资源恰好叫 stem-<同sha8>），循环直到唯一
       const stem = fileName.replace(/\.[^.]+$/, '');
-      fileName = `${stem}-${sha256Hex.slice(0, 8)}.${ext}`;
+      let candidate = `${stem}-${sha256Hex.slice(0, 8)}.${ext}`;
+      let n = 1;
+      while (seenNames.has(candidate.toLowerCase())) {
+        n += 1;
+        candidate = `${stem}-${sha256Hex.slice(0, 8)}-${n}.${ext}`;
+      }
+      fileName = candidate;
     }
     seenNames.add(fileName.toLowerCase());
 

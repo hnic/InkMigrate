@@ -2,8 +2,10 @@ export {
   createEvernoteSource,
   lastScanIssues,
   type EnexRefMetadata,
+  type EnexFileInfo,
+  type ProcessedResource,
+  type HtmlRefMetadata,
 } from './adapters/adapter.js';
-export type { EnexFileInfo, ProcessedResource } from './adapters/adapter.js';
 export {
   SOURCE_EVERNOTE_KIND,
   SOURCE_EVERNOTE_VERSION,
@@ -45,4 +47,3 @@ export {
   type HtmlNoteHeader,
   type HtmlExtractResult,
 } from './html/html-export.js';
-export type { HtmlRefMetadata } from './adapters/adapter.js';
