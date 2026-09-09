@@ -5,7 +5,7 @@ import type {
   TargetContext,
   IndexEntryInput,
 } from '../adapters/adapter.js';
-import type { SourceItemRef } from '../domain/models.js';
+import type { SourceItem, SourceItemRef } from '../domain/models.js';
 import type { ItemFinalState, ItemRecoverableState, FinalStateCounts } from '../domain/states.js';
 import { MigrationJobs } from '../storage/repositories/migration-jobs.js';
 import { SourceItems } from '../storage/repositories/source-items.js';
@@ -274,6 +274,8 @@ export async function runMigrationJob(
       skipped: 0,
     };
     let rateLimited = false;
+    // §15.10 未解析内部链接（进入报告 unresolved-links.csv）
+    const unresolvedLinks: Array<{ note: string; text: string; url: string }> = [];
     try {
     for (let idx = 0; idx < refs.length; idx++) {
       const ref = refs[idx]!;
@@ -311,6 +313,13 @@ export async function runMigrationJob(
         retryPolicy: DEFAULT_RETRY_POLICY,
         signal: abortController.signal,
         ...(i.onLog !== undefined ? { onLog: i.onLog } : {}),
+        onItemExtracted: (item) => {
+          for (const l of item.links) {
+            if (l.kind === 'internal') {
+              unresolvedLinks.push({ note: ref.title ?? '', text: l.text, url: l.url });
+            }
+          }
+        },
       }).catch((e): ItemFinalState => {
         // §18.2 限流检测：processOneItem 抛出 RateLimitedError 时 Job 进入 paused
         if (e instanceof RateLimitedError) {
@@ -586,6 +595,10 @@ export async function runMigrationJob(
     if (reconciliation.reason !== undefined) {
       reportInput.reconciliationReason = reconciliation.reason;
     }
+    // §15.10 未解析内部链接明细（Evernote 等保留原链接的场景）
+    if (unresolvedLinks.length > 0) {
+      reportInput.unresolvedLinks = unresolvedLinks;
+    }
     generateMigrationReport(reportInput);
 
     // 确定 final status
@@ -676,6 +689,8 @@ interface ProcessOneItemInput {
   signal?: AbortSignal;
   /** 日志回调（可选），把条目级诊断（失败/降级/冲突）转发到调用方。 */
   onLog?: (level: 'info' | 'warn' | 'error', message: string) => void;
+  /** §15.10 条目提取成功回调（可选）：报告层收集未解析内部链接等明细。 */
+  onItemExtracted?: (item: SourceItem) => void;
 }
 
 async function processOneItem(
@@ -720,6 +735,8 @@ async function processOneItem(
       i.retryPolicy,
       i.signal,
     );
+    // §15.10 报告明细钩子（如未解析内部链接收集）
+    i.onItemExtracted?.(item);
 
     // §17.5 质量升级检测
     const upgradeInput: Parameters<typeof isQualityUpgradeCandidate>[0] = {

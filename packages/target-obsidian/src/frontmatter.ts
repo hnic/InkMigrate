@@ -30,7 +30,39 @@ export function stringifyFrontmatter(i: FrontmatterInput): string {
   if (i.item.ref.canonicalUrl !== undefined) {
     props.source_url = i.item.ref.canonicalUrl;
   }
-  // M8: 仅写入稳定溯源字段（值跨 resume 不变，不破坏 targetContentHash 幂等性）
+  // M8: 仅写入稳定溯源字段（值跨 resume 不变，不破坏 targetContentHash 幂等性）。
+  // 以下条件字段（§15.8/§15.9）同为提取期确定值，幂等性不受影响；
+  // 缺失即不写——头条等未携带的字段对其输出零影响。
+  if (i.item.tags.length > 0) {
+    props.tags = i.item.tags;
+  }
+  if (i.item.author !== undefined) {
+    props.author = i.item.author;
+  }
+  if (i.item.createdAt !== undefined) {
+    props.created_at = i.item.createdAt;
+  }
+  if (i.item.updatedAt !== undefined) {
+    props.updated_at = i.item.updatedAt;
+  }
+  const sm = i.item.sourceMetadata as {
+    notebook?: string;
+    stack?: string;
+    source_url?: string;
+    source_type?: string;
+  };
+  if (sm?.notebook !== undefined) {
+    props.source_notebook = sm.notebook;
+  }
+  if (sm?.stack !== undefined) {
+    props.source_stack = sm.stack;
+  }
+  if (props.source_url === undefined && sm?.source_url !== undefined) {
+    props.source_url = sm.source_url;
+  }
+  if (sm?.source_type !== undefined) {
+    props.source_type = sm.source_type;
+  }
   props.source_content_hash = i.sourceContentHash;
   props.inkmigrate_id = i.stableKey;
 

@@ -10,6 +10,13 @@ export interface ReportItemRow {
   contentKind: string;
 }
 
+/** §15.10 未解析内部链接明细（来源笔记 / 链接文字 / 目标 URI）。 */
+export interface UnresolvedLinkRow {
+  note: string;
+  text: string;
+  url: string;
+}
+
 export interface ReportInput {
   reportsDir: string;
   jobId: string;
@@ -19,13 +26,15 @@ export interface ReportInput {
   items: readonly ReportItemRow[];
   reconciliationOk: boolean;
   reconciliationReason?: string;
+  /** §15.10：非空时输出 unresolved-links.csv。 */
+  unresolvedLinks?: readonly UnresolvedLinkRow[];
 }
 
 /**
  * §21.2 生成迁移报告。
  *
  * 输出 summary.json / summary.md + items.csv / failed-items.csv /
- * degraded-items.csv / conflicts.csv。
+ * degraded-items.csv / conflicts.csv（+ §15.10 unresolved-links.csv，如有）。
  *
  * failed_count = permanent_failed + unsupported + blocked（§11.9）。
  */
@@ -107,4 +116,12 @@ export function generateMigrationReport(i: ReportInput): void {
     join(jobDir, 'conflicts.csv'),
     itemsArr.filter((it) => it['status'] === 'conflict'),
   );
+
+  // §15.10 未解析内部链接（Evernote 等来源保留原链接时的对账明细）
+  if (i.unresolvedLinks !== undefined && i.unresolvedLinks.length > 0) {
+    writeCsv(
+      join(jobDir, 'unresolved-links.csv'),
+      i.unresolvedLinks as unknown as Record<string, unknown>[],
+    );
+  }
 }

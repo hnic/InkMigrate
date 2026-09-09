@@ -431,6 +431,13 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
         warnings.push(
           `内部链接：重写 ${transform.resolvedInternalLinks}，未解析 ${transform.internalLinks.length}（保留原始链接，§15.10）`,
         );
+        // §15.10 明细（job-runner 汇入报告 unresolved-links.csv）
+        for (const l of transform.internalLinks.slice(0, 20)) {
+          warnings.push(`未解析内部链接：${l.text.length > 0 ? l.text : '(无文字)'} → ${l.url}`);
+        }
+        if (transform.internalLinks.length > 20) {
+          warnings.push(`未解析内部链接：… 等共 ${transform.internalLinks.length} 条`);
+        }
       }
       const unreferenced = processed.resources.filter(
         (r) => !transform.html.includes(`enex-resource://${r.md5Hex}`),

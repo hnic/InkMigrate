@@ -179,6 +179,24 @@ describe('evernote e2e migrate', () => {
       const remoteNote = mdFiles.find((m) => m.content.includes('剪藏笔记'))!.content;
       expect(remoteNote).toContain('https://example.invalid/remote.png');
 
+      // §15.10 未解析内部链接进入报告 unresolved-links.csv
+      const reportFiles: string[] = [];
+      const walkReports = (d: string) => {
+        for (const e of readdirSync(d, { withFileTypes: true })) {
+          const full = join(d, e.name);
+          if (e.isDirectory()) walkReports(full);
+          else reportFiles.push(full);
+        }
+      };
+      walkReports(join(w.dbDir, 'reports'));
+      const csvPath = reportFiles.find((f) => f.endsWith('unresolved-links.csv'));
+      expect(csvPath).toBeDefined();
+      const csv = readFileSync(csvPath!, 'utf8');
+      // interlinks 的失效链接 + resources-named 的无 GUID 链接
+      expect(csv).toContain('99999999-8888-7777-6666-555555555555');
+      expect(csv).toContain('笔记甲');
+      expect(csv.split('\n').length).toBeGreaterThanOrEqual(3); // 表头 + ≥2 行数据
+
       // 幂等重跑（§24.5 #6）：无新增文件、对账仍通过
       const before = mdFiles.length;
       const r2 = await setupAndRun(w.dbDir, w.vaultDir, w.inputDir, 2);

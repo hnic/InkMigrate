@@ -46,9 +46,55 @@ describe('stringifyFrontmatter (§13.5 精简模式)', () => {
     // 其余被移除的字段不出现
     expect(fm).not.toContain('inkmigrate_version');
     expect(fm).not.toContain('source_instance');
-    expect(fm).not.toContain('source_type');
-    expect(fm).not.toContain('tags:');
-    expect(fm).not.toContain('author:');
+    // §15.8/§15.9：tags/author 是提取期稳定值（M8 原则允许写入）；
+    // notebook/stack 为 Evernote 专属条件字段，本 fixture 不出现
+    expect(fm).not.toContain('source_notebook:');
+    expect(fm).not.toContain('source_stack:');
+  });
+
+  it('§15.8/§15.9 条件字段：Evernote 条目写入 tags/author/时间/笔记本且幂等稳定', () => {
+    const evernoteItem = {
+      ...item,
+      title: '带附件的笔记',
+      tags: ['阅读', '项目/子项'],
+      author: '张三',
+      createdAt: '2019-05-03T08:20:00Z',
+      updatedAt: '2025-11-12T16:45:00Z',
+      sourceMetadata: {
+        notebook: 'Projects',
+        stack: 'Work',
+        source_url: 'https://example.com/original',
+        source_type: 'web.clip',
+      },
+    };
+    const fm = stringifyFrontmatter({
+      item: evernoteItem,
+      stableKey,
+      migrationJobId: 'mig-x',
+      inkmigrateVersion: 1,
+      sourceContentHash: 'sha256:abc',
+      importedAt: '2026-06-22T14:30:00+08:00',
+    });
+    const parsed = parse(fm.slice(4, -4));
+    expect(parsed.tags).toEqual(['阅读', '项目/子项']);
+    expect(parsed.author).toBe('张三');
+    expect(parsed.created_at).toBe('2019-05-03T08:20:00Z');
+    expect(parsed.updated_at).toBe('2025-11-12T16:45:00Z');
+    expect(parsed.source_notebook).toBe('Projects');
+    expect(parsed.source_stack).toBe('Work');
+    // ref.canonicalUrl 优先；sourceMetadata.source_url 仅在无 canonicalUrl 时回填
+    expect(parsed.source_url).toBe(item.ref.canonicalUrl);
+    expect(parsed.source_type).toBe('web.clip');
+    // 同输入重渲染逐字节一致（幂等）
+    const fm2 = stringifyFrontmatter({
+      item: evernoteItem,
+      stableKey,
+      migrationJobId: 'mig-y', // job id 变化不得影响输出
+      inkmigrateVersion: 1,
+      sourceContentHash: 'sha256:abc',
+      importedAt: '2027-01-01T00:00:00+08:00',
+    });
+    expect(fm2).toBe(fm);
   });
 
   it('omits source_url when ref has no canonicalUrl', () => {
