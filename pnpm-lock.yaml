@@ -14,6 +14,9 @@ importers:
       '@inkmigrate/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@inkmigrate/source-evernote':
+        specifier: workspace:*
+        version: link:../../packages/source-evernote
       '@inkmigrate/source-toutiao':
         specifier: workspace:*
         version: link:../../packages/source-toutiao

@@ -4,6 +4,7 @@ import {
   runMigrationJob,
   MigrationJobs,
   computeFingerprint,
+  loadConfigFromString,
   validateSourceItemQuality,
   ensureInstance,
   type SourceAdapter,
@@ -20,9 +21,10 @@ import {
   profilePath,
   profileExists,
 } from '@inkmigrate/source-toutiao';
+import { createEvernoteSource } from '@inkmigrate/source-evernote';
 import { createObsidianTarget } from '@inkmigrate/target-obsidian';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { parsePositiveInt } from '../util.js';
 
 /**
@@ -42,6 +44,7 @@ export function createMigrateCommand(): Command {
     .requiredOption('--state-dir <path>', 'workspace stateDir')
     .requiredOption('--vault-path <path>', 'Obsidian Vault 路径')
     .option('--fixture-dir <path>', 'fixture HTML 目录（测试模式，不启动浏览器）')
+    .option('--config <path>', 'inkmigrate.yaml 配置路径（按 adapter 选择来源类型）', 'inkmigrate.yaml')
     .option('--favorites-url <url>', '收藏列表 URL（真实模式）')
     .option('--max-items <n>', '限制扫描+迁移条目数（用于测试）')
     .option('--interval <ms>', '条目间请求间隔毫秒数（默认 1500，防风控）')
@@ -54,6 +57,7 @@ export function createMigrateCommand(): Command {
       stateDir: string;
       vaultPath: string;
       fixtureDir?: string;
+      config?: string;
       favoritesUrl?: string;
       maxItems?: string;
       interval?: string;
@@ -65,30 +69,66 @@ export function createMigrateCommand(): Command {
         const jobId = `mig-${Date.now()}`;
         const now = new Date().toISOString();
 
+        // §10.2 配置驱动的适配器选择：inkmigrate.yaml 中 adapter: evernote 的来源
+        // 走文件源（ENEX/HTML 导出目录，无需浏览器登录）。未命中配置时维持
+        // toutiao 浏览器流程（含 --fixture-dir 测试模式）。
+        let sourceAdapterKind = 'toutiao';
+        let evernoteAdapter: SourceAdapter | undefined;
+        let evernoteInstanceConfig: Record<string, unknown> | undefined;
+        const configPath = resolve(opts.config ?? 'inkmigrate.yaml');
+        if (existsSync(configPath)) {
+          const cfg = loadConfigFromString(readFileSync(configPath, 'utf8'));
+          const src = cfg.sources.find((s) => s.id === opts.source);
+          if (src !== undefined && src.adapter === 'evernote') {
+            if (!src.enabled) {
+              console.error(`来源 ${opts.source} 在配置中处于 enabled: false 状态，已跳过。`);
+              process.exit(1);
+            }
+            const raw = src.config as Record<string, unknown>;
+            const inputPaths = Array.isArray(raw.inputPaths)
+              ? (raw.inputPaths as string[]).map((p) => resolve(dirname(configPath), p))
+              : [];
+            if (inputPaths.length === 0) {
+              console.error(`来源 ${opts.source} 缺少 inputPaths（ENEX/HTML 导出目录）。`);
+              process.exit(1);
+            }
+            evernoteAdapter = createEvernoteSource({
+              sourceInstanceId: src.id,
+              ...raw,
+              inputPaths,
+            });
+            evernoteInstanceConfig = raw;
+            sourceAdapterKind = 'evernote';
+          }
+        }
+
         // 构造 source adapter
-        const sourceAdapter = opts.fixtureDir
-          ? createFixtureSource(opts.fixtureDir, opts.source)
-          : (() => {
-              const profileDir = profilePath(opts.stateDir, opts.source);
-              if (!profileExists(opts.stateDir, opts.source)) {
-                console.error(`未找到 Profile：${profileDir}`);
-                console.error(
-                  `请先运行：inkmigrate auth login --source ${opts.source} --state-dir ${opts.stateDir}`,
-                );
-                process.exit(1);
-              }
-              return createToutiaoSource({
-                sourceInstanceId: opts.source,
-                profileDir,
-                headless: false, // 有头：头条反爬会拦截 headless
-                ...(opts.favoritesUrl !== undefined
-                  ? { favoritesUrl: opts.favoritesUrl }
-                  : {}),
-                ...(opts.maxItems !== undefined
-                  ? { maxScanItems: parsePositiveInt(opts.maxItems, 'max-items') }
-                  : {}),
-              });
-            })();
+        const sourceAdapter =
+          evernoteAdapter !== undefined
+            ? evernoteAdapter
+            : opts.fixtureDir
+              ? createFixtureSource(opts.fixtureDir, opts.source)
+              : (() => {
+                  const profileDir = profilePath(opts.stateDir, opts.source);
+                  if (!profileExists(opts.stateDir, opts.source)) {
+                    console.error(`未找到 Profile：${profileDir}`);
+                    console.error(
+                      `请先运行：inkmigrate auth login --source ${opts.source} --state-dir ${opts.stateDir}`,
+                    );
+                    process.exit(1);
+                  }
+                  return createToutiaoSource({
+                    sourceInstanceId: opts.source,
+                    profileDir,
+                    headless: false, // 有头：头条反爬会拦截 headless
+                    ...(opts.favoritesUrl !== undefined
+                      ? { favoritesUrl: opts.favoritesUrl }
+                      : {}),
+                    ...(opts.maxItems !== undefined
+                      ? { maxScanItems: parsePositiveInt(opts.maxItems, 'max-items') }
+                      : {}),
+                  });
+                })();
 
         // 构造 target adapter + context
         // intervalMs 作为 runMigrationJob 一级字段传入（§18.1 类型化速率控制契约），
@@ -112,11 +152,19 @@ export function createMigrateCommand(): Command {
         // H5: 确保实例记录存在——移到 config 构造后，传入实际 config 以计算真实
         // config_hash（原硬编码 'h' 与 Engine 的真实哈希分叉，导致 CLI 创建的 instance
         // 随后被 GUI 迁移看到哈希「变化」触发虚假 UPDATE）。
-        ensureInstance(db, opts.source, 'toutiao', 'source', {
-          sourceInstanceId: opts.source,
-          profileDir: profilePath(opts.stateDir, opts.source),
-          headless: false,
-        });
+        ensureInstance(
+          db,
+          opts.source,
+          sourceAdapterKind,
+          'source',
+          sourceAdapterKind === 'evernote'
+            ? (evernoteInstanceConfig ?? {})
+            : {
+                sourceInstanceId: opts.source,
+                profileDir: profilePath(opts.stateDir, opts.source),
+                headless: false,
+              },
+        );
         ensureInstance(db, opts.target, 'obsidian', 'target', targetContext.targetConfig);
 
         new MigrationJobs(db).create({

@@ -15,6 +15,8 @@ export const EvernoteSourceConfigSchema = z
       .array(z.enum(['enex', 'html']))
       .min(1)
       .default(['enex']),
+    /** §15.5 笔记本名推断策略；当前仅实现 filename（ENEX/HTML 文件名推断）。 */
+    notebookNameStrategy: z.literal('filename').default('filename'),
     /** §15.5 `Stack@@@Notebook.enex` 命名约定的分隔符。 */
     stackSeparator: z.string().min(1).default('@@@'),
     assets: z

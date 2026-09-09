@@ -14,6 +14,7 @@
   "dependencies": {
     "@inkmigrate/core": "workspace:*",
     "@inkmigrate/source-toutiao": "workspace:*",
+    "@inkmigrate/source-evernote": "workspace:*",
     "@inkmigrate/target-obsidian": "workspace:*",
     "commander": "^12.1.0"
   },
