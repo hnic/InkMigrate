@@ -37,6 +37,12 @@ export const EvernoteSourceConfigSchema = z
       .default({}),
     /** §15.8 地理位置显式启用（默认关闭：位置信息敏感性高）。 */
     includeGeolocation: z.boolean().default(false),
+    /**
+     * §15.5 笔记本目录是否携带 notebookKey 前 8 位后缀（防同名笔记本合并）。
+     * 默认 true（PRD 冲突安全要求）；false 时目录用纯笔记本名——同名笔记本
+     * 会落入同一目录，适合已知无同名的干净导出。
+     */
+    notebookShortId: z.boolean().default(true),
     assets: z
       .object({
         /** §15.6 正文远程 <img> 是否按 §12.10 管线下载。默认关闭（不发起网络请求）。 */

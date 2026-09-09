@@ -50,6 +50,20 @@ export const ObsidianTargetConfigSchema = z
     /** §13.4 文件名主体最大长度，默认 100。 */
     maxFilenameLength: z.number().int().positive().default(100),
     /**
+     * §13.4 笔记文件名是否携带 stableShortId 后缀（`标题-<shortId>.md`）。
+     * 默认 true（重跑幂等的关键）。false 时为纯标题名：同目录同名标题靠
+     * plan 阶段 -2/-3 序号兜底，重跑/续跑可能产生副本——适合一次性迁移、
+     * 追求干净文件名的场景。
+     */
+    filenameShortId: z.boolean().default(true),
+    /**
+     * §13.7 附件目录布局：
+     * - `by-note`（默认）`：<attachmentsSubdir>/<sourceInstanceId>/<itemKey>/<file>`，跨笔记隔离。
+     * - `flat`：`<attachmentsSubdir>/<file>` 直接平铺；同名但内容不同的资源
+     *   在 plan 阶段检测到磁盘冲突时自动追加 `-<sha256前8位>` 后缀。
+     */
+    attachmentPathLayout: z.enum(['by-note', 'flat']).default('by-note'),
+    /**
      * §13.8 分片索引分组维度（有序数组）。默认 `['month', 'content-type']`。
      * 可组合 `month`、`content-type`、`collection`。空数组 = 单一分片。
      * 供 Obsidian 适配器的 renderIndex 生成分片索引用。

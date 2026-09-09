@@ -310,17 +310,16 @@ describe('createEvernoteSource', () => {
       // §15.10 第二遍：互链重写为 evernote-wikilink:// 伪链接（目标端转 wikilink），
       // 未解析的保留原链接
       const a = await adapter.extract(refs.find((r) => r.title === '笔记甲')!, ctx);
+      // 新伪链接形态：evernote-wikilink://<64 位指纹>/<编码标题>（布局由目标端解析）
       expect(a.bodyHtml).toMatch(
-        new RegExp(`href="evernote-wikilink://${encodeURIComponent('笔记乙')}-[0-9a-f]{10}"`),
+        /href="evernote-wikilink:\/\/[0-9a-f]{64}\/(%[0-9A-F]{2})+"/,
       );
       expect(a.bodyHtml).toContain('evernote:///view/999/s1/99999999-8888-7777-6666-555555555555');
       expect(a.links.filter((l) => l.kind === 'internal')).toHaveLength(1); // 仅未解析的
       expect(a.extractionWarnings.join('\n')).toContain('内部链接：重写 1，未解析 1');
 
       const b = await adapter.extract(refs.find((r) => r.title === '笔记乙')!, ctx);
-      expect(b.bodyHtml).toMatch(
-        new RegExp(`href="evernote-wikilink://${encodeURIComponent('笔记甲')}-[0-9a-f]{10}"`),
-      );
+      expect(b.bodyHtml).toMatch(/evernote-wikilink:\/\/[0-9a-f]{64}\//);
       await adapter.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });

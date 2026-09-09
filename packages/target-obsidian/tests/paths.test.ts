@@ -18,6 +18,8 @@ const baseConfig: ObsidianTargetConfig = {
   overwritePolicy: 'preserve',
   collectionMapping: { toTags: false, toFolders: false },
   maxFilenameLength: 100,
+  filenameShortId: true,
+  attachmentPathLayout: 'by-note',
 };
 
 let vault: string;
@@ -241,5 +243,55 @@ describe('noteRelativePath §13.3 notePathSegments（Evernote 笔记本层级）
       notePathSegments: [],
     });
     expect(p).toContain('/笔记/');
+  });
+});
+
+
+describe('自定义布局（filenameShortId / flat 附件 / 空 importSubdir）', () => {
+  const custom: ObsidianTargetConfig = {
+    ...baseConfig,
+    importSubdir: '',
+    attachmentsSubdir: 'Attachments',
+    attachmentPathLayout: 'flat',
+    filenameShortId: false,
+  };
+  it('importSubdir 空 + 无 shortId：笔记位于 <source>/<目录段>/<标题>.md', () => {
+    const p = noteRelativePath({
+      config: custom,
+      sourceInstanceId: 'evernote-archive',
+      contentKind: 'note',
+      title: '不要让苹果手机镜头成为摆设',
+      stableShortId: '22789a4ac1',
+      notePathSegments: ['灵感'],
+    });
+    expect(p).toBe('evernote-archive/灵感/不要让苹果手机镜头成为摆设.md');
+  });
+  it('flat 附件：<Attachments>/<文件名>，无来源/条目层级', () => {
+    const p = assetRelativePath({
+      config: custom,
+      sourceInstanceId: 'evernote-archive',
+      itemKey: 'im-0123456789abcdef',
+      filename: '照片.png',
+    });
+    expect(p).toBe('Attachments/照片.png');
+  });
+  it('by-note 默认布局不受影响', () => {
+    const p = assetRelativePath({
+      config: baseConfig,
+      sourceInstanceId: 'evernote-archive',
+      itemKey: 'im-0123456789abcdef',
+      filename: '照片.png',
+    });
+    expect(p).toBe('Attachments/InkMigrate/evernote-archive/im-0123456789abcdef/照片.png');
+  });
+  it('importSubdir 空时索引目录仍含来源段（与 index-generator 语义一致）', () => {
+    const p = noteRelativePath({
+      config: { ...baseConfig, importSubdir: '' },
+      sourceInstanceId: 'toutiao-main',
+      contentKind: 'article',
+      title: '标题',
+      stableShortId: 'aaaaaaaaaa',
+    });
+    expect(p).toBe('toutiao-main/文章/标题-aaaaaaaaaa.md');
   });
 });

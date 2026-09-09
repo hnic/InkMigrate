@@ -1,9 +1,6 @@
 import {
   computeFingerprint,
-  computeStableKey,
-  deriveStableShortId,
   downloadImage,
-  sanitizeFilename,
   type SourceAdapter,
   type SourceItem,
   type SourceItemRef,
@@ -74,13 +71,14 @@ export interface HtmlRefMetadata {
   notePathSegments: string[];
 }
 
-/** §13.3/§15.5：笔记本目录段 = [Stack?, `<笔记本名>-<notebookKey 前 8 位>`]。 */
+/** §13.3/§15.5：笔记本目录段 = [Stack?, `<笔记本名>[-<notebookKey前8位>]`]。 */
 export function buildNotePathSegments(
   notebook: string,
   notebookKey: string,
   stack: string | undefined,
+  shortId = true,
 ): string[] {
-  const notebookDir = `${notebook}-${notebookKey.slice(0, 8)}`;
+  const notebookDir = shortId ? `${notebook}-${notebookKey.slice(0, 8)}` : notebook;
   return stack !== undefined && stack.length > 0 ? [stack, notebookDir] : [notebookDir];
 }
 
@@ -256,7 +254,7 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
             notebook: file.notebook,
             stack: file.stack,
             notebookKey: file.notebookKey,
-            notePathSegments: buildNotePathSegments(file.notebook, file.notebookKey, file.stack),
+            notePathSegments: buildNotePathSegments(file.notebook, file.notebookKey, file.stack, cfg.notebookShortId),
             ...(n.guid !== undefined ? { guid: n.guid.toLowerCase() } : {}),
           };
           yield {
@@ -300,7 +298,7 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
                 notebook: header.notebook,
                 ...(header.resourcesDir !== undefined ? { resourcesDir: header.resourcesDir } : {}),
                 exportRoot,
-                notePathSegments: buildNotePathSegments(header.notebook, htmlNotebookKey, undefined),
+                notePathSegments: buildNotePathSegments(header.notebook, htmlNotebookKey, undefined, cfg.notebookShortId),
               },
             },
           };
@@ -384,17 +382,14 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
       );
 
       // §15.6 ENML 转换
-      // §15.10 第二遍：GUID → 指向目标文件名的伪链接（目标文件名 =
-      // sanitizeFilename(标题) + '-' + stableShortId，按目标端 §13.4 默认参数推得；
-      // 目标端把 evernote-wikilink:// 后处理为 Obsidian wikilink）
+      // §15.10 第二遍：GUID → evernote-wikilink://<指纹>/<编码标题> 伪链接。
+      // 携带稳定身份（指纹）而非最终文件名——目标端按自己的命名布局
+      // （filenameShortId 开关）解析出真实文件名，布局解耦。
       const resolveGuidLink = (guid: string): string | undefined => {
         const target = guidMap.get(guid.toLowerCase());
         if (target === undefined) return undefined;
-        const shortId = deriveStableShortId(
-          computeStableKey(cfg.sourceInstanceId, target.fingerprint),
-        );
-        // 目标端 maxFilenameLength=100，扣除 `-${shortId}` 后的主体上限
-        return `${sanitizeFilename(target.title, { maxLength: 89 })}-${shortId}`;
+        const fp = target.fingerprint.replace(/^sha256:/, '');
+        return `${fp}/${encodeURIComponent(target.title)}`;
       };
       const transform = enmlToHtml(note.content ?? '', resourceByMd5, { resolveGuidLink });
 

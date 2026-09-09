@@ -1317,6 +1317,12 @@ package: @inkmigrate/target-obsidian
 
 来源实例 ID 必须进入输出路径，避免多个账号或多次导出相互覆盖。Evernote 笔记本目录必须包含确定性的 `notebook-short-id`；仅使用笔记本显示名称不满足冲突安全要求。有 Stack 的笔记本位于对应 Stack 目录下，无 Stack 的笔记本直接位于 `evernote-archive/` 下，不创建共享的“无 Stack 笔记本”目录。v1.0 不要求创建 `_索引`，v1.1 启用索引时才生成。
 
+布局自定义选项（默认值保持上述规范结构，用户可显式覆盖）：
+
+- `importSubdir: ""`：省略 `Imports/InkMigrate` 段，笔记位于 `<sourceInstanceId>/...`（来源段始终保留）。
+- `filenameShortId: false`（§13.4）：笔记文件名不带 `-<stableShortId>` 后缀；同名标题靠 `-2/-3` 序号兜底，重跑可能产生副本——适合一次性迁移的干净命名。
+- `attachmentPathLayout: "flat"`（§13.7）：附件直接平铺于 `<attachmentsSubdir>/`；plan 阶段检测到同名异内容时自动追加 `-<sha256 前 8 位>` 后缀，同名同内容幂等覆写。
+
 ### 13.4 文件名和稳定键规则
 
 推荐：
@@ -1329,7 +1335,7 @@ package: @inkmigrate/target-obsidian
 
 - `stableKey = SHA-256(sourceInstanceId + "\0" + fingerprint)`。
 - `itemKey = im-<stableKey 前 16 位>`，用于附件和诊断目录。
-- `stable-short-id = <stableKey 前 10 位>`，用于文件名后缀。
+- `stable-short-id = <stableKey 前 10 位>`，用于文件名后缀（`filenameShortId: false` 时省略，见 §13.3 布局选项）。
 - 若数据库中检测到前缀碰撞，按 16 位、24 位直至完整值延长；选定长度后必须持久化。
 
 通用规则：
@@ -1943,7 +1949,7 @@ InkMigrate 不直接登录 Evernote，不要求账号密码，不将 Evernote AP
 - 支持 `Stack@@@Notebook.enex` 命名约定重建目录层次。
 - 默认导出缺少 Stack 信息时，报告必须说明无法自动还原。
 - 每个笔记本计算 `notebookKey = SHA-256(exportFileHash + "\0" + normalizedStack + "\0" + normalizedNotebookName)`。
-- 目标目录使用 `<笔记本>-<notebook-short-id>/`，其中短 ID 默认取 `notebookKey` 前 8 位，碰撞时延长并持久化。
+- 目标目录使用 `<笔记本>-<notebook-short-id>/`，其中短 ID 默认取 `notebookKey` 前 8 位，碰撞时延长并持久化。来源配置 `notebookShortId: false` 可省略后缀（纯笔记本名）——已知无同名笔记本的干净导出适用；同名笔记本将落入同一目录。
 - 即使两个 ENEX 文件中的笔记本显示名完全相同，也不得落入同一目录，除非用户通过显式合并映射确认。
 
 示例映射：
@@ -2132,7 +2138,7 @@ source_content_hash: "sha256:..."
 Evernote 内部链接可能使用应用链接或 GUID。实现两遍处理：
 
 1. 第一遍扫描所有笔记并建立身份映射。
-2. 第二遍将可解析的内部链接重写为 Obsidian Wikilink 或 Markdown 链接。
+2. 第二遍将可解析的内部链接重写为 Obsidian Wikilink 或 Markdown 链接。实现为 `evernote-wikilink://<指纹>/<编码标题>` 伪链接（携带稳定身份而非最终文件名），目标端按自身命名布局（`filenameShortId` 开关）解析出真实文件名——源与目标的布局解耦。
 
 无法解析时：
 

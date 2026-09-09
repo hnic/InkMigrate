@@ -1,6 +1,11 @@
 import TurndownService from 'turndown';
 import { gfm } from 'turndown-plugin-gfm';
-import type { SourceItem } from '@inkmigrate/core';
+import {
+  computeStableKey,
+  deriveStableShortId,
+  sanitizeFilename,
+  type SourceItem,
+} from '@inkmigrate/core';
 
 /** §13.6 共享的 turndown 实例（启用 GFM 表格/任务列表）。 */
 const turndown = new TurndownService({
@@ -22,17 +27,34 @@ export function htmlToMarkdown(html: string): string {
   return turndown.turndown(html).trim();
 }
 
+export interface WikilinkResolveContext {
+  /** 链接所属来源实例（推导目标笔记的 stableShortId）。 */
+  sourceInstanceId: string;
+  /** §13.4 是否在目标文件名携带 shortId 后缀（与当前迁移的目标配置一致）。 */
+  filenameShortId: boolean;
+  /** §13.4 标题主体长度上限（与目标配置一致，保证 wikilink 指向真实文件名）。 */
+  maxFilenameLength: number;
+}
+
 /**
  * §15.10 内部链接后处理：来源侧（Evernote 适配器）把可解析的 evernote:// 链接
- * 输出为 evernote-wikilink:// 伪链接（turndown 转为 markdown 链接、不转义方括号），
- * 此处还原为 Obsidian wikilink；链接文字与目标同名时省略别名。
+ * 输出为 evernote-wikilink://<指纹>/<encodeURIComponent(标题)> 伪链接
+ * （turndown 转为 markdown 链接、不转义方括号）。此处按目标端自身的命名布局
+ * （filenameShortId 开关）还原为指向真实文件名的 Obsidian wikilink；
+ * 链接文字与目标标题同名时省略别名。
  */
-export function convertEvernoteWikilinks(markdown: string): string {
+export function convertEvernoteWikilinks(markdown: string, ctx: WikilinkResolveContext): string {
   return markdown.replace(
-    /\[([^\]]*)\]\(evernote-wikilink:\/\/([^)\s]+)\)/g,
-    (_m, text: string, encoded: string) => {
-      const target = decodeURIComponent(encoded);
-      return text.length > 0 && text !== target
+    /\[([^\]]*)\]\(evernote-wikilink:\/\/([0-9a-f]{64})\/([^)\s]+)\)/g,
+    (_m, text: string, fingerprint: string, encTitle: string) => {
+      const title = decodeURIComponent(encTitle);
+      const suffix = ctx.filenameShortId
+        ? `-${deriveStableShortId(computeStableKey(ctx.sourceInstanceId, `sha256:${fingerprint}`))}`
+        : '';
+      const target = `${sanitizeFilename(title, {
+        maxLength: Math.max(1, ctx.maxFilenameLength - suffix.length),
+      })}${suffix}`;
+      return text.length > 0 && text !== title
         ? `[[${target}|${text.replace(/[[\]|]/g, '')}]]`
         : `[[${target}]]`;
     },

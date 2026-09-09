@@ -72,16 +72,18 @@ export interface NotePathInput {
  * （含 `/`）或注入控制字符到文件名。统一 sanitize 为单段路径（替换路径分隔符）。
  */
 export function noteRelativePath(i: NotePathInput): string {
-  const suffix = `-${sanitizeFilename(i.stableShortId, { maxLength: 32 })}`;
+  // §13.4 filenameShortId=false 时纯标题名（一次性迁移的干净命名；重跑幂等
+  // 依赖 -2/-3 序号兜底，可能产生副本——用户显式选择）
+  const suffix = i.config.filenameShortId
+    ? `-${sanitizeFilename(i.stableShortId, { maxLength: 32 })}`
+    : '';
   const body = sanitizeFilename(i.title, {
     maxLength: Math.max(1, i.config.maxFilenameLength - suffix.length),
   });
   const filename = `${body}${suffix}.md`;
-  // importSubdir 为空时，笔记直接放 Vault 根目录（不加来源/类型子目录）
-  if (!i.config.importSubdir) {
-    return filename;
-  }
   const safeSourceId = sanitizePathSegment(i.sourceInstanceId);
+  // importSubdir 为空 = 省略该段（笔记位于 <sourceInstanceId>/... 下），
+  // 不再回退为 Vault 根平铺（索引生成器同语义）
   // §13.3 来源目录段优先（Evernote Stack/笔记本层级）；缺失时按 contentKind 目录
   if (i.notePathSegments !== undefined && i.notePathSegments.length > 0) {
     const segments = i.notePathSegments.map((s) =>
@@ -123,9 +125,14 @@ export interface AssetPathInput {
   filename: string;
 }
 
-/** §13.7 附件相对路径：`<attachmentsSubdir>/<sourceInstanceId>/<itemKey>/<filename>` */
+/** §13.7 附件相对路径。
+ * by-note（默认）：`<attachmentsSubdir>/<sourceInstanceId>/<itemKey>/<filename>`。
+ * flat：`<attachmentsSubdir>/<filename>` 平铺（同名异内容冲突由 plan 阶段消解）。 */
 export function assetRelativePath(i: AssetPathInput): string {
   const safeName = sanitizeFilename(i.filename, { maxLength: 200 });
+  if (i.config.attachmentPathLayout === 'flat') {
+    return [i.config.attachmentsSubdir, safeName].filter(Boolean).join('/');
+  }
   const safeSourceId = sanitizePathSegment(i.sourceInstanceId);
   return [i.config.attachmentsSubdir, safeSourceId, i.itemKey, safeName]
     .filter(Boolean)

@@ -1,3 +1,6 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { extname } from 'node:path';
 import {
   computeStableKey,
   deriveItemKey,
@@ -21,6 +24,7 @@ import {
   noteRelativePath,
   noteAbsolutePath,
   assetRelativePath,
+  assetAbsolutePath,
 } from './paths.js';
 import { stringifyFrontmatter } from './frontmatter.js';
 import { renderBody, htmlToMarkdown, convertEvernoteWikilinks } from './body.js';
@@ -32,7 +36,6 @@ import {
   type IndexEntry,
 } from './indexes/index-generator.js';
 import type { ObsidianWriteResult } from './result.js';
-import { existsSync, readFileSync } from 'node:fs';
 
 export const OBSIDIAN_TARGET_KIND = 'obsidian' as const;
 export const OBSIDIAN_TARGET_VERSION = '1.0.0' as const;
@@ -172,7 +175,11 @@ async function planNote(
   // 改为：先尝试 bodyHtml→markdown，结果为空时回退 bodyText。
   let markdownBody = '';
   if (item.bodyHtml) {
-    markdownBody = convertEvernoteWikilinks(htmlToMarkdown(item.bodyHtml));
+    markdownBody = convertEvernoteWikilinks(htmlToMarkdown(item.bodyHtml), {
+      sourceInstanceId: item.ref.sourceInstanceId,
+      filenameShortId: config.filenameShortId,
+      maxFilenameLength: config.maxFilenameLength,
+    });
   }
   if (markdownBody.length === 0) {
     markdownBody = item.bodyText ?? '';
@@ -242,6 +249,20 @@ async function planNote(
       const ext = deriveMimeExtension(asset.mimeType ?? '');
       let filename = sanitizeFilename(asset.fileName!, { maxLength: 200 });
       if (!/\.[a-z0-9]{1,8}$/i.test(filename)) filename = `${filename}.${ext}`;
+      // §13.7 flat 布局：同名异内容冲突消解（同名同内容天然幂等覆写）
+      if (config.attachmentPathLayout === 'flat') {
+        const abs = assetAbsolutePath(config.vaultPath, assetRelativePath({
+          config, sourceInstanceId: item.ref.sourceInstanceId, itemKey, filename,
+        }));
+        if (existsSync(abs)) {
+          const existing = createHash('sha256').update(readFileSync(abs)).digest('hex');
+          const mine = asset.sha256!.replace(/^sha256:/, '');
+          if (existing !== mine) {
+            const stem = filename.replace(/\.[^.]+$/, '');
+            filename = `${stem}-${mine.slice(0, 8)}${extname(filename)}`;
+          }
+        }
+      }
       const relPath = assetRelativePath({
         config,
         sourceInstanceId: item.ref.sourceInstanceId,

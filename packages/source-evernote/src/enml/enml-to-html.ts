@@ -217,7 +217,8 @@ export function enmlToHtml(
       const guid = guidFromEvernoteLink(href);
       const wikilinkTarget = guid !== undefined ? opts.resolveGuidLink?.(guid, text) : undefined;
       if (wikilinkTarget !== undefined) {
-        a.setAttribute('href', `evernote-wikilink://${encodeURIComponent(wikilinkTarget)}`);
+        // resolver 返回已编码的 `<指纹>/<encodeURIComponent(标题)>`，此处不再二次编码
+        a.setAttribute('href', `evernote-wikilink://${wikilinkTarget}`);
         result.resolvedInternalLinks += 1;
       } else {
         result.internalLinks.push({ url: href, text });
