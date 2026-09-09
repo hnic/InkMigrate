@@ -14,48 +14,49 @@
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = new URL('../', import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL('../', import.meta.url));
 
 /** 受限目录：sidecar 入口及其依赖链。 */
 const SCOPES = ['apps/engine/src', 'packages/core/src'];
 /** 禁止的写 stdout 调用（console.error 走 stderr，放行）。 */
 const FORBIDDEN = /\bconsole\.(log|info|debug)\s*\(/;
-/** 允许的例外：注释里的说明、字符串字面量里的示例。 */
-const ALLOW = /^\s*(\/\/|\/\*|\*|\s)/;
+/** 整行都是注释时放行；字符串字面量里的示例仍会被拦（精确豁免需 AST）。 */
+const COMMENT_LINE = /^\s*(\/\/|\/\*|\*)/;
 
 let violations = 0;
 
 function walk(dir) {
   const out = [];
-  for (const entry of readdirSync(dir)) {
-    if (entry === 'node_modules' || entry === 'dist' || entry.startsWith('.')) continue;
-    const full = join(dir, entry);
-    const st = statSync(full);
-    if (st.isDirectory()) out.push(...walk(full));
-    else if (st.isFile() && /\.(ts|js|mjs|cjs)$/.test(entry)) out.push(full);
+  // 用 dirent 自身判断类型：符号链接一律跳过——断链会让 statSync 抛 ENOENT，
+  // 指向祖先目录的链接则会让递归成环
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name.startsWith('.')) continue;
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...walk(full));
+    else if (entry.isFile() && /\.(ts|js|mjs|cjs)$/.test(entry.name)) out.push(full);
   }
   return out;
 }
 
 for (const scope of SCOPES) {
   const base = join(ROOT, scope);
-  let files;
-  try {
-    files = walk(base);
-  } catch {
-    console.error(`scope not found, skipping: ${scope}`);
-    continue;
+  // 守护脚本宁可响亮失败也不静默跳过：目录缺失说明配置失效，必须阻断 CI
+  if (!statSync(base, { throwIfNoEntry: false })?.isDirectory()) {
+    console.error(`✗ 配置的受限目录不存在: ${scope}`);
+    process.exit(1);
   }
+  const files = walk(base);
   for (const file of files) {
     const lines = readFileSync(file, 'utf8').split('\n');
     lines.forEach((line, i) => {
       if (!FORBIDDEN.test(line)) return;
-      // 跳过纯注释行里的说明
-      if (ALLOW.test(line) && !line.includes('console.')) return;
+      // 跳过整行都是注释的说明（字符串字面量中的示例仍会被拦，需 AST 才能精确豁免）
+      if (COMMENT_LINE.test(line)) return;
       const rel = relative(ROOT, file);
       console.error(
-        `${rel}:${i + 1}: 禁止 console.${/(log|info|debug)/.exec(line)[0]} ` +
+        `${rel}:${i + 1}: 禁止 console.${FORBIDDEN.exec(line)[1]} ` +
           `（stdout 是 sidecar JSON-RPC 通道，改用 logToStderr / logger 写 stderr）\n  ${line.trim()}`,
       );
       violations++;

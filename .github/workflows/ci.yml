@@ -4,7 +4,16 @@ on:
   push:
     branches: [main, 'stage*']
   pull_request:
-    branches: [main]
+    branches: [main, 'stage*']
+
+# 本工作流只需读代码 + 跑测试，按最小权限声明 GITHUB_TOKEN
+permissions:
+  contents: read
+
+# 同一分支的新推送取消进行中的旧运行，避免过期运行抢占 runner
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -12,25 +21,25 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        node-version: [24]
 
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         # 版本由 package.json 的 packageManager 字段统一管理（Corepack），避免重复指定
 
-      - name: Setup Node.js ${{ matrix.node-version }}
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version-file: '.nvmrc'
           cache: 'pnpm'
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Guard JSON-RPC stdout channel
         run: node scripts/check-no-stdout-log.mjs

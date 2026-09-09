@@ -2,15 +2,22 @@
 .DS_Store
 
 # §19.1 sensitive local state
+.env
+.env.*
+!.env.example
+*.pem
+*.key
 .inkmigrate/
 /reports/
-logs/
+/logs/
 *.log
 playwright/.auth/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
 *.enex
+# 如需提交 .sqlite/.enex 测试 fixtures，显式取消忽略：
+# !**/tests/fixtures/**
 
 # build artifacts
 node_modules/
