@@ -41,15 +41,25 @@ export const OBSIDIAN_TARGET_KIND = 'obsidian' as const;
 export const OBSIDIAN_TARGET_VERSION = '1.0.0' as const;
 export const OBSIDIAN_ADAPTER_API_VERSION = '1.0.0' as const;
 
+/**
+ * 头条 CDN 图片的内容路径（`/tos-cn-i-<biz>/<hash>~tplv-...`）：URL 中唯一稳定
+ * 的部分（子域名与 query 签名每次变化），planNote 靠它在正文里定位图片引用。
+ */
+const TOUTIAO_CDN_CONTENT_PATH = /\/tos-cn-i-[^/]+\/[^?]+/;
+
 export function createObsidianTarget(): ObsidianTargetAdapter {
-  // adapter 实例级路径去重 Set，防止同一 Job 内标题重复的条目分配到相同路径
-  const assignedPaths = new Set<string>();
+  // adapter 实例级路径分配记录：stableKey → 已分配路径（Map）+ 已占用路径集合。
+  // 以 stableKey 作键：同一 item 重试/重规划（同 Job 内重试、质量升级重写）复用
+  // 已分配路径，保持幂等；usedPaths 集合防御同 Job 内两个不同指纹因 sanitize 后
+  // title + shortId 恰好同形而撞路径的极端情况。
+  const assignedPaths = new Map<string, string>();
+  const usedPaths = new Set<string>();
   return {
     kind: OBSIDIAN_TARGET_KIND,
     version: OBSIDIAN_TARGET_VERSION,
     adapterApiVersion: OBSIDIAN_ADAPTER_API_VERSION,
     validateConfig,
-    plan: (item, ctx) => planNote(item, ctx, assignedPaths),
+    plan: (item, ctx) => planNote(item, ctx, assignedPaths, usedPaths),
     write: writeNote,
     writeWithExpectedHash: (plan, ctx, expectedWrittenFileHash) =>
       writeNote(plan, ctx, expectedWrittenFileHash),
@@ -116,7 +126,8 @@ async function validateConfig(ctx: TargetContext): Promise<ValidationResult> {
 async function planNote(
   item: SourceItem,
   ctx: TargetContext,
-  assignedPaths: Set<string>,
+  assignedPaths: Map<string, string>,
+  usedPaths: Set<string>,
 ): Promise<ObsidianTargetPlan> {
   const config = parseConfig(ctx);
   validateVault(config.vaultPath);
@@ -147,16 +158,23 @@ async function planNote(
   // 既存在 TOCTOU 竞态（stat 与 atomicWrite 之间另一并发 Job 可能抢先写入），
   // 又会破坏幂等性（重跑时把已存在的幂等文件误判为冲突，生成 -2/-3 冗余副本）。
   //
-  // 仅保留 assignedPaths（同 Job 内去重 Set，同步操作无竞态）作为防御：
-  // 处理同 Job 内两个不同指纹因 sanitize 后 title + shortId 恰好同形的极端情况。
-  // 真正的跨 Job 并发冲突由 DB 的 UNIQUE(target_instance_id, relative_path) 约束
-  // 兜底——writeNote 落库时若撞约束会抛错，由上层标记为 conflict，不静默覆盖。
-  let suffix = 2;
-  while (assignedPaths.has(relativePath)) {
-    relativePath = `${relativePath.replace(/\.md$/, '')}-${suffix}.md`;
-    suffix++;
+  // assignedPaths 按 stableKey 记录（同 item 重规划复用原路径，避免重试产生 -2
+  // 副本），usedPaths 集合防御同 Job 内两个不同指纹因 sanitize 后 title +
+  // shortId 恰好同形的极端情况。真正的跨 Job 并发冲突由 DB 的
+  // UNIQUE(target_instance_id, relative_path) 约束兜底——writeNote 落库时若撞
+  // 约束会抛错，由上层标记为 conflict，不静默覆盖。
+  const previouslyAssigned = assignedPaths.get(stableKey);
+  if (previouslyAssigned !== undefined) {
+    relativePath = previouslyAssigned;
+  } else {
+    let suffix = 2;
+    while (usedPaths.has(relativePath)) {
+      relativePath = `${relativePath.replace(/\.md$/, '')}-${suffix}.md`;
+      suffix++;
+    }
+    usedPaths.add(relativePath);
+    assignedPaths.set(stableKey, relativePath);
   }
-  assignedPaths.add(relativePath);
 
   const srcHash = sourceContentHash(
     JSON.stringify(canonicalContentForHash(item)),
@@ -164,11 +182,7 @@ async function planNote(
   const frontmatter = stringifyFrontmatter({
     item,
     stableKey,
-    migrationJobId:
-      (ctx.targetConfig['__migrationJobId'] as string | undefined) ?? 'unknown',
-    inkmigrateVersion: 1,
     sourceContentHash: srcHash,
-    importedAt: new Date().toISOString(),
   });
 
   // R9: bodyHtml 为纯空白时 htmlToMarkdown 返回 ''，原实现不回退 bodyText 导致正文丢失。
@@ -195,6 +209,42 @@ async function planNote(
   const assetLinks: { markdownPlaceholder: string; relativePath: string }[] = [];
   const attachmentLinks: string[] = [];
   const assetRecords: AssetWriteRecord[] = [];
+  // §13.7 同笔记内附件路径去重：Evernote 导出常见两个附件同名（如都叫
+  // image.png），assetRelativePath 会产出相同 relPath——后写覆盖前写字节、
+  // 两处链接都指向同一（错误）文件。内容不同时追加 -2/-3 后缀消解；
+  // 内容相同则复用同一路径（幂等覆写，双链接指向同一文件是正确语义）。
+  const usedAssetPaths = new Map<string, string>(); // relPath → sha256
+  const allocAssetPath = (
+    args: {
+      config: ObsidianTargetConfig;
+      sourceInstanceId: string;
+      itemKey: string;
+      filename: string;
+    },
+    sha256: string,
+  ): string => {
+    let relPath = assetRelativePath(args);
+    const known = usedAssetPaths.get(relPath);
+    if (known === undefined) {
+      usedAssetPaths.set(relPath, sha256);
+      return relPath;
+    }
+    if (known === sha256) {
+      return relPath; // 同名同内容：复用路径（幂等覆写）
+    }
+    let suffix = 2;
+    const dot = args.filename.lastIndexOf('.');
+    do {
+      const uniq =
+        dot > 0
+          ? `${args.filename.slice(0, dot)}-${suffix}${args.filename.slice(dot)}`
+          : `${args.filename}-${suffix}`;
+      relPath = assetRelativePath({ ...args, filename: uniq });
+      suffix++;
+    } while (usedAssetPaths.has(relPath));
+    usedAssetPaths.set(relPath, sha256);
+    return relPath;
+  };
   let imgIdx = 0;
   for (const asset of item.assets) {
     if (asset.data === undefined || asset.sha256 === undefined) {
@@ -209,7 +259,7 @@ async function planNote(
       // `/tos-cn-i-xxx/<hash>~tplv-xxx` 是图片唯一标识，稳定不变。
       // 即便 extract 拿到的 URL 和 bodyHtml 里的子域名/签名不同也能匹配。
       // 内容路径不存在时（非头条图片）回退到完整 baseUrl（? 之前）精确匹配。
-      const contentPath = asset.originalUrl.match(/\/tos-cn-i-[^/]+\/[^?]+/)?.[0];
+      const contentPath = asset.originalUrl.match(TOUTIAO_CDN_CONTENT_PATH)?.[0];
       const baseUrl = asset.originalUrl.split('?')[0] ?? asset.originalUrl;
       const matchKey = contentPath ?? baseUrl;
       const escaped = matchKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -217,13 +267,16 @@ async function planNote(
       const before = markdownBody;
       // matchKey 可能是完整 URL（含 https://）或仅内容路径（/tos-cn-i-...）。
       // 两种情况都用它在 url 位置匹配，前面允许任意协议+子域名，后面允许任意 query。
+      // matchKey 必须锚定到 URL 末尾（其后仅允许 ?query/#fragment）：否则 matchKey
+      // 只是另一 URL 的子串时（如 img.png 与 img@2x.png 前缀碰撞），先处理的资产
+      // 会静默吞掉后者在正文中的引用，顺序相关且错位。
       markdownBody = markdownBody.replace(
-        new RegExp(`!\\[[^\\]]*\\]\\([^)]*${escaped}[^)]*\\)`, 'g'),
+        new RegExp(`!\\[[^\\]]*\\]\\([^)\\s]*${escaped}(?:[?#][^)\\s]*)?\\)`, 'g'),
         placeholder,
       );
-      // 匹配 <img src="url..."> HTML 标签形式（turndown 未转换的残留）。
+      // 匹配 <img src="url..."> HTML 标签形式（turndown 未转换的残留），同样锚定。
       markdownBody = markdownBody.replace(
-        new RegExp(`<img[^>]*src="[^"]*${escaped}[^"]*"[^>]*>`, 'g'),
+        new RegExp(`<img[^>]*src="[^"]*${escaped}(?:[?#][^"]*)?"[^>]*>`, 'g'),
         placeholder,
       );
       if (markdownBody !== before) {
@@ -231,12 +284,10 @@ async function planNote(
         const filename = hasFileName
           ? sanitizeFilename(asset.fileName!, { maxLength: 200 })
           : `${String(imgIdx + 1).padStart(3, '0')}.${ext}`;
-        const relPath = assetRelativePath({
-          config,
-          sourceInstanceId: item.ref.sourceInstanceId,
-          itemKey,
-          filename,
-        });
+        const relPath = allocAssetPath(
+          { config, sourceInstanceId: item.ref.sourceInstanceId, itemKey, filename },
+          asset.sha256,
+        );
         assetLinks.push({ markdownPlaceholder: placeholder, relativePath: relPath });
         assetRecords.push({ relativePath: relPath, data: asset.data, sha256: asset.sha256 });
         imgIdx++;
@@ -263,12 +314,10 @@ async function planNote(
           }
         }
       }
-      const relPath = assetRelativePath({
-        config,
-        sourceInstanceId: item.ref.sourceInstanceId,
-        itemKey,
-        filename,
-      });
+      const relPath = allocAssetPath(
+        { config, sourceInstanceId: item.ref.sourceInstanceId, itemKey, filename },
+        asset.sha256,
+      );
       attachmentLinks.push(relPath);
       assetRecords.push({ relativePath: relPath, data: asset.data, sha256: asset.sha256 });
     }
@@ -308,23 +357,6 @@ async function writeNote(
   validateVault(config.vaultPath);
   const oplan = plan as ObsidianTargetPlan;
 
-  // §13.7 先写附件（content-addressed，覆写语义），再写 note，
-  // 保证 note 里的 ![[...]] 引用在 Obsidian 打开时附件已落盘。
-  if (oplan.assets !== undefined && oplan.assets.length > 0) {
-    for (const a of oplan.assets) {
-      writeAsset({
-        vaultPath: config.vaultPath,
-        relativePath: a.relativePath,
-        bytes: Buffer.from(a.data),
-      });
-      verifyAsset({
-        vaultPath: config.vaultPath,
-        relativePath: a.relativePath,
-        expectedSha256: a.sha256,
-      });
-    }
-  }
-
   // §13.2 走 noteAbsolutePath（resolveWithin）确保路径不逃逸 Vault。
   const absPath = noteAbsolutePath(config.vaultPath, oplan.relativePath);
 
@@ -358,6 +390,50 @@ async function writeNote(
   }
   const decision = decideOverwrite(decideInput);
 
+  if (decision.action === 'mark_conflict') {
+    // §13.9 preserve/metadata-only + 用户修改 → 不写正文，保留用户文件。
+    // 附件也一并不写：note 被跳过时附件会成为无人引用的孤儿文件，且
+    // writeAsset 的覆写语义可能破坏磁盘上已存在的用户附件——先决策再落盘，
+    // skippedWrite: true 才如实反映 Vault 状态。
+    if (observedPrewriteFileHash === undefined) {
+      // decideOverwrite 仅在 targetExists 时返回 mark_conflict，上方必已观测
+      // 磁盘哈希；此守卫防止未来策略变化后把 undefined 落库破坏冲突审计。
+      throw new Error(
+        `mark_conflict returned but no prewrite hash was observed for "${oplan.relativePath}"`,
+      );
+    }
+    // H-1: skippedWrite=true 让 job-runner 跳过 verify（否则 verify 读原文件 hash
+    // 匹配会误判 ok=true，把冲突吞为 verified，永久跳过该条目）。
+    return {
+      relativePath: oplan.relativePath,
+      artifactKind: 'note',
+      targetContentHash: oplan.targetContentHash,
+      writtenFileHash: observedPrewriteFileHash,
+      sourceContentHash: oplan.sourceContentHash,
+      wasForcedOverwrite: false,
+      overwritePolicy: config.overwritePolicy,
+      actionCode: 'stage_attempt',
+      skippedWrite: true,
+    };
+  }
+
+  // §13.7 先写附件（content-addressed，覆写语义），再写 note，
+  // 保证 note 里的 ![[...]] 引用在 Obsidian 打开时附件已落盘。
+  if (oplan.assets !== undefined && oplan.assets.length > 0) {
+    for (const a of oplan.assets) {
+      writeAsset({
+        vaultPath: config.vaultPath,
+        relativePath: a.relativePath,
+        bytes: Buffer.from(a.data),
+      });
+      verifyAsset({
+        vaultPath: config.vaultPath,
+        relativePath: a.relativePath,
+        expectedSha256: a.sha256,
+      });
+    }
+  }
+
   let finalRelativePath = oplan.relativePath;
   const contentToWrite = oplan.renderedContent;
   let finalHash: string;
@@ -371,6 +447,9 @@ async function writeNote(
     case 'write_new_variant': {
       // M10: 变体路径未做存在性检查——连续两次 write-new 跑同一 item 会覆盖前次变体
       // （真实数据丢失）。改为：若 .imported-new.md 已存在，递增后缀（-2, -3...）。
+      // existsSync → atomicWrite 之间与 planNote 注释所述同样存在 TOCTOU 残留窗口
+      // （另一并发 Job 可能抢先写入该候选路径）；本 Job 内为同步顺序执行无竞态，
+      // 跨 Job 场景由 DB 唯一约束 + rename 原子性兜底，接受该窗口。
       const variantBase = oplan.relativePath.replace(/\.md$/, '.imported-new');
       let candidate = `${variantBase}.md`;
       let suffix = 2;
@@ -386,21 +465,6 @@ async function writeNote(
       );
       break;
     }
-    case 'mark_conflict':
-      // §13.9 preserve + 用户修改 → 不写正文，保留用户文件
-      // H-1: skippedWrite=true 让 job-runner 跳过 verify（否则 verify 读原文件 hash
-      // 匹配会误判 ok=true，把冲突吞为 verified，永久跳过该条目）。
-      return {
-        relativePath: oplan.relativePath,
-        artifactKind: 'note',
-        targetContentHash: oplan.targetContentHash,
-        writtenFileHash: observedPrewriteFileHash!,
-        sourceContentHash: oplan.sourceContentHash,
-        wasForcedOverwrite: false,
-        overwritePolicy: config.overwritePolicy,
-        actionCode: 'stage_attempt',
-        skippedWrite: true,
-      };
   }
 
   const result: ObsidianWriteResult = {

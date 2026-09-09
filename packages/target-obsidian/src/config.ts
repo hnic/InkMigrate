@@ -1,4 +1,26 @@
+import { isAbsolute } from 'node:path';
 import { z } from 'zod';
+import { rejectsTraversal } from '@inkmigrate/core';
+
+/**
+ * §13.3/§13.7 Vault 内相对子目录的共用校验：
+ * - I16: 拒绝 `..` 路径段（含反斜杠分隔形式，复用 core 的 rejectsTraversal——
+ *   Windows 的 path.resolve 把 `\` 当分隔符，仅按 `/` 切分会漏放行），防止配置
+ *   错误/恶意配置生成逃逸风格的相对路径。resolveWithin 在写入时会兜底拦截，
+ *   但配置校验阶段就拒绝能让 plan 阶段不生成畸形 relativePath，
+ *   避免 plan 成功、write 才炸的语义割裂。
+ * - 拒绝绝对路径（POSIX `/x` 与 Windows 盘符 `C:\x`）：绝对值会让
+ *   `[subdir, ...].join('/')` 产出以 `/` 开头的路径，同样只在 write 阶段才炸。
+ */
+const vaultRelativeSubdir = (field: string) =>
+  z
+    .string()
+    .refine((s) => !rejectsTraversal(s), {
+      message: `${field} 不得包含 ".." 路径段`,
+    })
+    .refine((s) => !s.startsWith('/') && !/^[a-zA-Z]:[\\/]/.test(s), {
+      message: `${field} 必须是相对 Vault 根的相对路径，不能是绝对路径`,
+    });
 
 /**
  * §13.2/§13.7/§13.9 Obsidian 目标适配器运行时配置。
@@ -9,24 +31,21 @@ import { z } from 'zod';
 export const ObsidianTargetConfigSchema = z
   .object({
     /** §13.2 Vault 根目录绝对路径。 */
-    vaultPath: z.string().min(1),
+    vaultPath: z
+      .string()
+      .min(1)
+      // 相对 vaultPath 会被 resolveWithin 按 process.cwd 解析，换目录运行时
+      // 写到意外位置；在校验阶段即拒绝。isAbsolute 覆盖本平台的 `/x`/`C:\x`，
+      // 盘符正则补齐跨平台校验（如在 POSIX 上校验 Windows 风格路径）。
+      .refine((s) => isAbsolute(s) || /^[a-zA-Z]:[\\/]/.test(s), {
+        message: 'vaultPath 必须是绝对路径',
+      }),
     /** §13.3 笔记导入根目录（相对 Vault），默认 `Imports/InkMigrate`。 */
-    importSubdir: z
-      .string()
-      // I16: 拒绝 `..` 路径段，防止配置错误/恶意配置生成逃逸风格的相对路径。
-      // resolveWithin 在写入时会兜底拦截，但配置校验阶段就拒绝能让 plan 阶段
-      // 不生成畸形 relativePath，避免 plan 成功、write 才炸的语义割裂。
-      .refine((s) => !s.split('/').some((seg) => seg === '..'), {
-        message: 'importSubdir 不得包含 ".." 路径段',
-      })
-      .default('Imports/InkMigrate'),
+    importSubdir: vaultRelativeSubdir('importSubdir').default('Imports/InkMigrate'),
     /** §13.7 附件根目录（相对 Vault），默认 `Attachments/InkMigrate`。 */
-    attachmentsSubdir: z
-      .string()
-      .refine((s) => !s.split('/').some((seg) => seg === '..'), {
-        message: 'attachmentsSubdir 不得包含 ".." 路径段',
-      })
-      .default('Attachments/InkMigrate'),
+    attachmentsSubdir: vaultRelativeSubdir('attachmentsSubdir').default(
+      'Attachments/InkMigrate',
+    ),
     /** §13.7 链接风格，默认 wikilink。 */
     linkStyle: z.enum(['wikilink', 'markdown']).default('wikilink'),
     /** §13.9 覆盖策略，默认 preserve（最安全）。 */

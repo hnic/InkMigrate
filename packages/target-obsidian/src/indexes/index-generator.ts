@@ -41,7 +41,9 @@ export interface GenerateIndexInput {
   vaultPath: string;
   sourceInstanceId: string;
   entries: readonly IndexEntry[];
-  groupBy: readonly ('month' | 'content-type' | 'collection' | 'notebook')[];
+  // 与 config.indexGroupBy 枚举一致：'notebook' 未实现（IndexEntry 无 notebook
+  // 字段，buildShardKeys 会抛错），待实现后再加入。
+  groupBy: readonly ('month' | 'content-type' | 'collection')[];
   /**
    * §13.8 重跑保护：传入上一轮已落库的索引 artifact（relativePath + writtenFileHash）。
    * 若磁盘文件已被用户修改（on-disk 哈希 ≠ recorded），本次跳过覆写该分片，
@@ -70,8 +72,11 @@ export function generateShardIndexes(i: GenerateIndexInput): GenerateIndexResult
   // I18: 分片内条目按 relativePath 稳定排序后再分组，保证字节级幂等。
   // 否则两次 Job 以不同顺序喂入条目（DB 查询无 ORDER BY、并发收集）会让分片字节
   // 不同，导致重跑无谓改写所有分片、writtenFileHash 抖动，破坏 §13.8"可重复生成"。
+  // 排序用码元比较而非 localeCompare：localeCompare 的 collation 依赖运行时
+  // ICU 构建（small-icu vs full-icu）与系统 locale，同一输入在不同机器上
+  // 顺序不同，同样会造成分片字节漂移。
   const sortedEntries = [...i.entries].sort((a, b) =>
-    a.relativePath.localeCompare(b.relativePath),
+    byCodeUnit(a.relativePath, b.relativePath),
   );
 
   const groups = new Map<string, IndexEntry[]>();
@@ -85,12 +90,22 @@ export function generateShardIndexes(i: GenerateIndexInput): GenerateIndexResult
     }
   }
 
+  const usedShardPaths = new Set<string>();
   const shards: ShardResult[] = [];
   for (const [shardKey, shardEntries] of [...groups.entries()].sort((a, b) =>
-    a[0].localeCompare(b[0]),
+    byCodeUnit(a[0], b[0]),
   )) {
     const safeName = sanitizeFilename(shardKey, { maxLength: 80 });
     const relativePath = `${indexDir}/${safeName}.md`;
+    // sanitizeFilename 截断到 80 字符（maxLength）可能让两个不同 shardKey 清洗后
+    // 落到同一文件名，后写会静默覆盖前一分片、条目索引却仍列出两个分片——
+    // 显式抛错，避免索引数据静默丢失。
+    if (usedShardPaths.has(relativePath)) {
+      throw new Error(
+        `index-generator: shard filename collision after sanitize: "${shardKey}" -> ${relativePath}`,
+      );
+    }
+    usedShardPaths.add(relativePath);
     // §缺陷4：markdown 链接需相对分片文件本身（位于 _索引/ 下）解析，否则
     // 渲染器会按当前目录拼接出 _索引/Imports/... 的 404 路径。用 path.relative
     // 计算分片目录到目标文章的真正相对路径。wikilink [[...]] 按 Vault 根解析，无需调整。
@@ -180,6 +195,11 @@ function buildShardKeys(
   return cartesianProduct(dimValues).map((parts) => parts.join('-') || '全部');
 }
 
+/** 码元（UTF-16）比较：跨运行时/ICU 确定的全序，供字节级幂等排序使用。 */
+function byCodeUnit(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 /** 笛卡尔积：每组取一个元素的所有组合。空输入返回 [[]]（单个空 key）。 */
 function cartesianProduct(groups: readonly string[][]): string[][] {
   if (groups.length === 0) return [[]];
@@ -196,6 +216,34 @@ function cartesianProduct(groups: readonly string[][]): string[][] {
   return result;
 }
 
+/**
+ * 统一构造索引里的单条链接（分片 → 条目、入口 → 分片共用），避免两处
+ * wikilink/markdown 分支逻辑重复漂移。
+ *
+ * 标题与文件名来自来源数据，可能含空格、括号、`[`/`]`/`|` 等会破坏链接语法的
+ * 字符（sanitizeFilename 不替换 `[` `]`，空格在文件名中完全合法）：
+ * - markdown：标签转义 `\`/`[`/`]`（CommonMark 反斜杠转义）；目标含空格时用
+ *   `<...>` 包裹，否则 `Screenshot (1).png` 这类路径会把链接截断；路径分隔符
+ *   归一化为 `/`（path.relative 在 Windows 上产出 `\`）。
+ * - wikilink：目标为 Vault 相对路径（空格合法），别名剔除 `[`/`]`/`|`
+ *   （wikilink 内无法转义这些字符，与 body.ts 的链接文字清洗一致）。
+ */
+function formatIndexLink(
+  label: string,
+  targetRelPath: string,
+  fromDir: string,
+  linkStyle: 'wikilink' | 'markdown',
+): string {
+  if (linkStyle === 'wikilink') {
+    const target = targetRelPath.replace(/\.md$/, '');
+    const alias = label.replace(/[[\]|]/g, '');
+    return alias.length > 0 ? `- [[${target}|${alias}]]` : `- [[${target}]]`;
+  }
+  const rel = relative(fromDir, targetRelPath).split('\\').join('/');
+  const url = /\s/.test(rel) ? `<${rel}>` : rel;
+  return `- [${label.replace(/([\\[\]])/g, '\\$1')}](${url})`;
+}
+
 function renderShardMarkdown(
   shardKey: string,
   entries: readonly IndexEntry[],
@@ -205,15 +253,7 @@ function renderShardMarkdown(
 ): string {
   const lines: string[] = [`# ${shardKey}`, ''];
   for (const e of entries) {
-    if (linkStyle === 'wikilink') {
-      lines.push(`- [[${e.relativePath.replace(/\.md$/, '')}|${e.title}]]`);
-    } else {
-      // markdown 链接按当前分片文件所在目录解析；用相对路径避免 404。
-      // path.relative 在 Windows 上产出反斜杠分隔符（..\..\），而 Markdown 链接
-      // 必须用正斜杠（跨平台渲染器仅认 /），故统一归一化为正斜杠。
-      const rel = relative(shardDir, e.relativePath).split('\\').join('/');
-      lines.push(`- [${e.title}](${rel})`);
-    }
+    lines.push(formatIndexLink(e.title, e.relativePath, shardDir, linkStyle));
   }
   lines.push('');
   return lines.join('\n');
@@ -233,15 +273,7 @@ function renderEntryIndex(
     '',
   ];
   for (const shard of shards) {
-    if (linkStyle === 'wikilink') {
-      const link = shard.relativePath.replace(/\.md$/, '');
-      lines.push(`- [[${link}|${shard.shardKey}]]`);
-    } else {
-      // R7: markdown 模式用相对路径（entry 文件与 shard 文件的相对位置），
-      // 与 renderShardMarkdown 一致，归一化正斜杠。
-      const rel = relative(entryDir, shard.relativePath).split('\\').join('/');
-      lines.push(`- [${shard.shardKey}](${rel})`);
-    }
+    lines.push(formatIndexLink(shard.shardKey, shard.relativePath, entryDir, linkStyle));
   }
   lines.push('');
   return lines.join('\n');
@@ -258,7 +290,7 @@ function renderEntryIndex(
  *    覆写**，保留用户文件并返回磁盘原哈希 + skipped=true。
  *
  *    R8（契约约束）：重跑保护仅在 recordedHash 非 null 时生效。调用方（job-runner）
- *    必须从 listIndexArtifacts 正确传入 knownIndexArtifacts（R6 已修正其 != null 过滤）。
+ *    必须从 listIndexArtifactsByTarget 正确传入 knownIndexArtifacts（R6 已修正其 != null 过滤）。
  *    若未来新增调用方未传入，首次写入会跳过用户修改检测——新增调用方务必传入。
  *
  * 返回 { hash, skipped } 供 artifact 追踪。
@@ -271,20 +303,26 @@ function writeShard(
 ): { hash: string; skipped: boolean } {
   const abs = resolveWithin(vaultPath, relativePath);
 
+  // §13.2 符号链接逃逸防护：先建目录链，再对【父目录】解引用确认位于 Vault 内。
+  // 用 core 的统一 assertWriteDirSafe，与其它写入点保持一致语义（L3）。
+  // 必须先于下方冲突检测的读取：resolveWithin 不解引用符号链接，若先读后校验，
+  // 目录链中的逃逸符号链接会让【读取】（而非写入）绕过防护读到 Vault 外内容。
+  const parentDir = dirname(abs);
+  mkdirSync(parentDir, { recursive: true });
+  assertWriteDirSafe(vaultPath, abs);
+
   // §13.8 重跑保护：已有文件 + 用户改过 → 保留用户内容，不覆写
   if (recordedHash !== undefined && existsSync(abs)) {
-    const onDisk = writtenFileHash(Buffer.from(readFileSync(abs, 'utf8'), 'utf8'));
+    // 直接按字节读取，与 atomicWriteRaw 返回的 writtenFileHash(Buffer.from(
+    // content,'utf8')) 严格对应；utf8 字符串往返会把非 UTF-8 字节替换为
+    // U+FFFD，造成"用户改过"的误判。
+    const onDisk = writtenFileHash(readFileSync(abs));
     if (onDisk !== recordedHash) {
       // 用户修改过：跳过覆写，返回磁盘原哈希
       return { hash: onDisk, skipped: true };
     }
   }
 
-  // §13.2 符号链接逃逸防护：先建目录链，再对【父目录】解引用确认位于 Vault 内。
-  // 用 core 的统一 assertWriteDirSafe，与其它写入点保持一致语义（L3）。
-  const parentDir = dirname(abs);
-  mkdirSync(parentDir, { recursive: true });
-  assertWriteDirSafe(vaultPath, abs);
   // I17: 用 atomicWriteRaw（temp + rename）而非直接 writeFileSync。
   // 进程被杀时直接写会留下半截损坏文件，且重跑保护会把它当"用户改过 → 跳过覆写"
   // → 数据损坏被幂等性逻辑固化。atomicWriteRaw 失败只丢 tmp，目标文件要么旧要么新。

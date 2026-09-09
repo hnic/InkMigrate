@@ -35,10 +35,15 @@ export interface DecideInput {
  * 用户或外部修改时与 `preserve` 分化。
  *
  * - 目标不存在 → 一律 `write_canonical`（首次写入）。
- * - 目标存在、未修改 → `preserve`/`replace`/`write-new` 走 `write_canonical` 原子更新；
- *   `metadata-only` 走 `update_metadata_only`。
+ * - 目标存在、未修改 → `metadata-only` 策略、或计划本身只涉及元数据变更
+ *   （`isMetadataOnlyUpdate`，无论配置何种策略——对未修改目标刷新元数据总是
+ *   安全的）走 `update_metadata_only`；其余 `preserve`/`replace`/`write-new`
+ *   走 `write_canonical` 原子更新。
  * - 目标存在、已修改 → `preserve`/`metadata-only` 走 `mark_conflict`；
  *   `replace` 走 `forced_overwrite`（需审计）；`write-new` 走 `write_new_variant`。
+ *
+ * 注意：本决策树仅服务于笔记类 artifact——附件走 writeAsset 内容寻址路径，
+ * 不经过这里，故 artifactKind 固定为 'note' / 'note_variant'。
  */
 export function decideOverwrite(i: DecideInput): OverwriteDecision {
   // 首次写入
@@ -81,12 +86,7 @@ export function decideOverwrite(i: DecideInput): OverwriteDecision {
         artifactKind: 'note',
         requiresForcedOverwriteAudit: true,
       };
-      if (i.observedPrewriteFileHash !== undefined) {
-        d.observedPrewriteFileHash = i.observedPrewriteFileHash;
-      }
-      if (i.expectedWrittenFileHash !== undefined) {
-        d.expectedWrittenFileHash = i.expectedWrittenFileHash;
-      }
+      copyAuditHashes(d, i);
       return d;
     }
     case 'write-new': {
@@ -95,9 +95,7 @@ export function decideOverwrite(i: DecideInput): OverwriteDecision {
         artifactKind: 'note_variant',
         requiresForcedOverwriteAudit: false,
       };
-      if (i.observedPrewriteFileHash !== undefined) {
-        d.observedPrewriteFileHash = i.observedPrewriteFileHash;
-      }
+      copyAuditHashes(d, i);
       return d;
     }
     case 'metadata-only':
@@ -107,5 +105,24 @@ export function decideOverwrite(i: DecideInput): OverwriteDecision {
         artifactKind: 'note',
         requiresForcedOverwriteAudit: false,
       };
+    default: {
+      // 穷尽性守卫：DecideInput 接受未经 schema parse 的原始 config 对象，
+      // 运行时传入未知策略时在此快速失败，而不是隐式返回 undefined
+      // 破坏 OverwriteDecision 的非空返回契约（新增枚举值时 TS 也会在此报错）。
+      const policy: never = i.config.overwritePolicy;
+      throw new Error(
+        `decideOverwrite: unknown overwritePolicy: ${String(policy)}`,
+      );
+    }
+  }
+}
+
+/** 与 replace/write-new 分支共用：对称携带审计哈希（若调用方传入）。 */
+function copyAuditHashes(d: OverwriteDecision, i: DecideInput): void {
+  if (i.observedPrewriteFileHash !== undefined) {
+    d.observedPrewriteFileHash = i.observedPrewriteFileHash;
+  }
+  if (i.expectedWrittenFileHash !== undefined) {
+    d.expectedWrittenFileHash = i.expectedWrittenFileHash;
   }
 }

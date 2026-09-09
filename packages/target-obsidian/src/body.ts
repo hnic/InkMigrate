@@ -47,22 +47,39 @@ export function convertEvernoteWikilinks(markdown: string, ctx: WikilinkResolveC
   return markdown.replace(
     /\[([^\]]*)\]\(evernote-wikilink:\/\/([0-9a-f]{64})\/([^)\s]+)\)/g,
     (_m, text: string, fingerprint: string, encTitle: string) => {
-      const title = decodeURIComponent(encTitle);
+      let title: string;
+      try {
+        title = decodeURIComponent(encTitle);
+      } catch {
+        // 非法百分号编码（用户手写的坏链接）：退回原始串，
+        // 避免单个坏链接抛 URIError 中断整篇转换。
+        title = encTitle;
+      }
       const suffix = ctx.filenameShortId
         ? `-${deriveStableShortId(computeStableKey(ctx.sourceInstanceId, `sha256:${fingerprint}`))}`
         : '';
+      // 目标与别名都要剔除会破坏 wikilink 语法的字符：sanitizeFilename 只替换
+      // `\ / : * ? " < > |`，`[` `]` 会残留（目标含 `]]` 会提前终止链接）；
+      // 别名里的 `|` 是分隔符，同样剔除（wikilink 内无法转义这些字符）。
       const target = `${sanitizeFilename(title, {
         maxLength: Math.max(1, ctx.maxFilenameLength - suffix.length),
-      })}${suffix}`;
-      return text.length > 0 && text !== title
-        ? `[[${target}|${text.replace(/[[\]|]/g, '')}]]`
+      })}${suffix}`.replace(/[[\]]/g, '');
+      const safeText = text.replace(/[[\]|]/g, '');
+      return safeText.length > 0 && text !== title
+        ? `[[${target}|${safeText}]]`
         : `[[${target}]]`;
     },
   );
 }
 
 export interface AssetLink {
-  /** 在 markdownBody 中占位的字符串，渲染后会被替换为实际嵌入语法。 */
+  /**
+   * 在 markdownBody 中占位的字符串，渲染后会被替换为实际嵌入语法。
+   *
+   * 契约：全部占位符必须互不为子串/前缀（按任意顺序替换都唯一确定），
+   * 且不会自然出现在正文中——adapter 当前的 `\x00IMG<n>\x00` 方案满足
+   * （结尾 `\x00` 保证 IMG1 不是 IMG10 的子串）；更换方案时需保持该性质。
+   */
   markdownPlaceholder: string;
   /** 附件在 Vault 内的相对路径。 */
   relativePath: string;
@@ -84,6 +101,10 @@ export interface RenderBodyInput {
 export function renderBody(i: RenderBodyInput): string {
   const { item } = i;
   const linkStyle = i.linkStyle ?? 'wikilink';
+  // N4（同 来源信息 callout 的 URL 处理）：Markdown 链接目标含空格时必须用
+  // <...> 包裹——来源文件名（如 "Screenshot (1).png"、"my file.pdf"）空格合法，
+  // 裸拼会把链接截断成坏链。无空格时保持裸路径，避免改变既有输出。
+  const mdDestination = (p: string): string => (/\s/.test(p) ? `<${p}>` : p);
 
   const lines: string[] = [];
 
@@ -111,7 +132,7 @@ export function renderBody(i: RenderBodyInput): string {
     const embed =
       linkStyle === 'wikilink'
         ? `![[${link.relativePath}]]`
-        : `![](${link.relativePath})`;
+        : `![](${mdDestination(link.relativePath)})`;
     body = body.split(link.markdownPlaceholder).join(embed);
   }
   lines.push(body);
@@ -123,7 +144,11 @@ export function renderBody(i: RenderBodyInput): string {
     lines.push('');
     for (const relPath of i.attachmentLinks) {
       const label = relPath.split('/').pop() ?? relPath;
-      const link = linkStyle === 'wikilink' ? `[[${relPath}]]` : `[${label}](${relPath})`;
+      const link =
+        linkStyle === 'wikilink'
+          ? `[[${relPath}]]`
+          : // 标签转义 `[`/`]`/`\`，目标按 mdDestination 处理空格。
+            `[${label.replace(/([\\[\]])/g, '\\$1')}](${mdDestination(relPath)})`;
       lines.push(`- ${link}`);
     }
     lines.push('');
@@ -142,7 +167,11 @@ function sourceLabel(item: SourceItem): string {
 
 /** 把 ISO 8601 时间格式化为 "YYYY-MM-DD HH:mm" 显示。 */
 function formatDateLine(iso: string): string {
-  // 保持时区信息：直接切片 "2025-12-20T10:35:00+08:00" → "2025-12-20 10:35"
-  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(iso);
-  return m ? `${m[1]} ${m[2]}` : iso;
+  // 保持时区信息：直接切片 "2025-12-20T10:35:00+08:00" → "2025-12-20 10:35"。
+  // Z 结尾的 UTC 时间补 " UTC" 标记，避免读者把 UTC 墙上时间误当本地时间
+  // （+08:00 用户会差 8 小时）。
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(.*)$/.exec(iso);
+  if (!m) return iso;
+  const zone = m[3] === 'Z' ? ' UTC' : '';
+  return `${m[1]} ${m[2]}${zone}`;
 }

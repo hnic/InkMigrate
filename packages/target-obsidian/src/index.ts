@@ -2,8 +2,7 @@ export {
   createObsidianTarget,
   type ObsidianTargetAdapter,
   type ObsidianTargetPlan,
-} from './adapter.js';
-export {
+  type AssetWriteRecord,
   OBSIDIAN_TARGET_KIND,
   OBSIDIAN_TARGET_VERSION,
   OBSIDIAN_ADAPTER_API_VERSION,
@@ -13,6 +12,19 @@ export {
   type ObsidianTargetConfig,
 } from './config.js';
 export type { ObsidianWriteResult } from './result.js';
-export { htmlToMarkdown, renderBody } from './body.js';
-export { stringifyFrontmatter } from './frontmatter.js';
-export { validateVault, noteRelativePath, assetRelativePath } from './paths.js';
+export {
+  htmlToMarkdown,
+  renderBody,
+  convertEvernoteWikilinks,
+  type AssetLink,
+  type RenderBodyInput,
+  type WikilinkResolveContext,
+} from './body.js';
+export { stringifyFrontmatter, type FrontmatterInput } from './frontmatter.js';
+export {
+  validateVault,
+  noteRelativePath,
+  assetRelativePath,
+  type NotePathInput,
+  type AssetPathInput,
+} from './paths.js';

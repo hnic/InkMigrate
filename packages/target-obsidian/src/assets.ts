@@ -1,7 +1,8 @@
 import {
   existsSync,
-  statSync,
   readFileSync,
+  openSync,
+  closeSync,
 } from 'node:fs';
 import {
   resolveWithin,
@@ -61,16 +62,35 @@ export function verifyAsset(i: VerifyAssetInput): void {
     throw new Error(`asset missing after write: "${i.relativePath}"`);
   }
   assertSymlinkSafe(i.vaultPath, abs);
-  const stat = statSync(abs);
-  if (stat.size === 0) {
-    throw new Error(`asset is zero bytes after write: "${i.relativePath}"`);
+  // C6/H4: 校验后用同一文件描述符读取（open 一次、read 走 fd）——路径在两次
+  // 系统调用之间被替换为指向 Vault 外的符号链接时（TOCTOU 竞态，见 core
+  // assertWriteDirSafe 的 H4 声明），读到的仍是校验过的那个 inode。
+  // fs 错误统一附上 relativePath，与本函数其它失败路径的诊断格式一致。
+  let bytes: Buffer;
+  try {
+    const fd = openSync(abs, 'r');
+    try {
+      bytes = readFileSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  } catch (e) {
+    throw new Error(
+      `asset unreadable during verification "${i.relativePath}": ${(e as Error).message}`,
+    );
   }
-  const bytes = readFileSync(abs);
+  // 先比对哈希再判空：内容寻址的空附件（哈希恰为空字节的 SHA-256）也应通过
+  // 哈希比对路径，零字节检查不能先于它使哈希校验不可达。
   const actual = writtenFileHash(bytes);
   if (actual !== i.expectedSha256) {
     throw new Error(
       `asset hash mismatch for "${i.relativePath}": expected ${i.expectedSha256}, got ${actual}`,
     );
+  }
+  // §13.7 附件必须非空：atomicWriteRaw 本就拒绝空内容（'content is empty'），
+  // 此处防御的是写入后磁盘被外部替换为零字节文件的情况。
+  if (bytes.length === 0) {
+    throw new Error(`asset is zero bytes after write: "${i.relativePath}"`);
   }
 }
 

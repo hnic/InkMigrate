@@ -15,10 +15,7 @@ describe('stringifyFrontmatter (§13.5 精简模式)', () => {
     const fm = stringifyFrontmatter({
       item,
       stableKey,
-      migrationJobId: 'mig-20260622-143000-a81f',
-      inkmigrateVersion: 1,
       sourceContentHash: 'sha256:abc',
-      importedAt: '2026-06-22T14:30:00+08:00',
     });
     expect(fm.startsWith('---\n')).toBe(true);
     expect(fm.endsWith('---\n')).toBe(true);
@@ -36,10 +33,7 @@ describe('stringifyFrontmatter (§13.5 精简模式)', () => {
     const fm = stringifyFrontmatter({
       item,
       stableKey,
-      migrationJobId: 'mig-20260622-143000-a81f',
-      inkmigrateVersion: 1,
       sourceContentHash: 'sha256:abc',
-      importedAt: '2026-06-22T14:30:00+08:00',
     });
     expect(fm).not.toContain('migration_job_id');
     expect(fm).not.toContain('imported_at');
@@ -70,10 +64,7 @@ describe('stringifyFrontmatter (§13.5 精简模式)', () => {
     const fm = stringifyFrontmatter({
       item: evernoteItem,
       stableKey,
-      migrationJobId: 'mig-x',
-      inkmigrateVersion: 1,
       sourceContentHash: 'sha256:abc',
-      importedAt: '2026-06-22T14:30:00+08:00',
     });
     const parsed = parse(fm.slice(4, -4));
     expect(parsed.tags).toEqual(['阅读', '项目/子项']);
@@ -88,11 +79,8 @@ describe('stringifyFrontmatter (§13.5 精简模式)', () => {
     // 同输入重渲染逐字节一致（幂等）
     const fm2 = stringifyFrontmatter({
       item: evernoteItem,
-      stableKey,
-      migrationJobId: 'mig-y', // job id 变化不得影响输出
-      inkmigrateVersion: 1,
+      stableKey, // job id 变化不得影响输出
       sourceContentHash: 'sha256:abc',
-      importedAt: '2027-01-01T00:00:00+08:00',
     });
     expect(fm2).toBe(fm);
   });
@@ -106,10 +94,7 @@ describe('stringifyFrontmatter (§13.5 精简模式)', () => {
     const fm = stringifyFrontmatter({
       item: noUrlItem,
       stableKey,
-      migrationJobId: 'j1',
-      inkmigrateVersion: 1,
       sourceContentHash: 'sha256:abc',
-      importedAt: '2026-06-22T14:30:00+08:00',
     });
     const parsed = parse(fm.slice(4, -4));
     expect(parsed.title).toBeDefined();
@@ -120,10 +105,7 @@ describe('stringifyFrontmatter (§13.5 精简模式)', () => {
     const fm = stringifyFrontmatter({
       item,
       stableKey,
-      migrationJobId: 'j1',
-      inkmigrateVersion: 1,
       sourceContentHash: 'sha256:abc',
-      importedAt: '2026-06-22T14:30:00+08:00',
     });
     const body = fm.replace(/^---\n/, '').replace(/---\n$/, '');
     const parsed = parse(body);
