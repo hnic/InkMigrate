@@ -362,3 +362,76 @@ describe('notebookMappings（§15.5 用户映射覆盖）', () => {
     }
   });
 });
+
+describe('streamNotes 游标续读（§15.3 大文件顺序提取）', () => {
+  it('从游标续读与从头读取产出一致，游标正确推进', async () => {
+    const path = join(FIXTURES, 'basic.enex');
+    // 全量基线
+    const all: RawNote[] = [];
+    await streamNotes(path, { onNote: (n) => all.push(n) });
+    expect(all).toHaveLength(2);
+
+    // 顺序提取：先 #1，再从游标续读 #2
+    const cursorOut = await streamNotes(path, {
+      stopAfterOrdinal: 1,
+      onNote: (n) => {
+        expect(n.ordinal).toBe(1);
+      },
+    });
+    const cursor = cursorOut.cursor!;
+    // 小文件单块即完：游标保守停在块前边界（ordinal 可能仍为 0）——续读正确性为准
+    expect(typeof cursor.offset).toBe('number');
+
+    const second: RawNote[] = [];
+    const out2 = await streamNotes(path, {
+      startOffset: cursor.offset,
+      ordinalBase: cursor.ordinal,
+      stopAfterOrdinal: 2,
+      onNote: (n) => second.push(n),
+    });
+    // 续读窗口可含重叠块内的前序笔记（调用方按 ordinal 过滤）；目标笔记必须在内且序号绝对
+    expect(second.map((n) => n.title)).toContain(all[1]!.title);
+    expect(second.find((n) => n.title === all[1]!.title)!.ordinal).toBe(2);
+    expect(out2.cursor!.ordinal).toBeGreaterThanOrEqual(cursor.ordinal);
+  });
+
+  it('乱序回退：目标序号小于游标时从 0 重读仍正确（由调用方回退，startOffset 语义自洽）', async () => {
+    const path = join(FIXTURES, 'interlinks.enex');
+    const all: RawNote[] = [];
+    await streamNotes(path, { onNote: (n) => all.push(n) });
+    expect(all).toHaveLength(2);
+    // 从 0 基数重读 #1（模拟回退路径）
+    const first: RawNote[] = [];
+    await streamNotes(path, {
+      startOffset: 0,
+      ordinalBase: 0,
+      stopAfterOrdinal: 1,
+      onNote: (n) => first.push(n),
+    });
+    expect(first[0]!.guid).toBe(all[0]!.guid);
+  });
+});
+
+describe('collectEnexFiles 的 Stack 目录约定（evernote-backup 导出）', () => {
+  it('子目录中的 .enex 取父目录名为缺省 Stack', async () => {
+    const d = tmp();
+    try {
+      mkdirSync(join(d, '技术 笔记本组'), { recursive: true });
+      copyFileSync(join(FIXTURES, 'basic.enex'), join(d, '技术 笔记本组', 'Linux.enex'));
+      copyFileSync(join(FIXTURES, 'Work@@@Projects.enex'), join(d, 'Work@@@Projects.enex'));
+      copyFileSync(join(FIXTURES, 'basic.enex'), join(d, '顶层.enex'));
+      const { files, warnings } = await collectEnexFiles([d], '@@@');
+      const linux = files.find((f) => f.baseName === 'Linux')!;
+      expect(linux.stack).toBe('技术 笔记本组');
+      expect(linux.notebook).toBe('Linux');
+      // 文件名 Stack@@@ 分隔符优先于目录约定（顶层文件仍取文件名 Stack）
+      const sep = files.find((f) => f.baseName === 'Work@@@Projects')!;
+      expect(sep.stack).toBe('Work');
+      // 目录约定提供 Stack → 不产生"无 Stack"警告；无 Stack 的顶层文件仍提示
+      expect(warnings.join('\n')).not.toContain('Linux.enex：无 Stack');
+      expect(warnings.join('\n')).toContain('顶层.enex：无 Stack');
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+});

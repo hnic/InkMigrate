@@ -1,4 +1,5 @@
 import { createReadStream } from 'node:fs';
+import { StringDecoder } from 'node:string_decoder';
 import sax from 'sax';
 
 /**
@@ -71,11 +72,21 @@ interface AccumState {
 
 export interface StreamNotesOptions {
   headerOnly?: boolean;
-  /** 读到该序号（1 基）的笔记后停止并销毁输入流。 */
+  /** 读到该序号（1 基、绝对值含 ordinalBase）的笔记后停止并销毁输入流。 */
   stopAfterOrdinal?: number;
+  /** §15.3 大文件顺序提取：从该字节偏移续读（必须是此前游标记录的安全边界）。 */
+  startOffset?: number;
+  /** 续读时序号基数（该文件此前已产出的笔记数）。 */
+  ordinalBase?: number;
   onNote: (note: RawNote) => void;
   /** §15.3 损坏隔离：结构性损坏的笔记跳过并回调（不产出、不中断流）。 */
   onIssue?: (message: string) => void;
+}
+
+/** 顺序提取游标：某文件已完整解析到的（换行对齐）字节边界与笔记数。 */
+export interface StreamCursor {
+  ordinal: number;
+  offset: number;
 }
 
 /**
@@ -97,6 +108,12 @@ function structuralIssue(acc: AccumState, headerOnly: boolean): string | null {
 export interface StreamOutcome {
   /** SAX/IO 错误；已产出的笔记仍然有效（§15.3 损坏隔离）。 */
   error?: Error;
+  /**
+   * 游标（安全续读边界）：已完整解析到的换行对齐字节偏移与累计笔记数。
+   * stopAfterOrdinal 提前停止时停留在包含目标笔记的块之前的边界——
+   * 下一次顺序提取从这里续读，代价仅为多解析一个块内的少量笔记。
+   */
+  cursor?: StreamCursor;
 }
 
 /**
@@ -106,19 +123,25 @@ export interface StreamOutcome {
 export function streamNotes(path: string, opts: StreamNotesOptions): Promise<StreamOutcome> {
   const headerOnly = opts.headerOnly ?? false;
   const saxStream = sax.createStream(false, { lowercase: true, trim: false });
-  const inputStream = createReadStream(path, { encoding: 'utf8' });
+  // 续读（startOffset>0）从文档中段开始，跳过根元素校验
+  const resuming = (opts.startOffset ?? 0) > 0;
+  const inputStream = createReadStream(path, resuming ? { start: opts.startOffset } : {});
 
   let settled = false;
   let outcome: StreamOutcome = {};
   const settle = (o: StreamOutcome) => {
     if (!settled) {
       settled = true;
-      outcome = o;
+      // 合并而非替换：stopAfterOrdinal 提前 settle 时保留已推进的游标
+      outcome = {
+        ...(outcome.cursor !== undefined ? { cursor: outcome.cursor } : {}),
+        ...o,
+      };
     }
   };
 
   // ── note 切片状态机 ──
-  let ordinal = 0;
+  let ordinal = opts.ordinalBase ?? 0;
   let inNote = false;
   let acc: AccumState | null = null;
   let currentField: string | null = null; // 'title'|'created'|'updated'|'tag'|'content'|'res:*'|'noteattr:*'
@@ -126,7 +149,7 @@ export function streamNotes(path: string, opts: StreamNotesOptions): Promise<Str
   let currentResource: RawResource | null = null;
   let inNoteAttributes = false;
   let inNoteCustomMetadata = false;
-  let sawRoot = false;
+  let sawRoot = resuming;
 
   const appendText = (t: string) => {
     if (inNote && currentField !== null) textBuf += t;
@@ -296,6 +319,9 @@ export function streamNotes(path: string, opts: StreamNotesOptions): Promise<Str
   saxStream.on('text', (t: string) => appendText(t));
   saxStream.on('cdata', (t: string) => appendText(t));
 
+  const startOffset = opts.startOffset ?? 0;
+  const ordinalBase = opts.ordinalBase ?? 0;
+
   return new Promise<StreamOutcome>((resolve) => {
     const done = () => resolve(outcome);
     saxStream.on('error', (e: Error) => {
@@ -316,6 +342,80 @@ export function streamNotes(path: string, opts: StreamNotesOptions): Promise<Str
     inputStream.on('close', () => {
       if (settled) done();
     });
-    inputStream.pipe(saxStream);
+
+    // ── 手动泵送（换行对齐字节计数，§15.3 大文件游标续读）──
+    // 只把累积缓冲喂到最后一个换行：换行是 ASCII，不会切断多字节 UTF-8 序列，
+    // 因此块边界可作为下次 startOffset 的安全续读点。
+    const decoder = new StringDecoder('utf8');
+    let tail = Buffer.alloc(0);
+    let fedBytes = 0; // 自 startOffset 起已喂给解析器的字节数
+    // 游标仅在整块喂完且未提前停止时推进（含目标笔记的块不计入，
+    // 保证下次顺序提取不会跳过未解析笔记）
+    let cursor: StreamCursor = { ordinal: ordinalBase, offset: startOffset };
+    let paused = false;
+    let finished = false;
+    outcome.cursor = cursor;
+
+    const finish = (): void => {
+      if (finished) return;
+      finished = true;
+      if (tail.length > 0) {
+        const text = decoder.write(tail) + decoder.end();
+        fedBytes += tail.length;
+        tail = Buffer.alloc(0);
+        if (text.length > 0) saxStream.write(text);
+        if (!settled) {
+          cursor = { ordinal, offset: startOffset + fedBytes };
+          outcome.cursor = cursor;
+        }
+      }
+      saxStream.end();
+    };
+    inputStream.on('end', finish);
+    inputStream.on('close', () => {
+      if (!finished && settled) {
+        // stopAfterOrdinal 提前 destroy：直接结束解析器（游标停留在块边界）
+        finished = true;
+        try {
+          saxStream.end();
+        } catch {
+          /* 已销毁 */
+        }
+      }
+    });
+
+    const pump = (): void => {
+      while (!paused && !settled && !finished) {
+        const chunk = inputStream.read();
+        if (chunk === null) return; // 等待下一个 readable/end 事件
+        const buffer = tail.length === 0 ? (chunk as Buffer) : Buffer.concat([tail, chunk as Buffer]);
+        const lastNl = buffer.lastIndexOf(0x0a);
+        if (lastNl < 0) {
+          tail = Buffer.from(buffer);
+          continue;
+        }
+        const feed = buffer.subarray(0, lastNl + 1);
+        tail = Buffer.from(buffer.subarray(lastNl + 1));
+        const text = decoder.write(feed);
+        fedBytes += feed.length;
+        if (text.length > 0) {
+          const ok = saxStream.write(text);
+          if (!ok) {
+            paused = true;
+            saxStream.once('drain', () => {
+              paused = false;
+              pump();
+            });
+            return;
+          }
+        }
+        if (!settled) {
+          cursor = { ordinal, offset: startOffset + fedBytes };
+          outcome.cursor = cursor;
+        }
+      }
+    };
+    inputStream.on('readable', pump);
+    pump();
   });
 }

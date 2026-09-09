@@ -32,7 +32,7 @@ import { processResources, type ProcessedResource } from '../resources/process-r
 import { enmlToHtml } from '../enml/enml-to-html.js';
 import { extractHtmlNote, scanHtmlNote } from '../html/html-export.js';
 import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
+import { createReadStream, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 /**
@@ -51,6 +51,9 @@ export interface EnexRefMetadata {
   baseName: string;
   ordinal: number;
   fileSha256: string;
+  /** §15.3 大文件快速完整性校验（size+mtime 未变则跳过全文件 SHA）。 */
+  sizeBytes: number;
+  mtimeMs: number;
   notebook: string;
   stack?: string | undefined;
   notebookKey: string;
@@ -137,6 +140,12 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
    */
   const guidMap = new Map<string, { title: string; fingerprint: string }>();
   let guidMapBuilt = false;
+  /**
+   * §15.3 大文件顺序提取游标：文件 → 已解析到的换行对齐字节边界。
+   * job-runner 按扫描顺序提取 → 单调推进 → 每文件总读取 ≈ 一次全量 + 每条一块。
+   * 回退（重试/乱序）自动从文件头重读，正确性不受影响。
+   */
+  const cursors = new Map<string, import('../enex/sax-notes.js').StreamCursor>();
 
   /** 懒重建 GUID 映射：流式重读全部 ENEX 的轻量头（仅当 scan 未构建过）。 */
   const ensureGuidMap = async (workspaceDir: string): Promise<void> => {
@@ -242,6 +251,8 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
             baseName: file.baseName,
             ordinal: n.ordinal,
             fileSha256: file.sha256,
+            sizeBytes: file.sizeBytes,
+            mtimeMs: file.mtimeMs,
             notebook: file.notebook,
             stack: file.stack,
             notebookKey: file.notebookKey,
@@ -305,14 +316,28 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
       // §15.10：跨进程 resume（新适配器实例）首次 extract 时懒重建 GUID 映射
       await ensureGuidMap(ctx.workspaceDir);
 
-      // §15.3 完整性：扫描与提取之间文件被修改即失败（指纹输入含文件哈希，静默继续会错账）
+      // §15.3 完整性：扫描与提取之间文件被修改即失败（指纹输入含文件哈希，静默继续会错账）。
+      // 大文件（GB 级）逐条全文件 SHA 不可行：size+mtime 未变走快速路径，变化再算 SHA 终判。
       const filePath = meta.enex?.path ?? meta.html?.path;
       const expectedSha = meta.enex?.fileSha256 ?? meta.html?.fileSha256;
-      const currentSha = await sha256FileQuick(filePath!);
-      if (currentSha !== expectedSha) {
-        throw new Error(
-          `导出文件在扫描后被修改：${filePath}（期望 ${expectedSha!.slice(0, 8)}，实际 ${currentSha.slice(0, 8)}），请重新扫描`,
-        );
+      let integrityOk = false;
+      if (meta.enex !== undefined) {
+        try {
+          const st = statSync(filePath!);
+          if (st.size === meta.enex.sizeBytes && st.mtimeMs === meta.enex.mtimeMs) {
+            integrityOk = true;
+          }
+        } catch {
+          // stat 失败走 SHA 路径给出准确错误
+        }
+      }
+      if (!integrityOk) {
+        const currentSha = await sha256FileQuick(filePath!);
+        if (currentSha !== expectedSha) {
+          throw new Error(
+            `导出文件在扫描后被修改：${filePath}（期望 ${expectedSha!.slice(0, 8)}，实际 ${currentSha.slice(0, 8)}），请重新扫描`,
+          );
+        }
       }
 
       // §15.12 HTML 导出分派
@@ -322,12 +347,21 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
       const enexMeta = meta.enex!;
 
       let raw: RawNote | undefined;
+      const prevCursor = cursors.get(enexMeta.path) ?? { ordinal: 0, offset: 0 };
+      // 回退保护：目标序号 ≤ 游标（重试/乱序）时从文件头重读
+      const useCursor =
+        enexMeta.ordinal > prevCursor.ordinal ? prevCursor : { ordinal: 0, offset: 0 };
       const outcome = await streamNotes(enexMeta.path, {
+        startOffset: useCursor.offset,
+        ordinalBase: useCursor.ordinal,
         stopAfterOrdinal: enexMeta.ordinal,
         onNote: (n) => {
           if (n.ordinal === enexMeta.ordinal) raw = n;
         },
       });
+      if (outcome.cursor !== undefined && outcome.cursor.ordinal >= useCursor.ordinal) {
+        cursors.set(enexMeta.path, outcome.cursor);
+      }
       if (raw === undefined) {
         throw new Error(
           `笔记 #${enexMeta.ordinal} 不存在于 ${enexMeta.path}${outcome.error !== undefined ? `（解析错误：${outcome.error.message}）` : ''}`,

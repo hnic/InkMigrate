@@ -70,7 +70,9 @@ function isResourcesDir(name: string): boolean {
   return name.endsWith('.resources') || name === '_resources';
 }
 
-/** 递归收集 .enex/.notes/.html 文件；符号链接一律跳过（防路径逃逸）。 */
+/** 递归收集 .enex/.notes/.html 文件；符号链接一律跳过（防路径逃逸）。
+ * dirStack：子文件的缺省 Stack——evernote-backup 导出把 Stack 输出为目录
+ * （`<Stack>/<笔记本>.enex`，§15.5 目录约定），文件名 Stack@@@ 分隔符仍优先。 */
 function walk(
   root: string,
   enex: string[],
@@ -78,6 +80,8 @@ function walk(
   html: string[],
   skipped: string[],
   includeHtml: boolean,
+  dirStack: string | undefined,
+  dirStackByFile: Map<string, string | undefined>,
 ): void {
   let entries;
   try {
@@ -97,12 +101,15 @@ function walk(
     }
     if (e.isDirectory()) {
       if (isResourcesDir(e.name)) continue;
-      walk(full, enex, notes, html, skipped, includeHtml);
+      walk(full, enex, notes, html, skipped, includeHtml, e.name, dirStackByFile);
       continue;
     }
     if (!e.isFile()) continue;
     const ext = extname(e.name).toLowerCase();
-    if (ext === '.enex') enex.push(full);
+    if (ext === '.enex') {
+      enex.push(full);
+      dirStackByFile.set(full, dirStack);
+    }
     else if (ext === '.notes') notes.push(full);
     else if (ext === '.html' && includeHtml) html.push(full);
     else skipped.push(full);
@@ -136,6 +143,7 @@ export async function collectEnexFiles(
   const htmlPaths: string[] = [];
   const skipped: string[] = [];
   const warnings: string[] = [];
+  const dirStackByFile = new Map<string, string | undefined>();
 
   for (const p of inputPaths) {
     let st;
@@ -151,11 +159,13 @@ export async function collectEnexFiles(
       continue;
     }
     if (st.isDirectory()) {
-      walk(p, enexPaths, notesPaths, htmlPaths, skipped, includeHtml);
+      walk(p, enexPaths, notesPaths, htmlPaths, skipped, includeHtml, undefined, dirStackByFile);
     } else if (st.isFile()) {
       const ext = extname(p).toLowerCase();
-      if (ext === '.enex') enexPaths.push(p);
-      else if (ext === '.notes') notesPaths.push(p);
+      if (ext === '.enex') {
+        enexPaths.push(p);
+        dirStackByFile.set(p, undefined); // 输入根直连文件：无目录 Stack
+      } else if (ext === '.notes') notesPaths.push(p);
       else if (ext === '.html' && includeHtml) htmlPaths.push(p);
       else skipped.push(p);
     } else {
@@ -183,6 +193,8 @@ export async function collectEnexFiles(
   for (const p of enexPaths) {
     const baseName = basename(p, extname(p));
     let { stack, notebook } = splitStackNotebook(baseName, stackSeparator);
+    // evernote-backup Stack 目录约定：文件名无 Stack 分隔符时取父目录名
+    if (stack === undefined) stack = dirStackByFile.get(p);
     // §15.5 用户映射覆盖（键接受带/不带 .enex 后缀）
     const mapping =
       mappings[baseName] !== undefined ? mappings[baseName] : mappings[`${baseName}.enex`];
