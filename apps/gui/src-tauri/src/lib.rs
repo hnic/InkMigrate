@@ -40,15 +40,6 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(sidecar.clone())
-        .on_window_event(move |_window, event| {
-            // 应用退出时关闭 sidecar 进程
-            if let tauri::WindowEvent::Destroyed = event {
-                let sc = sidecar_for_exit.clone();
-                tauri::async_runtime::spawn(async move {
-                    sc.shutdown().await;
-                });
-            }
-        })
         .setup(move |app| {
             // 启动 sidecar 进程
             let sidecar_clone = sidecar.clone();
@@ -66,6 +57,14 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![send_rpc, cancel_job])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(move |_app, event| {
+            // 应用退出时关闭 sidecar 进程。用 RunEvent::Exit 而非窗口 Destroyed
+            // （Destroyed 对任意窗口销毁都触发）；block_on 同步等待 kill 完成——
+            // spawn 出去的异步任务会随运行一起被丢弃，可能来不及执行而泄漏子进程。
+            if let tauri::RunEvent::Exit = event {
+                tauri::async_runtime::block_on(sidecar_for_exit.shutdown());
+            }
+        });
 }

@@ -1,8 +1,26 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type { ProgressEvent, LogEntry } from '../lib/types.js';
-import type { HealthDegradedNotification } from '@inkmigrate/protocol';
+import type { ProgressEvent, LogEntry, HealthDegradedNotification } from '../lib/types.js';
+
+/** 日志面板保留的最大条数（超出后丢最旧的）。 */
+const MAX_LOG_ENTRIES = 200;
+
+/** Engine 日志合法 level 白名单，异常值回退 info。 */
+const LOG_LEVELS = ['info', 'warn', 'error'] as const;
+
+/** method → phase 映射。让发起任务时自动声明对应的 phase，
+ * 各页面据此判断"我自己是否在运行"，无需依赖进度事件的异步到达。 */
+const METHOD_PHASE: Record<string, string> = {
+  'scan.start': 'scanning',
+  'migrate.start': 'migrating',
+  'migrate.resume': 'migrating',
+  'cleanup.unfavorite': 'cleanup',
+  'auth.login': 'login',
+};
+
+/** 日志条目自增 id：LogPanel 用作稳定 key（数组截断后索引 key 会漂移）。 */
+let nextLogId = 1;
 
 export function useSidecar() {
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
@@ -16,72 +34,73 @@ export function useSidecar() {
   const unlistenRefs = useRef<UnlistenFn[]>([]);
   /** I30: 进度条 2 秒清除定时器，避免与新任务进度条竞态。 */
   const progressClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** 长任务在途标记：同步重入守卫，防止并发长任务互相覆盖 busy/activePhase。 */
+  const longTaskInFlight = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
     // I9: listen() 在权限缺失或 event 系统异常时会 reject，补 .catch 避免未处理 rejection。
-    listen<ProgressEvent>('sidecar://progress', (e) => {
-      setProgress(e.payload);
-    }).then((fn) => { if (cancelled) fn(); else unlistenRefs.current.push(fn); })
-      .catch((e) => console.error('progress listen 失败', e));
+    const on = <T,>(event: string, label: string, handler: (payload: T) => void) => {
+      listen<T>(event, (e) => handler(e.payload))
+        .then((fn) => { if (cancelled) fn(); else unlistenRefs.current.push(fn); })
+        .catch((err) => console.error(`${label} listen 失败`, err));
+    };
 
-    listen<{ level: string; message: string }>('sidecar://log', (e) => {
+    on<ProgressEvent>('sidecar://progress', 'progress', setProgress);
+
+    on<{ level: string; message: string }>('sidecar://log', 'log', (p) => {
       setLogs((prev) => [
-        ...prev.slice(-199),
+        ...prev.slice(-(MAX_LOG_ENTRIES - 1)),
         {
-          level: (e.payload.level as 'info' | 'warn' | 'error') ?? 'info',
-          message: e.payload.message,
+          id: nextLogId++,
+          level: LOG_LEVELS.includes(p.level as LogEntry['level'])
+            ? (p.level as LogEntry['level'])
+            : 'info',
+          message: p.message,
           timestamp: Date.now(),
         },
       ]);
-    }).then((fn) => { if (cancelled) fn(); else unlistenRefs.current.push(fn); })
-      .catch((e) => console.error('log listen 失败', e));
+    });
 
-    listen<{ message: string }>('sidecar://crashed', (e) => {
+    on<{ message: string }>('sidecar://crashed', 'crashed', (p) => {
       setLogs((prev) => [
-        ...prev.slice(-199),
-        { level: 'error', message: `⚠️ ${e.payload.message}`, timestamp: Date.now() },
+        ...prev.slice(-(MAX_LOG_ENTRIES - 1)),
+        { id: nextLogId++, level: 'error', message: `⚠️ ${p.message}`, timestamp: Date.now() },
       ]);
       setBusy(false);
       // R4-M8: 重置 activePhase（原只重置 busy，页面级 activePhase 检查卡在错误状态）
       setActivePhase(null);
-    }).then((fn) => { if (cancelled) fn(); else unlistenRefs.current.push(fn); })
-      .catch((e) => console.error('crashed listen 失败', e));
+    });
 
-    listen<HealthDegradedNotification>('sidecar://health', (e) => {
-      setHealthDegraded(e.payload);
+    on<HealthDegradedNotification>('sidecar://health', 'health', (p) => {
+      setHealthDegraded(p);
       setLogs((prev) => [
-        ...prev.slice(-199),
+        ...prev.slice(-(MAX_LOG_ENTRIES - 1)),
         {
+          id: nextLogId++,
           level: 'error',
-          message: `⚠️ 引擎状态降级：${e.payload.message}`,
+          message: `⚠️ 引擎状态降级：${p.message}`,
           timestamp: Date.now(),
         },
       ]);
       // 降级意味着当前长任务结果不可信，重置 busy/activePhase（同 crashed 语义）
       setBusy(false);
       setActivePhase(null);
-    }).then((fn) => { if (cancelled) fn(); else unlistenRefs.current.push(fn); })
-      .catch((e) => console.error('health listen 失败', e));
+    });
 
     return () => {
       cancelled = true;
+      // 清掉残留的进度清除定时器，避免卸载后仍 setProgress
+      if (progressClearTimer.current !== null) {
+        clearTimeout(progressClearTimer.current);
+        progressClearTimer.current = null;
+      }
       for (const fn of unlistenRefs.current) {
         try { fn(); } catch { /* already unlistened */ }
       }
       unlistenRefs.current = [];
     };
   }, []);
-
-  /** method → phase 映射。让发起任务时自动声明对应的 phase，
-   * 各页面据此判断"我自己是否在运行"，无需依赖进度事件的异步到达。 */
-  const METHOD_PHASE: Record<string, string> = {
-    'scan.start': 'scanning',
-    'migrate.start': 'migrating',
-    'migrate.resume': 'migrating',
-    'cleanup.unfavorite': 'cleanup',
-    'auth.login': 'login',
-  };
 
   const rpcCall = useCallback(async (method: string, params: Record<string, unknown>) => {
     // R11: 只有长任务（在 METHOD_PHASE 中有声明的）才翻转 busy/progress/activePhase。
@@ -94,9 +113,15 @@ export function useSidecar() {
     // 注意：rpcCall 依赖 healthDegraded（见下方 useCallback deps）。降级翻转时
     // rpcCall 重建以拦截新长任务；勿把 deps 改回 []，否则冻结会因闭包过期失效。
     if (isLongTask) {
+      // activePhase 是异步翻转的，按钮禁用前的快速双击会重复启动任务；
+      // 用同步 ref 守卫拒绝并发长任务（两个长任务并跑会互相覆盖 busy/phase）。
+      if (longTaskInFlight.current) {
+        throw new Error('已有长任务在运行，请等待完成或先终止');
+      }
+      longTaskInFlight.current = true;
       setBusy(true);
       setProgress(null);
-      setActivePhase(METHOD_PHASE[method] ?? null);
+      setActivePhase(METHOD_PHASE[method]);
       // I30: 清掉上一轮残留的清进度定时器，避免它在 2 秒后清掉新任务的进度条。
       if (progressClearTimer.current !== null) {
         clearTimeout(progressClearTimer.current);
@@ -113,8 +138,15 @@ export function useSidecar() {
         }, 2000);
       }
       return result;
+    } catch (err) {
+      // 失败路径立即清除进度，避免最后一次部分进度（如 45%）永久残留
+      if (isLongTask) {
+        setProgress(null);
+      }
+      throw err;
     } finally {
       if (isLongTask) {
+        longTaskInFlight.current = false;
         setBusy(false);
         setActivePhase(null);
       }
@@ -122,7 +154,10 @@ export function useSidecar() {
   }, [healthDegraded]);
 
   const addLog = useCallback((level: LogEntry['level'], message: string) => {
-    setLogs((prev) => [...prev.slice(-199), { level, message, timestamp: Date.now() }]);
+    setLogs((prev) => [
+      ...prev.slice(-(MAX_LOG_ENTRIES - 1)),
+      { id: nextLogId++, level, message, timestamp: Date.now() },
+    ]);
   }, []);
 
   /** 终止当前正在运行的长任务。静默调用（不经 rpcCall，不翻转 busy），

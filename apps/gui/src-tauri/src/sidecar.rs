@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command, ChildStdin, ChildStdout};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, oneshot, watch};
 use std::collections::HashMap;
 
 /// JSON-RPC 2.0 Request
@@ -48,6 +48,19 @@ pub struct RpcError {
     pub data: Option<serde_json::Value>,
 }
 
+/// sidecar 启动状态。webview 加载可能早于 sidecar 就绪，`send_rpc` 据此
+/// 在就绪前等待，避免前端首条 RPC 以「sidecar 未启动」竞态失败。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidecarState {
+    Starting,
+    Ready,
+    Failed,
+}
+
+/// `send_rpc` 等待 sidecar 启动的上限（秒）。正常启动只需毫秒级；
+/// 上限只用于启动卡死时兜底，防止请求永久挂起。
+const STARTUP_WAIT_TIMEOUT_SECS: u64 = 30;
+
 /// Sidecar 管理器：管理 Node 子进程的生命周期和 JSON-RPC 通信。
 ///
 /// 并发设计：所有可变状态都内部化了（next_id 用原子、stdin/child 用内部 Mutex），
@@ -59,16 +72,22 @@ pub struct SidecarManager {
     next_id: AtomicU64,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<RpcResponse>>>>,
     is_shutting_down: Arc<AtomicBool>,
+    /// 启动状态广播：Starting → Ready/Failed 只迁移一次。
+    state_tx: watch::Sender<SidecarState>,
+    state_rx: watch::Receiver<SidecarState>,
 }
 
 impl SidecarManager {
     pub fn new() -> Self {
+        let (state_tx, state_rx) = watch::channel(SidecarState::Starting);
         Self {
             child: Mutex::new(None),
             stdin: Mutex::new(None),
             next_id: AtomicU64::new(1),
             pending: Arc::new(Mutex::new(HashMap::new())),
             is_shutting_down: Arc::new(AtomicBool::new(false)),
+            state_tx,
+            state_rx,
         }
     }
 
@@ -77,6 +96,16 @@ impl SidecarManager {
     /// 开发模式（INKMIGRATE_ENGINE_PATH 环境变量存在）：用系统 node 运行指定的 engine。
     /// 生产模式（打包后）：用 resource_dir 下的打包 Node + engine + chromium。
     pub async fn start(&self, app: AppHandle) -> Result<(), String> {
+        let result = self.start_inner(app).await;
+        // 无论成败都广播状态：让等待中的 send_rpc 立即放行或快速失败
+        let _ = self.state_tx.send(match result {
+            Ok(()) => SidecarState::Ready,
+            Err(_) => SidecarState::Failed,
+        });
+        result
+    }
+
+    async fn start_inner(&self, app: AppHandle) -> Result<(), String> {
         let (node_bin, engine_path, browsers_path, native_binding) = resolve_sidecar_paths(&app);
 
         let mut cmd = Command::new(&node_bin);
@@ -141,6 +170,27 @@ impl SidecarManager {
         method: String,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
+        // 0. 前端加载可能早于 sidecar 就绪（setup 里是异步 spawn 启动的）：
+        //    先等启动完成再继续，避免首条 RPC 竞态失败；启动失败则快速返回。
+        {
+            let mut state = self.state_rx.clone();
+            state.borrow_and_update(); // 标记当前值为已读，changed() 只等后续迁移
+            while *state.borrow() == SidecarState::Starting {
+                if tokio::time::timeout(
+                    std::time::Duration::from_secs(STARTUP_WAIT_TIMEOUT_SECS),
+                    state.changed(),
+                )
+                .await
+                .is_err()
+                {
+                    return Err("等待 sidecar 启动超时".to_string());
+                }
+            }
+            if *state.borrow() == SidecarState::Failed {
+                return Err("sidecar 未启动".to_string());
+            }
+        }
+
         // 1. 原子分配 id（无锁）
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 

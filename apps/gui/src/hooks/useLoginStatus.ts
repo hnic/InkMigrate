@@ -1,6 +1,6 @@
-import { useEffect, useCallback, useRef } from 'react';
+import { useEffect, useCallback, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import type { AppSettings } from '../lib/types.js';
+import type { AppSettings, AuthStatusResult } from '../lib/types.js';
 
 interface Options {
   settings: AppSettings;
@@ -17,35 +17,47 @@ interface Options {
  *   阻塞导致卡片误判"未登录"。
  */
 export function useLoginStatus({ settings, update }: Options) {
-  // 防止并发重复检测
-  const inFlight = useRef(false);
-  // mount 后只自动检测一次的标记（stateDir 变化时仍可再触发）
-  const firstRun = useRef(true);
+  /** 递增请求令牌：新检测使旧的在途结果作废，避免旧目录的结果覆盖新目录的登录态 */
+  const reqIdRef = useRef(0);
+  /** 始终指向最新 refresh；自动检测只依赖真正的触发输入（stateDir/source），
+   *  不随 refresh 闭包身份变化（loggedIn 翻转等）而重复触发 */
+  const refreshRef = useRef<() => Promise<void>>(async () => {});
+  /** Profile 路径展示（auth.status 顺带返回，供 LoginPage 复用，避免二次 RPC） */
+  const [profilePath, setProfilePath] = useState('');
 
   const refresh = useCallback(async () => {
-    if (!settings.stateDir || inFlight.current) return;
-    inFlight.current = true;
+    if (!settings.stateDir) {
+      setProfilePath('');
+      return;
+    }
+    const myReq = ++reqIdRef.current;
     try {
       const result = await invoke('send_rpc', {
         method: 'auth.status',
         params: { source: settings.source, stateDir: settings.stateDir },
-      }) as { profileExists: boolean; profilePath: string };
+      }) as AuthStatusResult;
+      if (myReq !== reqIdRef.current) return; // 已被更新的检测取代，丢弃过期结果
+      setProfilePath(result.profileExists ? result.profilePath : '');
       // 只在结果与当前值不同时写，避免无谓渲染
       if (result.profileExists !== Boolean(settings.loggedIn)) {
         update({ loggedIn: result.profileExists });
       }
-    } catch {
-      // 检测失败保留旧值，静默
-    } finally {
-      inFlight.current = false;
+    } catch (err) {
+      // 检测失败保留旧值，UI 保持静默，但留下诊断痕迹
+      console.warn('[useLoginStatus] auth.status 检测失败:', err);
     }
   }, [settings.stateDir, settings.source, settings.loggedIn, update]);
 
-  // stateDir 变化时自动检测；应用启动后若已有 stateDir 也检测一次
   useEffect(() => {
-    void refresh();
-    firstRun.current = false;
+    refreshRef.current = refresh;
   }, [refresh]);
 
-  return { refresh };
+  // stateDir/source 变化时自动检测一次；应用启动后若已有 stateDir 也在此触发
+  useEffect(() => {
+    void refreshRef.current();
+    // 依赖变化或卸载时使在途结果失效，防止过期回写
+    return () => { reqIdRef.current += 1; };
+  }, [settings.stateDir, settings.source]);
+
+  return { refresh, profilePath };
 }

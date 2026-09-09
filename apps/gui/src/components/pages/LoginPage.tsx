@@ -1,6 +1,5 @@
-import { useState, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import type { AppSettings, OperationState } from '../../lib/types.js';
+import { useState } from 'react';
+import type { AppSettings, OperationState, AuthLoginResult } from '../../lib/types.js';
 
 interface Props {
   settings: AppSettings;
@@ -9,30 +8,29 @@ interface Props {
   addLog: (level: 'info' | 'warn' | 'error', message: string) => void;
   /** 应用级登录态刷新（由 useLoginStatus 提供）。静默，不触发 busy。 */
   refreshLogin: () => Promise<void>;
+  /** Profile 路径（由 useLoginStatus 的 auth.status 顺带返回，避免本页重复查询）。 */
+  profilePath: string;
 }
 
-export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin }: Props) {
+/** 状态点颜色 / 文案（process 态优先，否则对齐 settings.loggedIn）。 */
+const STATUS_COLOR: Record<OperationState, string> = {
+  success: 'var(--success)',
+  failed: 'var(--error)',
+  loading: 'var(--warning)',
+  idle: 'var(--text-dim)',
+};
+const STATUS_TEXT: Record<OperationState, string> = {
+  success: '已登录',
+  failed: '登录失败',
+  loading: '登录中...',
+  idle: '未登录',
+};
+
+export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin, profilePath }: Props) {
   // loginState 现在只承载【过程态】：登录中 / 登录失败。
   // 稳定态（已登录/未登录）由 settings.loggedIn 驱动，与顶栏保持单一真相源。
   const [loginState, setLoginState] = useState<OperationState>('idle');
-  const [profilePath, setProfilePath] = useState('');
   const [loading, setLoading] = useState(false);
-
-  // 已登录时拉取 profile 路径用于展示（静默，不触发 busy）
-  useEffect(() => {
-    let cancelled = false;
-    if (settings.stateDir && settings.loggedIn) {
-      invoke<{ profileExists: boolean; profilePath: string }>('send_rpc', {
-        method: 'auth.status',
-        params: { source: settings.source, stateDir: settings.stateDir },
-      })
-        .then((r) => { if (!cancelled) setProfilePath(r.profileExists ? r.profilePath : ''); })
-        .catch(() => { if (!cancelled) setProfilePath(''); });
-    } else {
-      setProfilePath('');
-    }
-    return () => { cancelled = true; };
-  }, [settings.stateDir, settings.source, settings.loggedIn]);
 
   async function handleLogin() {
     setLoading(true);
@@ -42,7 +40,10 @@ export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin }: P
         source: settings.source,
         stateDir: settings.stateDir,
         ...(settings.favoritesUrl ? { favoritesUrl: settings.favoritesUrl } : {}),
-      }) as { state: string; favoritesUrl?: string };
+      }) as AuthLoginResult;
+      if (typeof result?.state !== 'string') {
+        throw new Error('登录响应格式异常（缺少 state 字段）');
+      }
       const ok = result.state === 'logged-in';
       // 过程态归位：稳定显示交给 settings.loggedIn（由 refreshLogin 写入）
       setLoginState(ok ? 'idle' : 'failed');
@@ -53,7 +54,12 @@ export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin }: P
           update({ favoritesUrl: result.favoritesUrl });
           addLog('info', `已自动获取收藏页 URL`);
         }
-        await refreshLogin();
+        try {
+          await refreshLogin();
+        } catch (e) {
+          // 登录本身已成功，刷新失败不应误报为「登录失败」
+          addLog('warn', `登录成功，但刷新登录状态失败：${e instanceof Error ? e.message : String(e)}`);
+        }
       }
     } catch (e) {
       setLoginState('failed');
@@ -66,33 +72,40 @@ export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin }: P
 
   async function handleClear() {
     setLoading(true);
+    setLoginState('loading');
     try {
       const result = await rpcCall('auth.clear', {
         source: settings.source,
         stateDir: settings.stateDir,
-      }) as { cleared: boolean };
+      }) as { cleared?: boolean };
+      if (typeof result?.cleared !== 'boolean') {
+        throw new Error('清除响应格式异常（缺少 cleared 字段）');
+      }
       addLog('info', result.cleared ? 'Profile 已删除' : 'Profile 不存在');
-      setLoginState('idle');
-      await refreshLogin();
+      try {
+        await refreshLogin();
+      } catch (e) {
+        // 清除本身已成功，刷新失败不应误报为「清除失败」
+        addLog('warn', `Profile 已清除，但刷新登录状态失败：${e instanceof Error ? e.message : String(e)}`);
+      }
     } catch (e) {
       addLog('error', `清除失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
+      // 过程态归位，稳定态交回 settings.loggedIn
+      setLoginState('idle');
       setLoading(false);
     }
   }
 
   // 卡片显示判定：过程态（loading/failed）优先，否则对齐 settings.loggedIn
-  const displayState: OperationState =
-    loginState === 'loading' ? 'loading' :
-    loginState === 'failed' ? 'failed' :
-    settings.loggedIn ? 'success' : 'idle';
-
-  const statusColor = displayState === 'success' ? 'var(--success)' :
-                      displayState === 'failed' ? 'var(--error)' :
-                      displayState === 'loading' ? 'var(--warning)' : 'var(--text-dim)';
-  const statusText = displayState === 'success' ? '已登录' :
-                     displayState === 'failed' ? '登录失败' :
-                     displayState === 'loading' ? '登录中...' : '未登录';
+  let displayState: OperationState = 'idle';
+  if (loginState === 'loading' || loginState === 'failed') {
+    displayState = loginState;
+  } else if (settings.loggedIn) {
+    displayState = 'success';
+  }
+  const statusColor = STATUS_COLOR[displayState];
+  const statusText = STATUS_TEXT[displayState];
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>

@@ -39,9 +39,18 @@ function EvernotePreview({ settings, update, rpcCall, addLog }: Omit<Props, 'act
         source: settings.source,
         stateDir: settings.stateDir,
         configPath: settings.configPath,
-      })) as { uniqueItems: number; byNotebook: Record<string, number>; issues: string[] };
-      setResult(res);
-      addLog('info', `预览完成：${res.uniqueItems} 条`);
+      })) as {
+        uniqueItems?: number;
+        byNotebook?: Record<string, number>;
+        issues?: string[];
+      };
+      // 响应字段做容错归一，避免后端缺字段时渲染路径抛错
+      setResult({
+        uniqueItems: res.uniqueItems ?? 0,
+        byNotebook: res.byNotebook ?? {},
+        issues: Array.isArray(res.issues) ? res.issues : [],
+      });
+      addLog('info', `预览完成：${res.uniqueItems ?? 0} 条`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setError(msg);
@@ -113,6 +122,7 @@ function EvernotePreview({ settings, update, rpcCall, addLog }: Omit<Props, 'act
                 ⚠️ {result.issues.length} 条注意事项：
                 {'\n'}
                 {result.issues.slice(0, 5).join('\n')}
+                {result.issues.length > 5 ? `\n…还有 ${result.issues.length - 5} 条未显示` : ''}
               </div>
             )}
           </div>
@@ -124,6 +134,9 @@ function EvernotePreview({ settings, update, rpcCall, addLog }: Omit<Props, 'act
 
 function ToutiaoScan({ settings, update, rpcCall, addLog, activePhase, cancel }: Props) {
   const scanning = activePhase === 'scanning';
+  // 本地同步重入守卫：activePhase 要等 setState 重渲染后才生效，
+  // 快速双击会在按钮禁用前重复触发 scan.start
+  const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ uniqueItems: number; terminationReason: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -134,20 +147,28 @@ function ToutiaoScan({ settings, update, rpcCall, addLog, activePhase, cancel }:
   };
 
   async function handleScan() {
+    if (busy || scanning) return;
     setResult(null);
     setError(null);
+    setBusy(true);
     try {
       const res = await rpcCall('scan.start', {
         source: settings.source,
         stateDir: settings.stateDir,
         favoritesUrl: settings.favoritesUrl,
-      }) as { uniqueItems: number; terminationReason: string };
-      setResult(res);
-      addLog('info', `扫描完成：${res.uniqueItems} 条`);
+      }) as { uniqueItems?: number; terminationReason?: string };
+      // 响应字段做容错归一，避免后端缺字段时渲染路径抛错
+      setResult({
+        uniqueItems: res.uniqueItems ?? 0,
+        terminationReason: res.terminationReason ?? '',
+      });
+      addLog('info', `扫描完成：${res.uniqueItems ?? 0} 条`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setError(msg);
       addLog('error', `扫描失败：${msg}`);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -168,7 +189,7 @@ function ToutiaoScan({ settings, update, rpcCall, addLog, activePhase, cancel }:
         </div>
 
         <div style={{ display: 'flex', gap: '8px' }}>
-          <button onClick={handleScan} disabled={scanning || !settings.stateDir || !settings.favoritesUrl || !settings.loggedIn}>
+          <button onClick={handleScan} disabled={busy || scanning || !settings.stateDir || !settings.favoritesUrl || !settings.loggedIn}>
             {scanning ? '扫描中...' : '开始扫描'}
           </button>
           <button onClick={() => void cancel()} disabled={!scanning} className="btn-danger">

@@ -1,3 +1,11 @@
 /target
 /gen/schemas
+# resources/ 是本地构建产物（Node + engine bundle + chromium），由仓库根的
+# `pnpm sidecar:build`（scripts/build-sidecar.mjs）生成，不入库；
+# fresh clone 需先执行该脚本再 `tauri build`。
 resources/
+
+# 签名密钥与环境变量，防止误提交（如 Tauri updater 证书、本地凭据）
+*.pem
+.env
+.env.*

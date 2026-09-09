@@ -6,18 +6,21 @@ export type {
   MigrateResumableResult as ResumableJob,
   MigrateResult,
   StatusQueryResult,
-  ScanStartResult,
-  CleanupResult,
   AuthLoginResult,
   AuthStatusResult,
+  HealthDegradedNotification,
 } from '@inkmigrate/protocol';
 
 import type { LogNotification } from '@inkmigrate/protocol';
 
-/** GUI 本地日志条目（含 timestamp，由 useSidecar 在收到通知时附加）。 */
+/** GUI 本地日志条目（含自增 id 与 timestamp，由 useSidecar 在收到通知时附加）。 */
 export interface LogEntry extends LogNotification {
+  id: number;
   timestamp: number;
 }
+
+/** 来源类型：toutiao（浏览器收藏）| evernote（ENEX/HTML 导出文件，无需登录）。 */
+export type SourceAdapterKind = 'toutiao' | 'evernote';
 
 export interface AppSettings {
   stateDir: string;
@@ -27,8 +30,8 @@ export interface AppSettings {
   target: string;
   /** 登录状态（由 LoginPage 检测后写入） */
   loggedIn?: boolean;
-  /** 来源类型：toutiao（浏览器收藏）| evernote（ENEX/HTML 导出文件，无需登录）。 */
-  sourceAdapter?: 'toutiao' | 'evernote';
+  /** 来源类型，见 SourceAdapterKind。 */
+  sourceAdapter?: SourceAdapterKind;
   /** inkmigrate.yaml 路径（evernote 来源必填；含 inputPaths/formats 等定义）。 */
   configPath?: string;
 }

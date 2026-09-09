@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import type { AppSettings, ResumableJob } from '../../lib/types.js';
+import type { AppSettings, ResumableJob, MigrateResult } from '../../lib/types.js';
 import { ConfigPrompt } from '../ConfigPrompt.js';
 
 interface Props {
@@ -12,14 +12,6 @@ interface Props {
   activePhase: string | null;
   /** 终止当前正在运行的长任务。 */
   cancel: () => Promise<void>;
-}
-
-interface MigrateResult {
-  status: string;
-  scanCount: number;
-  reconciliationOk: boolean;
-  reconciliationReason?: string;
-  jobId: string;
 }
 
 export function MigratePage({ settings, update, rpcCall, addLog, activePhase, cancel }: Props) {

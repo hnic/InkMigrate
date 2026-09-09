@@ -17,7 +17,7 @@ export default function App() {
   const [page, setPage] = useState<PageId>('login');
   const { settings, update } = useSettings();
   const { rpcCall, progress, logs, busy, activePhase, healthDegraded, addLog, cancel } = useSidecar();
-  const { refresh: refreshLogin } = useLoginStatus({ settings, update });
+  const { refresh: refreshLogin, profilePath } = useLoginStatus({ settings, update });
   // Evernote 文件源无登录步骤：默认页与 login 页重定向到扫描
   const isEvernote = settings.sourceAdapter === 'evernote';
   const effectivePage: PageId =
@@ -89,7 +89,7 @@ export default function App() {
 
           {/* 当前页面 */}
           <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
-            {effectivePage === 'login' && <LoginPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} refreshLogin={refreshLogin} />}
+            {effectivePage === 'login' && <LoginPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} refreshLogin={refreshLogin} profilePath={profilePath} />}
             {effectivePage === 'scan' && <ScanPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} activePhase={activePhase} cancel={cancel} />}
             {effectivePage === 'migrate' && <MigratePage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} activePhase={activePhase} cancel={cancel} />}
             {effectivePage === 'cleanup' && <CleanupPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} busy={busy} activePhase={activePhase} cancel={cancel} />}

@@ -1,15 +1,19 @@
 :root {
+  /* 声明深色配色，让 select 弹层/滚动条/自动填充等原生控件表面也走深色 */
+  color-scheme: dark;
   --bg: #1a1a2e;
   --bg-panel: #16213e;
   --bg-hover: #0f3460;
   --text: #e0e0e0;
-  --text-dim: #888;
+  --text-dim: #a0a0a0;
   --accent: #0f3460;
   --accent-hover: #1a4a7a;
   --success: #2ecc71;
   --warning: #f39c12;
   --error: #e74c3c;
+  --error-hover: #c0392b;
   --border: #2a2a4a;
+  --focus: #4a9eff;
 }
 
 * {
@@ -32,6 +36,7 @@ button {
   padding: 8px 16px;
   border-radius: 6px;
   cursor: pointer;
+  font-family: inherit;
   font-size: 14px;
   transition: background 0.2s;
 }
@@ -50,20 +55,26 @@ button.btn-danger {
 }
 
 button.btn-danger:hover:not(:disabled) {
-  background: #c0392b;
+  background: var(--error-hover);
 }
 
-input, textarea {
+/* 文本类输入控件（checkbox/radio/file 保持原生外观，避免被 width:100% 拉伸） */
+input:not([type='checkbox']):not([type='radio']):not([type='file']),
+textarea,
+select {
   background: var(--bg-panel);
   color: var(--text);
   border: 1px solid var(--border);
   padding: 8px 12px;
   border-radius: 6px;
   font-size: 14px;
+  font-family: inherit;
   width: 100%;
 }
 
-input:focus, textarea:focus {
-  outline: none;
-  border-color: var(--accent-hover);
+/* 高对比焦点环：仅靠 border 变色在深色主题下难以辨识 */
+input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+  border-color: var(--focus);
 }

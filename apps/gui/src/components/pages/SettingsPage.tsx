@@ -1,4 +1,4 @@
-import type { AppSettings } from '../../lib/types.js';
+import type { AppSettings, SourceAdapterKind } from '../../lib/types.js';
 
 interface Props {
   settings: AppSettings;
@@ -39,7 +39,7 @@ export function SettingsPage({ settings, update }: Props) {
           <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>来源类型</label>
           <select
             value={settings.sourceAdapter ?? 'toutiao'}
-            onChange={(e) => update({ sourceAdapter: e.target.value as 'toutiao' | 'evernote' })}
+            onChange={(e) => update({ sourceAdapter: e.target.value as SourceAdapterKind })}
             style={{ width: '200px' }}
           >
             <option value="toutiao">今日头条（浏览器收藏）</option>

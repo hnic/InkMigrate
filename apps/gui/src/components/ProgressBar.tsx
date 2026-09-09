@@ -1,44 +1,88 @@
+import type { CSSProperties } from 'react';
 import type { ProgressEvent } from '../lib/types.js';
+
+const phaseLabels: Record<string, string> = {
+  scanning: '🔍 扫描中',
+  migrating: '📦 迁移中',
+  cleanup: '🗑️ 清理中',
+  login: '🔑 登录中',
+};
+const stageLabels: Record<string, string> = {
+  scanning: '扫描收藏列表',
+  extracting: '提取并写入笔记',
+  planning: '规划迁移',
+  reporting: '生成报告',
+};
+
+// 静态样式提升到模块级：本组件每个进度 tick 都会重渲染，避免重复构建对象
+const panelStyle: CSSProperties = {
+  background: 'var(--bg-panel)',
+  padding: '14px 16px',
+  borderRadius: '8px',
+  border: '1px solid var(--accent)',
+  boxShadow: '0 0 12px rgba(15, 52, 96, 0.3)',
+};
+const headerRowStyle: CSSProperties = {
+  display: 'flex',
+  justifyContent: 'space-between',
+  alignItems: 'center',
+  marginBottom: '8px',
+};
+const phaseTextStyle: CSSProperties = { fontWeight: 700, fontSize: '15px' };
+const stageTextStyle: CSSProperties = {
+  color: 'var(--text-dim)',
+  marginLeft: '6px',
+  fontWeight: 400,
+  fontSize: '13px',
+};
+const countsTextStyle: CSSProperties = { color: 'var(--text-dim)', marginLeft: '8px', fontWeight: 400 };
+const trackStyle: CSSProperties = {
+  height: '10px',
+  background: 'var(--bg-hover)',
+  borderRadius: '5px',
+  overflow: 'hidden',
+  position: 'relative',
+};
+const currentItemStyle: CSSProperties = {
+  color: 'var(--text-dim)',
+  fontSize: '12px',
+  marginTop: '6px',
+  whiteSpace: 'nowrap',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+};
+const countsRowStyle: CSSProperties = {
+  display: 'flex',
+  gap: '16px',
+  marginTop: '8px',
+  fontSize: '13px',
+  fontWeight: 600,
+};
 
 export function ProgressBar({ progress }: { progress: ProgressEvent | null }) {
   if (progress === null) return null;
 
-  const pct = progress.total > 0 ? Math.round((progress.current / progress.total) * 100) : 0;
+  // 钳制到 [0,100] 并向下取整：防止 current>total 时撑爆宽度，
+  // 也避免 99.6% 这类未完成任务因四舍五入提前显示 100%
+  const rawPct = progress.total > 0 ? (progress.current / progress.total) * 100 : 0;
+  const pct = Math.min(100, Math.max(0, Math.floor(rawPct)));
 
-  const phaseLabels: Record<string, string> = {
-    scanning: '🔍 扫描中',
-    migrating: '📦 迁移中',
-    cleanup: '🗑️ 清理中',
-    login: '🔑 登录中',
-  };
-  const stageLabels: Record<string, string> = {
-    scanning: '扫描收藏列表',
-    extracting: '提取并写入笔记',
-    planning: '规划迁移',
-    reporting: '生成报告',
-  };
   const phaseLabel = phaseLabels[progress.phase] ?? progress.phase;
   const stageLabel = progress.stage !== undefined ? (stageLabels[progress.stage] ?? progress.stage) : null;
 
   return (
-    <div style={{
-      background: 'var(--bg-panel)',
-      padding: '14px 16px',
-      borderRadius: '8px',
-      border: '1px solid var(--accent)',
-      boxShadow: '0 0 12px rgba(15, 52, 96, 0.3)',
-    }}>
+    <div style={panelStyle}>
       {/* 第一行：阶段 + 百分比 */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-        <span style={{ fontWeight: 700, fontSize: '15px' }}>
+      <div style={headerRowStyle}>
+        <span style={phaseTextStyle}>
           {phaseLabel}
           {stageLabel !== null && (
-            <span style={{ color: 'var(--text-dim)', marginLeft: '6px', fontWeight: 400, fontSize: '13px' }}>
+            <span style={stageTextStyle}>
               · {stageLabel}
             </span>
           )}
           {progress.total > 0 && (
-            <span style={{ color: 'var(--text-dim)', marginLeft: '8px', fontWeight: 400 }}>
+            <span style={countsTextStyle}>
               {progress.current} / {progress.total}
             </span>
           )}
@@ -52,13 +96,14 @@ export function ProgressBar({ progress }: { progress: ProgressEvent | null }) {
 
       {/* 进度条 */}
       {progress.total > 0 && (
-        <div style={{
-          height: '10px',
-          background: 'var(--bg-hover)',
-          borderRadius: '5px',
-          overflow: 'hidden',
-          position: 'relative',
-        }}>
+        <div
+          style={trackStyle}
+          role="progressbar"
+          aria-label={`${phaseLabel}进度`}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={pct}
+        >
           <div
             style={{
               width: `${pct}%`,
@@ -75,21 +120,14 @@ export function ProgressBar({ progress }: { progress: ProgressEvent | null }) {
 
       {/* 当前条目 */}
       {progress.currentItem && (
-        <div style={{
-          color: 'var(--text-dim)',
-          fontSize: '12px',
-          marginTop: '6px',
-          whiteSpace: 'nowrap',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-        }}>
+        <div style={currentItemStyle}>
           {progress.currentItem}
         </div>
       )}
 
       {/* 状态计数 */}
       {progress.counts && (
-        <div style={{ display: 'flex', gap: '16px', marginTop: '8px', fontSize: '13px', fontWeight: 600 }}>
+        <div style={countsRowStyle}>
           {progress.counts.verified !== undefined && (
             <span style={{ color: 'var(--success)' }}>✅ {progress.counts.verified}</span>
           )}
