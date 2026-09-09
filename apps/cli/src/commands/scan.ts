@@ -9,6 +9,8 @@ import {
 import { join, resolve } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { parsePositiveInt } from '../util.js';
+import { resolveEvernoteSource, type SourceWiring } from '../source-wiring.js';
+import { lastScanIssues } from '@inkmigrate/source-evernote';
 
 /**
  * §22 `inkmigrate scan` 命令。
@@ -30,6 +32,7 @@ export function createScanCommand(): Command {
       'https://www.toutiao.com/favorites',
     )
     .option('--max-items <n>', '限制扫描条目数（达到后立即停止滚动）')
+    .option('--config <path>', 'inkmigrate.yaml 配置路径（按 adapter 选择来源类型）', 'inkmigrate.yaml')
     .action(async (opts: {
       source: string;
       stateDir: string;
@@ -37,7 +40,20 @@ export function createScanCommand(): Command {
       headless?: boolean;
       favoritesUrl: string;
       maxItems?: string;
+      config?: string;
     }) => {
+      // §10.2 yaml 命中 evernote 来源 → 文件源预览扫描（不启动浏览器）
+      const evernote = resolveEvernoteSource({
+        config: opts.config ?? 'inkmigrate.yaml',
+        sourceId: opts.source,
+      });
+      if (evernote !== undefined) {
+        return runEvernoteScan({
+          source: opts.source,
+          stateDir: opts.stateDir,
+          wiring: evernote,
+        });
+      }
       if (opts.fixtureDir) {
         return runFixtureScan({
           source: opts.source,
@@ -55,6 +71,66 @@ export function createScanCommand(): Command {
           : {}),
       });
     });
+}
+
+/** Evernote 文件源预览扫描：ENEX/HTML 导出清单 + 笔记本分布，不写库。 */
+async function runEvernoteScan(opts: {
+  source: string;
+  stateDir: string;
+  wiring: SourceWiring;
+}): Promise<void> {
+  const wiring = opts.wiring;
+  console.log(`正在扫描 Evernote 导出（来源 ${opts.source}）...`);
+  const refs: Array<{
+    externalId: string | undefined;
+    title: string | undefined;
+    notebook: string | undefined;
+    stack: string | undefined;
+  }> = [];
+  for await (const ref of wiring.adapter.scan({
+    config: {},
+    workspaceDir: opts.stateDir,
+  })) {
+    const meta = ref.sourceMetadata as { enex?: { notebook?: string; stack?: string } };
+    refs.push({
+      externalId: ref.externalId,
+      title: ref.title,
+      notebook: meta.enex?.notebook,
+      stack: meta.enex?.stack,
+    });
+  }
+  const byNotebook = new Map<string, number>();
+  for (const r of refs) {
+    const key = [r.stack, r.notebook].filter(Boolean).join('/') || '(未知)';
+    byNotebook.set(key, (byNotebook.get(key) ?? 0) + 1);
+  }
+  const reportPath = resolve(opts.stateDir, 'scan-report.json');
+  mkdirSync(opts.stateDir, { recursive: true });
+  writeFileSync(
+    reportPath,
+    JSON.stringify(
+      {
+        sourceInstanceId: opts.source,
+        scannedAt: new Date().toISOString(),
+        uniqueItems: refs.length,
+        byNotebook: Object.fromEntries(byNotebook),
+        items: refs,
+      },
+      null,
+      2,
+    ),
+  );
+  console.log(`\n扫描完成：`);
+  console.log(`  唯一条目数: ${refs.length}`);
+  for (const [nb, count] of [...byNotebook.entries()].sort()) {
+    console.log(`  ${nb}: ${count} 条`);
+  }
+  const issues = lastScanIssues(wiring.adapter);
+  if (issues.length > 0) {
+    console.log(`  注意事项: ${issues.length} 条（见报告）`);
+  }
+  console.log(`  报告: ${reportPath}`);
+  await wiring.adapter.close();
 }
 
 /** Fixture 模式扫描（保留原有逻辑）。 */

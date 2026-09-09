@@ -132,10 +132,42 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
   const scanState: ScanState = { issues: [], skippedInputs: [] };
   /**
    * §15.10 两遍处理第一遍的索引：GUID → {title, fingerprint}。
-   * scan 阶段（job-runner 先完整扫描后提取）累积；extract 用它把 evernote://
-   * 链接重写为指向目标文件名的 wikilink。跨进程 resume 后为空 → 链接保留原样。
+   * scan 阶段（job-runner 先完整扫描后提取）累积；跨进程 resume 时适配器是
+   * 新实例、映射为空——首次 extract 懒重建（ensureGuidMap），内部链接不降级。
    */
   const guidMap = new Map<string, { title: string; fingerprint: string }>();
+  let guidMapBuilt = false;
+
+  /** 懒重建 GUID 映射：流式重读全部 ENEX 的轻量头（仅当 scan 未构建过）。 */
+  const ensureGuidMap = async (workspaceDir: string): Promise<void> => {
+    if (guidMapBuilt) return;
+    guidMapBuilt = true;
+    const inputRoots = resolveInputPaths(cfg.inputPaths, workspaceDir);
+    const { files } = await collectEnexFiles(inputRoots, cfg.stackSeparator, {
+      includeHtml: cfg.formats.includes('html'),
+    });
+    for (const file of files) {
+      await streamNotes(file.path, {
+        headerOnly: true,
+        onNote: (n) => {
+          if (n.guid === undefined) return;
+          const key = n.guid.toLowerCase();
+          if (guidMap.has(key)) return;
+          const { fingerprint } = buildNoteIdentity({
+            guid: n.guid,
+            fileSha256: file.sha256,
+            ordinal: n.ordinal,
+            title: n.title,
+            fileBaseName: file.baseName,
+          });
+          guidMap.set(key, {
+            title: n.title.length > 0 ? n.title : `未命名笔记 #${n.ordinal}`,
+            fingerprint,
+          });
+        },
+      });
+    }
+  };
 
   const adapter: EvernoteAdapter = {
     kind: SOURCE_EVERNOTE_KIND,
@@ -261,10 +293,15 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
           };
         }
       }
+      // scan 已完整构建 GUID 映射；后续 extract 不再懒重建
+      guidMapBuilt = true;
     },
 
-    async extract(ref): Promise<SourceItem> {
+    async extract(ref, ctx): Promise<SourceItem> {
       const meta = refMetaOf(ref);
+
+      // §15.10：跨进程 resume（新适配器实例）首次 extract 时懒重建 GUID 映射
+      await ensureGuidMap(ctx.workspaceDir);
 
       // §15.3 完整性：扫描与提取之间文件被修改即失败（指纹输入含文件哈希，静默继续会错账）
       const filePath = meta.enex?.path ?? meta.html?.path;

@@ -6,15 +6,10 @@ import {
   type TargetContext,
   type DB,
 } from '@inkmigrate/core';
-import {
-  createToutiaoSource,
-  profilePath,
-  profileExists,
-} from '@inkmigrate/source-toutiao';
 import { createObsidianTarget } from '@inkmigrate/target-obsidian';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { parsePositiveInt } from '../util.js';
+import { resolveSourceWiring, resolveTargetConfig } from '../source-wiring.js';
 
 /**
  * §22 `inkmigrate resume` 命令。
@@ -35,12 +30,14 @@ export function createResumeCommand(): Command {
     .requiredOption('--vault-path <path>', 'Obsidian Vault 路径')
     .option('--favorites-url <url>', '收藏列表 URL（真实模式）')
     .option('--max-items <n>', '限制迁移条目数')
+    .option('--config <path>', 'inkmigrate.yaml 配置路径（按 adapter 选择来源类型）', 'inkmigrate.yaml')
     .action(async (opts: {
       job: string;
       stateDir: string;
       vaultPath: string;
       favoritesUrl?: string;
       maxItems?: string;
+      config?: string;
     }) => {
       const dbPath = join(opts.stateDir, 'inkmigrate.sqlite');
       if (!existsSync(dbPath)) {
@@ -95,36 +92,29 @@ export function createResumeCommand(): Command {
           updatedAt: now,
         });
 
-        // 构造 source adapter（真实浏览器模式）
-        const profileDir = profilePath(opts.stateDir, sourceInstanceId);
-        if (!profileExists(opts.stateDir, sourceInstanceId)) {
-          console.error(`未找到 Profile：${profileDir}`);
-          process.exit(1);
-        }
-        const sourceAdapter = createToutiaoSource({
-          sourceInstanceId,
-          profileDir,
-          headless: false, // 有头：头条反爬会拦截 headless
+        // 构造 source adapter：与 migrate 同一接线（yaml 命中 evernote → 文件源，
+        // 否则 toutiao 浏览器 + Profile 校验）
+        const wiring = resolveSourceWiring({
+          config: opts.config ?? 'inkmigrate.yaml',
+          sourceId: sourceInstanceId,
+          stateDir: opts.stateDir,
           ...(opts.favoritesUrl !== undefined ? { favoritesUrl: opts.favoritesUrl } : {}),
           ...(opts.maxItems !== undefined
-            ? { maxScanItems: parsePositiveInt(opts.maxItems, 'max-items') }
+            ? { maxItems: Number.parseInt(opts.maxItems, 10) }
             : {}),
         });
+        const sourceAdapter = wiring.adapter;
 
         const targetAdapter = createObsidianTarget();
         const targetContext: TargetContext = {
           config: {},
           workspaceDir: opts.stateDir,
           vaultPath: opts.vaultPath,
-          targetConfig: {
-            vaultPath: opts.vaultPath,
-            importSubdir: '',
-            attachmentsSubdir: 'Attachments',
-            linkStyle: 'wikilink',
-            overwritePolicy: 'preserve',
-            collectionMapping: { toTags: false, toFolders: false },
-            maxFilenameLength: 100,
-          } as Record<string, unknown>,
+          targetConfig: resolveTargetConfig(
+            opts.config ?? 'inkmigrate.yaml',
+            targetInstanceId,
+            opts.vaultPath,
+          ),
         };
 
         console.log(`\n开始恢复迁移 Job ${jobId}（跳过 ${verifiedItems} 条已完成）...`);

@@ -123,6 +123,59 @@ inkmigrate auth clear --source toutiao-main --state-dir .inkmigrate
 
 删除工具专用 Profile（只删除该来源的 Profile，不影响浏览器日常使用）。
 
+## Evernote / 印象笔记迁移
+
+支持 **ENEX 导出文件**和 **HTML 导出目录**两种输入（印象笔记中国版新版客户端只能导出 HTML，是受支持的一等路径）。不需要登录，不接触账号凭据。
+
+### 1. 导出数据
+
+- **国际版 Evernote**：桌面客户端导出 ENEX（每个笔记本一个 `.enex` 文件）。
+- **印象笔记（中国版）**：新版客户端只能导出专有加密的 `.notes`（不受支持，会显式报错）——请改用以下任一方式：
+  - 客户端导出 **HTML**（当前唯一开放的导出格式）；
+  - 用开源工具 [evernote-backup](https://github.com/vzhd1701/evernote-backup) 同步后导出 ENEX（**推荐加 `--add-guid --add-metadata`**，可解锁笔记间内部链接重写）：
+    ```bash
+    evernote-backup init-db --backend china   # 交互输入账号密码
+    evernote-backup sync                       # 可中断续传
+    evernote-backup export --add-guid --add-metadata enex_out/
+    ```
+
+### 2. 配置 inkmigrate.yaml
+
+```yaml
+version: 1
+workspace:
+  stateDir: ".inkmigrate"
+  reportsDir: "reports"
+sources:
+  - id: "evernote-archive"
+    adapter: "evernote"
+    enabled: true
+    config:
+      inputPaths: ["imports/evernote"]   # ENEX 文件/目录 或 HTML 导出目录，可混用
+      formats: ["enex", "html"]
+      stackSeparator: "@@@"
+targets:
+  - id: "my-vault"
+    adapter: "obsidian"
+    enabled: true
+    config: { vaultPath: "/path/to/vault" }
+```
+
+多笔记本（`Stack@@@Notebook.enex` 命名或 HTML 目录层级）会按 `Stack/笔记本-短ID/` 结构落盘；同名笔记本自动加哈希后缀不合并。
+
+### 3. 预览并迁移
+
+```bash
+# 预览：条目数与笔记本分布（不写库）
+inkmigrate scan --source evernote-archive --state-dir .inkmigrate
+
+# 迁移（中断后可 resume 续跑）
+inkmigrate migrate --source evernote-archive --target my-vault \
+  --state-dir .inkmigrate --vault-path "/path/to/vault"
+```
+
+特性：附件按原文件名保留（缺失时序号命名）、网页剪藏远程图片可配置下载、加密块以占位符保留（不破解）、带 GUID 的导出会把笔记间链接重写为 Obsidian 双链、每条笔记输出资源对账计数。
+
 ## 命令一览
 
 | 命令 | 说明 |

@@ -324,4 +324,27 @@ describe('createEvernoteSource', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('跨进程 resume：新实例未 scan 直接 extract 也能重写内部链接（guidMap 懒重建）', async () => {
+    const dir = tmpDir();
+    copyFileSync(join(FIXTURES, 'interlinks.enex'), join(dir, 'interlinks.enex'));
+    try {
+      // 模拟 resume：先用实例 A 完成扫描拿 refs，再用全新实例 B 直接 extract
+      const a = createEvernoteSource(CONFIG(dir));
+      const ctx = { config: {}, workspaceDir: dir };
+      const refs = [];
+      for await (const r of a.scan(ctx)) refs.push(r);
+      const aItem = await a.extract(refs.find((r) => r.title === '笔记甲')!, ctx);
+      await a.close();
+
+      const b = createEvernoteSource(CONFIG(dir));
+      const bItem = await b.extract(refs.find((r) => r.title === '笔记甲')!, ctx);
+      await b.close();
+      // 懒重建后链接重写与扫描后一致
+      expect(bItem.bodyHtml).toBe(aItem.bodyHtml);
+      expect(bItem.bodyHtml).toMatch(/evernote-wikilink:\/\//);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

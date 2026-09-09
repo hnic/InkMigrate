@@ -4,7 +4,6 @@ import {
   runMigrationJob,
   MigrationJobs,
   computeFingerprint,
-  loadConfigFromString,
   validateSourceItemQuality,
   ensureInstance,
   type SourceAdapter,
@@ -19,13 +18,12 @@ import {
   extractDetail,
   deriveFingerprintInput,
   profilePath,
-  profileExists,
 } from '@inkmigrate/source-toutiao';
-import { createEvernoteSource } from '@inkmigrate/source-evernote';
-import { createObsidianTarget, ObsidianTargetConfigSchema } from '@inkmigrate/target-obsidian';
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { createObsidianTarget } from '@inkmigrate/target-obsidian';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { parsePositiveInt } from '../util.js';
+import { buildToutiaoSource, resolveEvernoteSource, resolveTargetConfig } from '../source-wiring.js';
 
 /**
  * §22 `inkmigrate migrate` 命令。
@@ -69,83 +67,26 @@ export function createMigrateCommand(): Command {
         const jobId = `mig-${Date.now()}`;
         const now = new Date().toISOString();
 
-        // §10.2 配置驱动的适配器选择：inkmigrate.yaml 中 adapter: evernote 的来源
-        // 走文件源（ENEX/HTML 导出目录，无需浏览器登录）。未命中配置时维持
-        // toutiao 浏览器流程（含 --fixture-dir 测试模式）。
-        let sourceAdapterKind = 'toutiao';
-        let evernoteAdapter: SourceAdapter | undefined;
-        let evernoteInstanceConfig: Record<string, unknown> | undefined;
-        /** yaml 中匹配的 obsidian target 配置（经 schema 填默认值）；无则用 legacy 硬编码。 */
-        let yamlTargetConfig: Record<string, unknown> | undefined;
-        const configPath = resolve(opts.config ?? 'inkmigrate.yaml');
-        if (existsSync(configPath)) {
-          const cfg = loadConfigFromString(readFileSync(configPath, 'utf8'));
-          const src = cfg.sources.find((s) => s.id === opts.source);
-          if (src !== undefined && src.adapter === 'evernote') {
-            if (!src.enabled) {
-              console.error(`来源 ${opts.source} 在配置中处于 enabled: false 状态，已跳过。`);
-              process.exit(1);
-            }
-            const raw = src.config as Record<string, unknown>;
-            const inputPaths = Array.isArray(raw.inputPaths)
-              ? (raw.inputPaths as string[]).map((p) => resolve(dirname(configPath), p))
-              : [];
-            if (inputPaths.length === 0) {
-              console.error(`来源 ${opts.source} 缺少 inputPaths（ENEX/HTML 导出目录）。`);
-              process.exit(1);
-            }
-            evernoteAdapter = createEvernoteSource({
-              sourceInstanceId: src.id,
-              ...raw,
-              inputPaths,
-            });
-            evernoteInstanceConfig = raw;
-            sourceAdapterKind = 'evernote';
-          }
-          // §10.2 targets[]：匹配的 obsidian target 走配置（默认 Imports/InkMigrate
-          // 目录结构，§13.3）；--vault-path 参数覆盖 vaultPath。
-          const tgt = cfg.targets.find(
-            (t) => t.id === opts.target && t.adapter === 'obsidian',
-          );
-          if (tgt !== undefined) {
-            if (!tgt.enabled) {
-              console.error(`目标 ${opts.target} 在配置中处于 enabled: false 状态，已跳过。`);
-              process.exit(1);
-            }
-            yamlTargetConfig = ObsidianTargetConfigSchema.parse({
-              ...tgt.config,
-              vaultPath: opts.vaultPath,
-            }) as unknown as Record<string, unknown>;
-          }
-        }
-
-        // 构造 source adapter
-        const sourceAdapter =
-          evernoteAdapter !== undefined
-            ? evernoteAdapter
-            : opts.fixtureDir
-              ? createFixtureSource(opts.fixtureDir, opts.source)
-              : (() => {
-                  const profileDir = profilePath(opts.stateDir, opts.source);
-                  if (!profileExists(opts.stateDir, opts.source)) {
-                    console.error(`未找到 Profile：${profileDir}`);
-                    console.error(
-                      `请先运行：inkmigrate auth login --source ${opts.source} --state-dir ${opts.stateDir}`,
-                    );
-                    process.exit(1);
-                  }
-                  return createToutiaoSource({
-                    sourceInstanceId: opts.source,
-                    profileDir,
-                    headless: false, // 有头：头条反爬会拦截 headless
-                    ...(opts.favoritesUrl !== undefined
-                      ? { favoritesUrl: opts.favoritesUrl }
-                      : {}),
-                    ...(opts.maxItems !== undefined
-                      ? { maxScanItems: parsePositiveInt(opts.maxItems, 'max-items') }
-                      : {}),
-                  });
-                })();
+        // §10.2 配置驱动的适配器选择（migrate/resume 共用接线，见 source-wiring.ts）：
+        // yaml 命中 adapter: evernote → 文件源；否则 toutiao 浏览器（--fixture-dir
+        // 测试模式优先）。
+        const wiring = resolveEvernoteSource({
+          config: opts.config ?? 'inkmigrate.yaml',
+          sourceId: opts.source,
+        });
+        const sourceAdapter: SourceAdapter = opts.fixtureDir
+          ? createFixtureSource(opts.fixtureDir, opts.source)
+          : wiring !== undefined
+            ? wiring.adapter
+            : buildToutiaoSource({
+                sourceId: opts.source,
+                stateDir: opts.stateDir,
+                ...(opts.favoritesUrl !== undefined ? { favoritesUrl: opts.favoritesUrl } : {}),
+                ...(opts.maxItems !== undefined
+                  ? { maxItems: parsePositiveInt(opts.maxItems, 'max-items') }
+                  : {}),
+              }).adapter;
+        const sourceAdapterKind = opts.fixtureDir ? 'toutiao' : (wiring?.kind ?? 'toutiao');
 
         // 构造 target adapter + context
         // intervalMs 作为 runMigrationJob 一级字段传入（§18.1 类型化速率控制契约），
@@ -157,15 +98,11 @@ export function createMigrateCommand(): Command {
           vaultPath: opts.vaultPath,
           // yaml 命中 obsidian target 时用其配置（含 §13.3 默认 Imports/InkMigrate
           // 目录结构）；否则维持 legacy 硬编码（头条老用户路径不变）
-          targetConfig: (yamlTargetConfig ?? {
-            vaultPath: opts.vaultPath,
-            importSubdir: '',
-            attachmentsSubdir: 'Attachments',
-            linkStyle: 'wikilink',
-            overwritePolicy: 'preserve',
-            collectionMapping: { toTags: false, toFolders: false },
-            maxFilenameLength: 100,
-          }) as Record<string, unknown>,
+          targetConfig: resolveTargetConfig(
+            opts.config ?? 'inkmigrate.yaml',
+            opts.target,
+            opts.vaultPath,
+          ),
         };
 
         // H5: 确保实例记录存在——移到 config 构造后，传入实际 config 以计算真实
@@ -176,13 +113,13 @@ export function createMigrateCommand(): Command {
           opts.source,
           sourceAdapterKind,
           'source',
-          sourceAdapterKind === 'evernote'
-            ? (evernoteInstanceConfig ?? {})
-            : {
+          opts.fixtureDir || wiring === undefined
+            ? {
                 sourceInstanceId: opts.source,
                 profileDir: profilePath(opts.stateDir, opts.source),
                 headless: false,
-              },
+              }
+            : wiring.instanceConfig,
         );
         ensureInstance(db, opts.target, 'obsidian', 'target', targetContext.targetConfig);
 
