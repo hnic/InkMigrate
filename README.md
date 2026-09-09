@@ -45,6 +45,16 @@ inkmigrate resume --job <id> --state-dir .inkmigrate --vault-path <path>  # resu
 inkmigrate cleanup unfavorite --source <id> --state-dir .inkmigrate       # unfavorite
 ```
 
+### Evernote / Yinxiang migration
+
+Evernote exports are supported as file inputs — no login, no credentials touched:
+
+- **ENEX files** (international Evernote desktop export; one `.enex` per notebook).
+- **HTML export directories** (the only open format still available in recent Yinxiang/印象笔记 China clients — a first-class input path). The proprietary encrypted `.notes` export is explicitly rejected with guidance.
+- Recommended path for Yinxiang users: [evernote-backup](https://github.com/vzhd1701/evernote-backup) with `--backend china`, then `export --add-guid --add-metadata` — the GUIDs enable cross-note internal-link rewriting into Obsidian wikilinks.
+
+Declare the source in `inkmigrate.yaml` (`adapter: evernote`, `inputPaths`, `formats: ["enex", "html"]`) and run the same `scan`/`migrate`/`resume` commands. Notebooks land as `Stack/Notebook-<shortId>/` directories, attachments keep their original filenames, encrypted blocks are preserved as placeholders (never decrypted), and every note carries resource reconciliation counts. See the Chinese README for the full guide.
+
 ## Desktop GUI (in development)
 
 A Tauri 2 + React desktop GUI is available with visual operation interface:
