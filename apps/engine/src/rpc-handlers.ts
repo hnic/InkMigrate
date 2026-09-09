@@ -568,27 +568,9 @@ async function runMigrateJob(
             collectionMapping: { toTags: false, toFolders: false },
             maxFilenameLength: 100,
           };
-    ensureInstance(db, sourceInstanceId, wiring?.kind ?? 'toutiao', 'source', sourceConfig);
-    ensureInstance(db, targetInstanceId, 'obsidian', 'target', targetConfig);
-
-    sendNotification('log', { level: 'info', message: isResume ? `续跑 Job ${(params as MigrateResumeParams).job}...` : '正在创建迁移任务...' });
-
-    // 创建新 Job。毫秒时间戳不保证唯一（同一毫秒两次调用/时钟回拨会撞主键——
-    // sidecar 与 CLI 共享同一 DB），追加随机后缀保证碰撞免疫。
-    const jobId = `mig-${Date.now()}-${randomUUID().slice(0, 8)}`;
-    const now = new Date().toISOString();
-    new MigrationJobs(db).create({
-      id: jobId,
-      sourceInstanceId,
-      targetInstanceId,
-      status: 'created',
-      currentStage: 'preflight',
-      createdAt: now,
-      updatedAt: now,
-    });
-
     // 构造 source adapter：wiring 命中（evernote/toutiao）用其适配器；
-    // 无 configPath 时维持 toutiao 浏览器（adapterConfig 用已计算的 profileDir）
+    // 无 configPath 时维持 toutiao 浏览器（adapterConfig 用已计算的 profileDir）。
+    // 提前到 ensureInstance 之前：实例审计列（adapter_version 等）要取适配器真实值。
     const startParams = params as MigrateStartParams;
     let sourceAdapter;
     if (wiring !== undefined) {
@@ -612,6 +594,32 @@ async function runMigrateJob(
     // 构造 target。intervalMs 不能放 targetConfig（ObsidianTargetConfigSchema strict
     // 会拒绝），现作为 runMigrationJob 的一级字段传入（类型化契约，不再塞 config bag）。
     const targetAdapter = createObsidianTarget();
+
+    ensureInstance(db, sourceInstanceId, wiring?.kind ?? 'toutiao', 'source', sourceConfig, {
+      adapterVersion: sourceAdapter.version,
+      adapterApiVersion: sourceAdapter.adapterApiVersion,
+    });
+    ensureInstance(db, targetInstanceId, 'obsidian', 'target', targetConfig, {
+      adapterVersion: targetAdapter.version,
+      adapterApiVersion: targetAdapter.adapterApiVersion,
+    });
+
+    sendNotification('log', { level: 'info', message: isResume ? `续跑 Job ${(params as MigrateResumeParams).job}...` : '正在创建迁移任务...' });
+
+    // 创建新 Job。毫秒时间戳不保证唯一（同一毫秒两次调用/时钟回拨会撞主键——
+    // sidecar 与 CLI 共享同一 DB），追加随机后缀保证碰撞免疫。
+    const jobId = `mig-${Date.now()}-${randomUUID().slice(0, 8)}`;
+    const now = new Date().toISOString();
+    new MigrationJobs(db).create({
+      id: jobId,
+      sourceInstanceId,
+      targetInstanceId,
+      status: 'created',
+      currentStage: 'preflight',
+      createdAt: now,
+      updatedAt: now,
+    });
+
     const targetContext: TargetContext = {
       config: {},
       workspaceDir: params.stateDir,

@@ -121,8 +121,15 @@ export function createMigrateCommand(): Command {
         // H5: 确保实例记录存在——移到 config 构造后，传入实际 config 以计算真实
         // config_hash（原硬编码 'h' 与 Engine 的真实哈希分叉，导致 CLI 创建的 instance
         // 随后被 GUI 迁移看到哈希「变化」触发虚假 UPDATE）。
-        ensureInstance(db, opts.source, sourceAdapterKind, 'source', sourceInstanceConfig);
-        ensureInstance(db, opts.target, 'obsidian', 'target', targetContext.targetConfig);
+        // 版本列取适配器实例真实值（审计列不再落占位 '1.0.0'）。
+        ensureInstance(db, opts.source, sourceAdapterKind, 'source', sourceInstanceConfig, {
+          adapterVersion: sourceAdapter.version,
+          adapterApiVersion: sourceAdapter.adapterApiVersion,
+        });
+        ensureInstance(db, opts.target, 'obsidian', 'target', targetContext.targetConfig, {
+          adapterVersion: targetAdapter.version,
+          adapterApiVersion: targetAdapter.adapterApiVersion,
+        });
 
         new MigrationJobs(db).create({
           id: jobId,

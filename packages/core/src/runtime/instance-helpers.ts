@@ -53,6 +53,10 @@ export function ensureInstance(
   adapterKind: string,
   role: 'source' | 'target',
   config: Record<string, unknown>,
+  versions: { adapterVersion: string; adapterApiVersion: string } = {
+    adapterVersion: '1.0.0',
+    adapterApiVersion: '1.0.0',
+  },
 ): void {
   const table = role === 'source' ? 'source_instances' : 'target_instances';
   const configHash = computeConfigHash(config);
@@ -61,13 +65,17 @@ export function ensureInstance(
   // SELECT 再 INSERT 的两步存在 TOCTOU——两进程都读到「不存在」时，后者的 INSERT
   // 撞唯一约束抛错而非落入更新路径。upsert 以单语句消除该窗口；config_hash 未变
   // 时保持 updated_at 不动（「配置未变不触碰」的审计语义）。
+  // adapter_version/adapter_api_version 取调用方持有的适配器实例真实值（适配器
+  // 升级后 upsert 刷新审计列）；未提供时维持历史占位 '1.0.0'。
   db.prepare(
     `INSERT INTO ${table}(id,adapter_kind,adapter_version,adapter_api_version,config_hash,created_at,updated_at)
      VALUES(?,?,?,?,?,?,?)
      ON CONFLICT(id) DO UPDATE SET
        config_hash = excluded.config_hash,
+       adapter_version = excluded.adapter_version,
+       adapter_api_version = excluded.adapter_api_version,
        updated_at = CASE WHEN ${table}.config_hash = excluded.config_hash
                          THEN ${table}.updated_at
                          ELSE excluded.updated_at END`,
-  ).run(id, adapterKind, '1.0.0', '1.0.0', configHash, nowTs, nowTs);
+  ).run(id, adapterKind, versions.adapterVersion, versions.adapterApiVersion, configHash, nowTs, nowTs);
 }
