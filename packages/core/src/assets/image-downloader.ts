@@ -251,10 +251,11 @@ async function tryDownloadOnce(i: DownloadInput): Promise<DownloadResult> {
     // I3: 总超时（连接 + 读取），防止慢/挂图片服务器永久阻塞 extract。
     const timeoutMs = i.timeoutMs ?? 30000;
     // R3-M3: redirect:'manual' + 逐跳重新校验目标 IP（原 'follow' 不校验重定向目标，
-    // 攻击者用 benign URL 302 到 169.254.169.254 即绕过 SSRF 防护）。
+    // 攻击者用 benign URL 302 到 169.254.169.254 即可绕过 SSRF 防护）。
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
     const fetchOpts: RequestInit = {
       redirect: 'manual',
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: timeoutSignal,
     };
     if (i.referer !== undefined) {
       fetchOpts.headers = { referer: i.referer };
@@ -276,14 +277,13 @@ async function tryDownloadOnce(i: DownloadInput): Promise<DownloadResult> {
           return { ok: false, reason: `ssrf blocked (redirect): ${(e as Error).message}` };
         }
       }
-      // 跨 origin 重定向不回放原始 referer（对齐浏览器对 Referer 的跨域限制）
-      if (
-        fetchOpts.headers !== undefined &&
-        new URL(targetUrl).origin !== new URL(currentUrl).origin
-      ) {
-        fetchOpts.headers = undefined;
-      }
-      response = await fetch(targetUrl, fetchOpts);
+      // 跨 origin 重定向不回放原始 referer（对齐浏览器对 Referer 的跨域限制）；
+      // exactOptionalPropertyTypes 下不能写 headers = undefined，改为重建选项
+      const crossOrigin = new URL(targetUrl).origin !== new URL(currentUrl).origin;
+      const hopOpts: RequestInit = crossOrigin
+        ? { redirect: 'manual', signal: timeoutSignal }
+        : fetchOpts;
+      response = await fetch(targetUrl, hopOpts);
       currentUrl = targetUrl;
       redirectCount++;
     }

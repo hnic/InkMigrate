@@ -43,10 +43,12 @@ export function computeFingerprint(input: FingerprintInput): string {
       'computeFingerprint: all identity fields are empty (supply at least one of externalId/canonicalUrl/originalUrl/title/author/publishedAt/raw)',
     );
   }
-  // 防御：字段内含 NUL 会破坏 SEP 分隔的唯一性（字段边界歧义 → 不同条目指纹碰撞）
-  if (parts.some((p) => p.includes(SEP))) {
+  // 防御：结构化字段内含 NUL 会破坏 SEP 分隔的唯一性（字段边界歧义 → 不同条目
+  // 指纹碰撞）。raw 除外——它是适配器自定义的不透明输入（如 evernote tier-3 以
+  // NUL 打包多字段），编码唯一性由调用方自负，core 不代为插手。
+  if (parts.slice(0, -1).some((p) => p.includes(SEP))) {
     throw new Error(
-      'computeFingerprint: identity fields must not contain NUL (\\0) characters',
+      'computeFingerprint: identity fields must not contain NUL (\\0) characters (raw excepted)',
     );
   }
   const h = createHash('sha256').update(parts.join(SEP)).digest('hex');
