@@ -663,6 +663,10 @@ sources:
         - "html"
       notebookNameStrategy: "filename"
       stackSeparator: "@@@"
+      assets:
+        downloadImages: true # 正文远程 <img> 按 §12.10 管线下载，false 时保留远程链接
+        maxImageBytes: 20971520
+        maxResourceBytes: 26214400 # ENEX 单资源上限（DTD 规定 25 MB）
 
 targets:
   - id: "personal-vault"
@@ -1873,6 +1877,9 @@ supportsSourceCleanup: false
 supportedInputFormats:
   - enex
   - html
+# 印象笔记专有加密导出格式，不支持也不尝试破解，见 15.2。
+rejectedInputFormats:
+  - notes
 ```
 
 ### 15.2 输入方式
@@ -1881,9 +1888,26 @@ supportedInputFormats:
 
 - `.enex` 文件。
 - 包含多个 `.enex` 的目录。
-- Evernote HTML 导出目录或 ZIP 解压目录。
+- Evernote / 印象笔记 HTML 导出目录或 ZIP 解压目录。
 
 InkMigrate 不直接登录 Evernote，不要求账号密码，不将 Evernote API 作为首要方案。
+
+#### 15.2.1 印象笔记（中国版）导出现状与 `.notes` 处理
+
+背景事实：
+
+- 印象笔记（Yinxiang Biji，中国版）自 2022 年 7 月起的桌面客户端将导出格式从 `.enex` 改为专有的 `.notes`；新版客户端不再提供 ENEX 导出。
+- `.notes` 内部对笔记内容使用未公开密钥的 AES 加密（导出文件中标记为 `base64:aes`），Evernote/印象笔记均未公开格式规范；截至本文撰写时没有可靠的公开逆向成果或第三方解析实现。
+- 同期新版印象笔记仍保留 HTML 导出；国际版 Evernote 桌面端仍支持 ENEX 与 HTML 导出。
+
+`.notes` 输入策略：
+
+- 不解析、不破解、不依赖其内部结构；即使未来出现社区逆向，也必须另行立项评估，不得在本适配器内静默试验。
+- 输入清单中出现 `.notes` 文件（按扩展名识别，必要时辅以内容嗅探）时必须显式失败：登记为 `blocked` 输入并在报告中列出，错误信息给出替代导出指引，不得静默跳过或计入成功。
+- 替代导出指引（写入报告与 CLI 提示）：
+  1. 新版印象笔记客户端导出 HTML（中国版当前唯一开放的导出格式），走 15.12 的 HTML 解析路径。
+  2. 使用支持中国服务器的开源工具（如 `evernote-backup --backend china`）通过账号同步导出 ENEX，再走 15.3 的 ENEX 管线；该方式需要用户在第三方工具中登录，InkMigrate 本身不代收凭据。
+  3. 旧版客户端（可导出 ENEX 的版本）导出 ENEX；旧客户端与当前服务端的兼容性随时间衰减，仅作为最后手段提示。
 
 ### 15.3 扫描要求
 
@@ -1893,6 +1917,14 @@ InkMigrate 不直接登录 Evernote，不要求账号密码，不将 Evernote AP
 - 每个 `<note>` 必须对应一条数据库记录或明确解析失败记录。
 - 输入总数必须与成功、降级、失败、跳过之和严格相等。
 - XML 某条笔记损坏时，尽可能隔离该条，不无条件放弃整个文件。
+
+格式硬限制（来自 `evernote-export3.dtd`，违反时记录解析失败，不得截断或静默丢弃字段）：
+
+- 笔记正文 `content` 最长 5,242,880 Unicode 字符。
+- 单个资源的二进制体最长 25 MB；`data` 的 Base64 文本中允许出现换行等空白。
+- 标题最长 255 字符，不以空白开头或结尾，不含换行和控制字符。
+- 单个标签名最长 100 字符，不含逗号。
+- 所有时间字段使用 ISO 8601 固定剖面 `yyyymmddThhmmssZ`（UTC）。
 
 ### 15.4 笔记身份
 
@@ -1944,25 +1976,101 @@ evernote:
 - 记录节点类型和数量。
 - 不得静默删除正文片段。
 
+ENML 结构事实（`enml2.dtd`）：
+
+- ENML 是刻意放宽的 XHTML 子集，任意 HTML 元素可互相嵌套，转换器不得假设严格层级结构。
+- `en-todo` 为空元素，`checked` 取 `true`/`false`。
+- `en-media` 为空元素，`type`（MIME）和 `hash` 为必填属性，`width`、`height`、`alt` 等为可选属性。
+- `en-crypt` 的密文为元素文本，属性见 15.11。
+
+远程图片：
+
+- 正文 ENML 中的 `<img src="http(s)://...">`（常见于网页剪藏）不是 resource，不随 ENEX 携带字节。
+- 此类图片按 §12.10 与今日头条完全相同的管线下载落地：MIME 白名单、Magic Bytes 一致性、流式 `maxImageBytes` 上限、非零字节、SSRF 防护、最多 3 次指数退避重试。
+- 下载成功后按 15.7 的路径与命名规则本地化并重写链接；失败时保留远程链接，标记 `quality: degraded` 与 `asset-incomplete`，并记录警告。
+- `assets.downloadImages: false` 时全部保留远程链接。
+
 ### 15.7 附件和资源
 
-Evernote 资源至少包括：
+#### 15.7.1 resource 结构（`evernote-export3.dtd`）
 
-- 图片。
-- PDF。
-- Office 文档。
-- 音频。
-- 其他二进制附件。
+每条笔记的 `<note>` 携带零或多个 `<resource>`：
 
-要求：
+```xml
+<resource>
+  <data encoding="base64">...(文件字节)</data>
+  <mime>image/png</mime>
+  <width>1920</width>
+  <height>1080</height>
+  <resource-attributes>
+    <file-name>照片.png</file-name>
+    <timestamp>20190503T082000Z</timestamp>
+    <source-url>https://example.com/page</source-url>
+    <attachment>false</attachment>
+  </resource-attributes>
+</resource>
+```
 
-- 通过资源哈希关联 `en-media`。
-- 验证 Base64 解码结果。
-- 验证 MIME、字节数和 SHA-256。
-- 原文件名不可用时，使用 MIME 推断扩展名。
-- 重复资源可按内容哈希去重。
-- 未被正文引用的资源仍需保留，并在“附件”区列出。
-- 资源缺失或哈希不一致必须进入报告。
+字段语义：
+
+- `data`：Base64 编码的二进制体，解码后最长 25 MB，覆盖图片、PDF、Office 文档、音频、视频及其他二进制附件。
+- `mime`：声明的 MIME 类型。DTD 注释列出的旧版合法集合仅 7 种（gif/jpeg/png/wav/mpeg/pdf/ink），真实导出包含更多类型，不得以该集合做白名单拒绝。
+- `width`/`height`/`duration`：可选展示元数据，随资源记录。
+- `recognition`：OCR 索引文档（recoIndex），不迁移，仅计数进报告。
+- `alternate-data`：备用表示，不落地，仅计数进报告。
+- `resource-attributes`：`file-name`（原文件名，可能缺失、为空或含非法字符）、`timestamp`、`source-url`、`camera-make`/`camera-model`、`attachment`（布尔，`true` 表示按附件而非内联展示）。
+
+#### 15.7.2 哈希关联
+
+- ENEX 不显式存储资源哈希；`en-media` 的 `hash` 属性是对应资源二进制字节的 MD5 十六进制摘要。
+- 实现必须对 Base64 解码后的字节自行计算 MD5，再与正文 `en-media` 匹配。
+- 同一资源被正文多次引用时，所有引用重写为同一目标文件。
+- MD5 与任何 `en-media` 均不匹配的资源视为「未引用资源」，按 15.7.5 处理并计入对账。
+
+#### 15.7.3 校验（与 §12.10 同级强度）
+
+- Base64 解码必须校验非法字符、填充和长度；解码失败按单条资源失败处理，不终止该笔记。
+- 拒绝零字节资源。
+- Magic Bytes 与 `mime` 一致性校验，规则与 §12.10 相同（JPEG/PNG/GIF/WebP 前缀校验）；不匹配时以 Magic Bytes 判定实际类型，`mime` 原值记入报告。
+- 解码后字节数超过 `assets.maxResourceBytes`（默认 25 MB，即 DTD 上限）时按资源失败处理，不得截断保存。
+- 每个落地资源计算并记录 SHA-256 与字节数（`assets` 表 `sha256`、`byte_size` 列）。
+
+#### 15.7.4 落盘路径与文件名（与今日头条 §13.7 完全一致）
+
+路径：
+
+```text
+Attachments/InkMigrate/<source-instance>/<item-key>/<文件名>
+```
+
+- `<source-instance>` 为来源实例 ID（如 `evernote-archive`）。
+- `<item-key>` 与所属笔记一致，取 §13.4 的 `im-<stableKey 前 16 位>`，保证附件与笔记同生命周期、重跑幂等、多来源互不覆盖。
+
+文件名优先级：
+
+1. `resource-attributes/file-name` 存在且经 §13.4 通用规则清理（NFC、非法字符、保留名、结尾句点和空格、长度上限）后非空：使用清理后的原名，保留原扩展名。
+2. 否则使用与头条相同的序号风格：`<三位序号>.<扩展名>`，序号为该笔记内资源出现顺序，扩展名由实际类型推断（Magic Bytes 优先于 MIME）。
+3. 同笔记内清理后同名冲突：追加 `-<SHA-256 前 8 位>`。
+4. 原扩展名与实际字节不符时以实际类型为准，并记录警告。
+
+写入语义（与 §13.7 相同）：
+
+- 先写附件后写笔记，保证笔记中的附件引用在 Obsidian 打开时已落盘。
+- 原子写：临时文件 + 重命名，禁止直接覆盖写。
+- 内容寻址覆写语义：同路径同哈希重写无害。
+- 写入后验证存在、非零字节和 SHA-256。
+
+#### 15.7.5 正文嵌入与附件区
+
+- `en-media` 且实际类型为图片：重写为 `![[<文件名>]]`（`linkStyle: wikilink`）或标准 Markdown 图片链接。
+- `attachment` 为 `true`，或实际类型为 PDF、Office、音视频等非内联类型：不改写正文位置，统一在笔记末尾「附件」区以列表链接。
+- 未被正文引用的资源同样落盘并列「附件」区。
+- 正文 `en-media` 找不到匹配资源（资源缺失或哈希不一致）：正文保留明确占位块并记录，进入报告，不得静默删除。
+
+#### 15.7.6 去重
+
+- 同一笔记内 SHA-256 相同的资源只落盘一次，正文引用指向同一文件。
+- 跨笔记重复资源各自独立落盘（路径按 `item-key` 隔离），对账报告统计重复内容数；默认不做跨笔记全局去重。
 
 ### 15.8 元数据
 
@@ -1977,6 +2085,14 @@ Evernote 资源至少包括：
 - 地理位置（显式启用时）。
 - Reminder 元数据（如输入存在）。
 - 来源应用和来源类型。
+
+来源字段与格式（`evernote-export3.dtd`）：
+
+- `created`、`updated`、`subject-date`、`resource-attributes/timestamp` 均为 `yyyymmddThhmmssZ`（UTC，ISO 8601 固定剖面）；解析失败按缺失处理并记录，不得猜测。
+- `note-attributes` 字段全集：`subject-date`、`latitude`/`longitude`/`altitude`、`author`、`source`、`source-url`、`source-application`、`reminder-order`/`reminder-time`/`reminder-done-time`、`place-name`、`content-class`、`application-data`。
+- Reminder 字段仅保留原值，不自动创建 Obsidian 任务。
+- `source` 与 `source-application` 原值保留，用于区分手写笔记与网页剪藏（如 `web.clip`）。
+- ENEX 本身不携带笔记本、Stack 和标签层级信息（见 15.5、15.9），报告必须提示这些字段来自推断或映射。
 
 Obsidian Properties 示例：
 
@@ -2008,6 +2124,8 @@ source_content_hash: "sha256:..."
 - 原标签值可以额外保存为 `source_tags` 列表。
 - 标签层级无法从输入恢复时不得猜测。
 - 支持用户配置将 `/` 分隔标签视为层级标签。
+- 标签是 Evernote 导出时的可选项（导出界面可取消勾选），输入缺失时不得猜测或补全。
+- DTD 限制单个标签名 1–100 字符且不含逗号；清理后仍须把原值保存在 `source_tags`。
 
 ### 15.10 内部链接
 
@@ -2028,16 +2146,35 @@ Evernote 内部链接可能使用应用链接或 GUID。实现两遍处理：
 - 保留加密块占位、算法元数据和警告。
 - 不在配置文件或日志中保存解密密码。
 - 后续如支持解密，必须使用交互式输入和内存短期持有。
+- `en-crypt` 属性（`enml2.dtd`）：`hint`（提示语，可选）、`cipher`（DTD 默认 `RC2`，新客户端导出可能为其他算法）、`length`（DTD 默认 `64`）。
+- 占位块必须保留 `hint`、`cipher`、`length` 原值，密文按 Base64 原样保留在占位块中。
 
 ### 15.12 HTML 导出
 
-HTML 作为 ENEX 的补充输入：
+HTML 作为 ENEX 的补充输入；对印象笔记（中国版）用户，HTML 是新版客户端唯一开放的导出格式，是与 ENEX 同级的一等输入路径（见 15.2.1）：
 
 - 读取导出目录的 HTML、附件和索引。
 - 不执行脚本。
 - 清洗不可信 HTML。
 - 根据目录结构和导出索引推断笔记本。
 - ENEX 与 HTML 同时提供时，默认以 ENEX 元数据为准，以 HTML 作为正文或附件回退。
+
+典型目录结构（随客户端版本存在差异）：
+
+```text
+导出目录/
+├── 笔记A.html
+├── 笔记A.resources/
+│   ├── 图片1.png
+│   └── 附件.pdf
+├── 笔记B.html
+└── ...
+```
+
+- 每条笔记通常对应一个 `.html` 文件和一个同名 `.resources`（或 `_resources`）子目录，多笔记本导出时可能再按笔记本分目录。
+- 不得依赖固定的目录命名约定；资源必须以 HTML 内的相对引用定位。
+- HTML 内的资源引用只允许解析到导出目录内部，禁止符号链接与路径逃逸。
+- HTML 导出目录中的资源文件名可能与 ENEX 中的 `file-name` 不同；ENEX 与 HTML 同时提供时以 ENEX 的元数据为准。
 
 ### 15.13 Evernote 完整性对账
 
@@ -2050,15 +2187,30 @@ HTML 作为 ENEX 的补充输入：
 降级笔记数
 失败笔记数
 重复身份数
+拒绝输入数（.notes 等不支持格式，见 15.2.1）
 资源总数
 成功资源数
 缺失资源数
+未引用资源数
+哈希不匹配资源数（en-media hash 与 MD5 不一致）
+重复内容资源数（同笔记内 SHA-256 相同）
+远程图片引用数（正文远程 <img>）
+远程图片落地数 / 失败数
 内部链接总数
 已重写链接数
 未解析链接数
 ```
 
 任何差额均视为验证失败，不得只输出“导入完成”。
+
+### 15.14 参考规范
+
+- ENEX 容器结构：`evernote-export3.dtd`（`http://xml.evernote.com/pub/evernote-export3.dtd`）；字段语义另见 Evernote EDAM API 的 `Types.thrift`，长度与取值限制见 `Limits.thrift`。
+- 笔记正文 ENML：`enml2.dtd`（`http://xml.evernote.com/pub/enml2.dtd`），刻意放宽的 XHTML 子集。
+- OCR 索引：`recoIndex.dtd`（`recognition` 元素内容，不迁移）。
+- `en-media` 的 `hash` 为资源二进制字节的 MD5 十六进制摘要（Evernote 官方开发论坛确认；ENEX 不存储该值，必须自行计算）。
+- 真实导出可能偏离 DTD 注释中的 MIME 合法集合与字段出现率；解析以 DTD 结构为骨架、以实际内容为准，未知值降级记录而不是拒绝整个文件。
+- 印象笔记（中国版）`.notes`：2022 年 7 月起替代 ENEX 的专有导出格式，笔记内容以未公开密钥的 AES 加密（`base64:aes`），无官方规范与可靠公开逆向；本适配器按 15.2.1 明确拒绝。国际版 Evernote 桌面端 ENEX/HTML 导出以官方帮助文档为准。
 
 ---
 
@@ -3099,10 +3251,15 @@ tests/fixtures/evernote/
 ├── duplicate-titles.enex
 ├── tags.enex
 ├── resources.enex
+├── resources-named.enex # resource-attributes 携带 file-name，验证原名保留
+├── resources-unnamed.enex # file-name 缺失，验证序号命名与扩展名推断
+├── resource-hash-mismatch.enex # en-media hash 与资源 MD5 不一致
+├── remote-images.enex # 正文含远程 <img>，验证下载落地与降级路径
 ├── internal-links.enex
 ├── encrypted-block.enex
 ├── malformed-note.enex
 ├── large-stream.enex
+├── yinxiang-export.notes # 构造样本：验证 .notes 显式拒绝与替代导出指引（15.2.1）
 └── html-export/
 ```
 
