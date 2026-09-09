@@ -153,7 +153,9 @@ export function extractHtmlNote(path: string, exportRoot: string): HtmlExtractRe
     // 剥离 ?query/#fragment 后解码；非法百分号编码（如 src="file%zz.png"）按缺失处理
     let decoded: string;
     try {
-      decoded = decodeURIComponent(ref.split(/[?#]/)[0]);
+      // ?? ref：noUncheckedIndexedAccess 下 [0] 可能是 undefined（split 实际
+      // 恒非空，此处仅为类型完备）
+      decoded = decodeURIComponent(ref.split(/[?#]/)[0] ?? ref);
     } catch {
       return null;
     }

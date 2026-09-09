@@ -165,19 +165,20 @@ async function downloadRemoteImages(
   let failCount = 0;
   for (let i = 0; i < remotes.length; i += 1) {
     const r = results[i];
-    if (r.ok) {
-      okCount += 1;
-      assets.push({
-        originalUrl: remotes[i].url,
-        mimeType: r.mimeType,
-        byteSize: r.byteSize,
-        sha256: `sha256:${createHash('sha256').update(r.bytes).digest('hex')}`,
-        kind: 'image',
-        data: r.bytes,
-      });
-    } else {
+    const remote = remotes[i];
+    if (r === undefined || remote === undefined || !r.ok) {
       failCount += 1;
+      continue;
     }
+    okCount += 1;
+    assets.push({
+      originalUrl: remote.url,
+      mimeType: r.mimeType,
+      byteSize: r.byteSize,
+      sha256: `sha256:${createHash('sha256').update(r.bytes).digest('hex')}`,
+      kind: 'image',
+      data: r.bytes,
+    });
   }
   return { assets, okCount, failCount };
 }
