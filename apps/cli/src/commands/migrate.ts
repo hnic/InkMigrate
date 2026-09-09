@@ -22,7 +22,7 @@ import {
   profileExists,
 } from '@inkmigrate/source-toutiao';
 import { createEvernoteSource } from '@inkmigrate/source-evernote';
-import { createObsidianTarget } from '@inkmigrate/target-obsidian';
+import { createObsidianTarget, ObsidianTargetConfigSchema } from '@inkmigrate/target-obsidian';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { parsePositiveInt } from '../util.js';
@@ -75,6 +75,8 @@ export function createMigrateCommand(): Command {
         let sourceAdapterKind = 'toutiao';
         let evernoteAdapter: SourceAdapter | undefined;
         let evernoteInstanceConfig: Record<string, unknown> | undefined;
+        /** yaml 中匹配的 obsidian target 配置（经 schema 填默认值）；无则用 legacy 硬编码。 */
+        let yamlTargetConfig: Record<string, unknown> | undefined;
         const configPath = resolve(opts.config ?? 'inkmigrate.yaml');
         if (existsSync(configPath)) {
           const cfg = loadConfigFromString(readFileSync(configPath, 'utf8'));
@@ -99,6 +101,21 @@ export function createMigrateCommand(): Command {
             });
             evernoteInstanceConfig = raw;
             sourceAdapterKind = 'evernote';
+          }
+          // §10.2 targets[]：匹配的 obsidian target 走配置（默认 Imports/InkMigrate
+          // 目录结构，§13.3）；--vault-path 参数覆盖 vaultPath。
+          const tgt = cfg.targets.find(
+            (t) => t.id === opts.target && t.adapter === 'obsidian',
+          );
+          if (tgt !== undefined) {
+            if (!tgt.enabled) {
+              console.error(`目标 ${opts.target} 在配置中处于 enabled: false 状态，已跳过。`);
+              process.exit(1);
+            }
+            yamlTargetConfig = ObsidianTargetConfigSchema.parse({
+              ...tgt.config,
+              vaultPath: opts.vaultPath,
+            }) as unknown as Record<string, unknown>;
           }
         }
 
@@ -138,7 +155,9 @@ export function createMigrateCommand(): Command {
           config: {},
           workspaceDir: opts.stateDir,
           vaultPath: opts.vaultPath,
-          targetConfig: {
+          // yaml 命中 obsidian target 时用其配置（含 §13.3 默认 Imports/InkMigrate
+          // 目录结构）；否则维持 legacy 硬编码（头条老用户路径不变）
+          targetConfig: (yamlTargetConfig ?? {
             vaultPath: opts.vaultPath,
             importSubdir: '',
             attachmentsSubdir: 'Attachments',
@@ -146,7 +165,7 @@ export function createMigrateCommand(): Command {
             overwritePolicy: 'preserve',
             collectionMapping: { toTags: false, toFolders: false },
             maxFilenameLength: 100,
-          } as Record<string, unknown>,
+          }) as Record<string, unknown>,
         };
 
         // H5: 确保实例记录存在——移到 config 构造后，传入实际 config 以计算真实
