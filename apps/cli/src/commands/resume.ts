@@ -7,9 +7,11 @@ import {
   type DB,
 } from '@inkmigrate/core';
 import { createObsidianTarget } from '@inkmigrate/target-obsidian';
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveSourceWiring, resolveTargetConfig } from '@inkmigrate/wiring';
+import { DB_FILENAME } from '../util.js';
 
 /**
  * §22 `inkmigrate resume` 命令。
@@ -39,7 +41,7 @@ export function createResumeCommand(): Command {
       maxItems?: string;
       config?: string;
     }) => {
-      const dbPath = join(opts.stateDir, 'inkmigrate.sqlite');
+      const dbPath = join(opts.stateDir, DB_FILENAME);
       if (!existsSync(dbPath)) {
         console.error(`数据库不存在：${dbPath}`);
         process.exit(1);
@@ -79,8 +81,8 @@ export function createResumeCommand(): Command {
           return;
         }
 
-        // 创建新 Job
-        const jobId = `mig-${Date.now()}`;
+        // 创建新 Job（随机后缀免疫毫秒碰撞/时钟回拨，与 migrate 一致）
+        const jobId = `mig-${Date.now()}-${randomUUID().slice(0, 8)}`;
         const now = new Date().toISOString();
         new MigrationJobs(db).create({
           id: jobId,
@@ -149,6 +151,20 @@ export function createResumeCommand(): Command {
             console.log(`  reason: ${result.reconciliationReason}`);
           }
           console.log(`\n报告：${join(opts.stateDir, 'reports', jobId, 'summary.md')}`);
+        } catch (err) {
+          // runMigrationJob 内部只有 finally（无 catch）：错误上抛时 Job 行停留在
+          // running。CLI 每次生成新 jobId，core 的孤儿自愈覆盖不到，显式落库
+          // failed（与 migrate 命令一致），否则只能等 stale-running 兜底。
+          try {
+            new MigrationJobs(db).updateStatus(jobId, {
+              status: 'failed',
+              updatedAt: new Date().toISOString(),
+            });
+          } catch {
+            // 状态落库失败不应掩盖原始错误
+          }
+          console.error(`恢复迁移失败，Job ${jobId} 已标记为 failed。`);
+          throw err;
         } finally {
           process.off('SIGINT', onSigInt);
         }

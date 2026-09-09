@@ -3,6 +3,12 @@
  */
 
 /**
+ * 状态数据库文件名（位于 workspace stateDir 下）。
+ * 所有命令统一从这里取值，避免文件名硬编码散落各处后漂移。
+ */
+export const DB_FILENAME = 'inkmigrate.sqlite';
+
+/**
  * R3: 把字符串选项解析为正整数，NaN/非正数时抛错（被 commander 外层 catch 捕获）。
  * M-4: 原用 process.exit(1) 会跳过调用方的 finally { db.close()/session.close() }，
  * 导致 auth.ts 中浏览器已启动后传错 --timeout 泄漏 Chromium。改为 throw 让 finally

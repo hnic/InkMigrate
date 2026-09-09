@@ -11,7 +11,7 @@ import {
 } from '@inkmigrate/source-toutiao';
 import { join } from 'node:path';
 import * as readline from 'node:readline/promises';
-import { parsePositiveInt, parseOptionalPositiveInt } from '../util.js';
+import { parseOptionalPositiveInt, DB_FILENAME } from '../util.js';
 import { stdin as input, stdout as output } from 'node:process';
 
 /**
@@ -37,23 +37,11 @@ export function createCleanupCommand(): Command {
     .requiredOption('--source <id>', '来源实例 ID')
     .requiredOption('--state-dir <path>', 'workspace stateDir')
     .action((opts: { source: string; stateDir: string }) => {
-      const db: DB = openDatabase({ path: join(opts.stateDir, 'inkmigrate.sqlite') });
+      const db: DB = openDatabase({ path: join(opts.stateDir, DB_FILENAME) });
       try {
-        const total = (
-          db
-            .prepare('SELECT COUNT(*) as c FROM source_items WHERE source_instance_id = ?')
-            .get(opts.source) as { c: number }
-        ).c;
-        const verified = (
-          db
-            .prepare("SELECT COUNT(*) as c FROM source_items WHERE source_instance_id = ? AND status = 'verified'")
-            .get(opts.source) as { c: number }
-        ).c;
-        const degraded = (
-          db
-            .prepare("SELECT COUNT(*) as c FROM source_items WHERE source_instance_id = ? AND status = 'degraded'")
-            .get(opts.source) as { c: number }
-        ).c;
+        const total = countSourceItems(db, opts.source);
+        const verified = countSourceItems(db, opts.source, 'verified');
+        const degraded = countSourceItems(db, opts.source, 'degraded');
 
         console.log(`来源 ${opts.source} 清理状态：`);
         console.log(`  总条目: ${total}`);
@@ -86,26 +74,36 @@ export function createCleanupCommand(): Command {
       intervalMs?: string;
       force?: boolean;
     }) => {
-      const dbPath = join(opts.stateDir, 'inkmigrate.sqlite');
+      const dbPath = join(opts.stateDir, DB_FILENAME);
       const db: DB = openDatabase({ path: dbPath });
       try {
         // 候选计数（用于二次确认的展示；实际候选过滤在编排器内完成，含已成功项排除）
-        const candidateCount = (
-          db
-            .prepare(
-              `SELECT COUNT(*) as c FROM source_items
-               WHERE source_instance_id = ? AND status = 'verified'`,
-            )
-            .get(opts.source) as { c: number }
-        ).c;
+        const candidateCount = countSourceItems(db, opts.source, 'verified');
 
         if (candidateCount === 0) {
           console.log('没有已迁移的条目可清理。');
           return;
         }
 
+        // 前置校验放在确认提示之前，避免用户逐字输入确认短语后才失败：
+        // 关联迁移任务（满足 cleanup_plans.migration_job_id FK）
+        const migrationJobId = resolveLatestMigrationJobId(db, opts.source);
+        // Profile 存在性
+        const pPath = profilePath(opts.stateDir, opts.source);
+        if (!profileExists(opts.stateDir, opts.source)) {
+          console.error(`未找到 Profile：${pPath}`);
+          console.error(
+            `请先运行：inkmigrate auth login --source ${opts.source} --state-dir ${opts.stateDir}`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+
         console.log(`找到 ${candidateCount} 条已迁移条目（已成功取消的会自动跳过）。`);
-        const effectiveMax = opts.maxItems ? parsePositiveInt(opts.maxItems, 'max-items') : 200;
+        // 只解析一次，确认提示与编排器共用（默认值与编排器内部
+        // DEFAULT_CLEANUP_MAX_ITEMS=200 保持一致）
+        const limit = parseOptionalPositiveInt(opts.maxItems, 'max-items');
+        const effectiveMax = limit ?? 200;
         if (candidateCount > effectiveMax) {
           console.log(`⚠️ 防风控：本次将处理前 ${effectiveMax} 条，剩余可分多次运行（已成功项自动跳过）。`);
         }
@@ -125,25 +123,15 @@ export function createCleanupCommand(): Command {
             const answer = (await rl.question('确认 > ')).trim();
             if (!validateConfirmation(answer, candidateCount, prefix)) {
               console.log('确认不匹配，已取消操作。未做任何更改。');
-              process.exit(1);
+              // 用 return 而非 process.exit：让 finally 恢复终端（rl.close）
+              // 并正常关库（db.close / WAL checkpoint）
+              process.exitCode = 1;
+              return;
             }
           } finally {
             rl.close();
           }
           console.log('');
-        }
-
-        // 关联迁移任务（满足 cleanup_plans.migration_job_id FK）
-        const migrationJobId = resolveLatestMigrationJobId(db, opts.source);
-
-        // 检查 Profile
-        const pPath = profilePath(opts.stateDir, opts.source);
-        if (!profileExists(opts.stateDir, opts.source)) {
-          console.error(`未找到 Profile：${pPath}`);
-          console.error(
-            `请先运行：inkmigrate auth login --source ${opts.source} --state-dir ${opts.stateDir}`,
-          );
-          process.exit(1);
         }
 
         const adapterConfig: ToutiaoBrowserAdapterConfig = {
@@ -152,7 +140,13 @@ export function createCleanupCommand(): Command {
           headless: false, // 有头：头条反爬会拦截 headless
         };
         const adapter = createToutiaoSource(adapterConfig);
-        await adapter.prepare({ config: {}, workspaceDir: opts.stateDir });
+        try {
+          await adapter.prepare({ config: {}, workspaceDir: opts.stateDir });
+        } catch (err) {
+          // prepare 失败也要释放 adapter，避免浏览器进程与 Profile 目录锁泄漏
+          await adapter.close().catch(() => {});
+          throw err;
+        }
 
         // SIGINT → 置取消标志（编排器每轮检查，优雅终止并落库部分结果）
         let cancelled = false;
@@ -163,7 +157,6 @@ export function createCleanupCommand(): Command {
         process.on('SIGINT', onSigInt);
 
         try {
-          const limit = parseOptionalPositiveInt(opts.maxItems, 'max-items');
           const intervalMs = parseOptionalPositiveInt(opts.intervalMs, 'interval-ms');
           const result = await runCleanupUnfavorite({
             db,
@@ -195,6 +188,9 @@ export function createCleanupCommand(): Command {
       }
     });
 
+  return cleanup;
+}
+
 /** 查该 source 下最近一个迁移任务（满足 cleanup_plans.migration_job_id FK）。 */
 function resolveLatestMigrationJobId(db: DB, sourceInstanceId: string): string {
   const row = db
@@ -208,5 +204,19 @@ function resolveLatestMigrationJobId(db: DB, sourceInstanceId: string): string {
   return row.id;
 }
 
-  return cleanup;
+/** 统计该 source 的条目数；传入 status 时按状态过滤（status/unfavorite 共用）。 */
+function countSourceItems(
+  db: DB,
+  sourceInstanceId: string,
+  status?: string,
+): number {
+  const sql =
+    status === undefined
+      ? 'SELECT COUNT(*) as c FROM source_items WHERE source_instance_id = ?'
+      : 'SELECT COUNT(*) as c FROM source_items WHERE source_instance_id = ? AND status = ?';
+  const row =
+    status === undefined
+      ? (db.prepare(sql).get(sourceInstanceId) as { c: number })
+      : (db.prepare(sql).get(sourceInstanceId, status) as { c: number });
+  return row.c;
 }

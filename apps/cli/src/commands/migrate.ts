@@ -20,9 +20,10 @@ import {
   profilePath,
 } from '@inkmigrate/source-toutiao';
 import { createObsidianTarget } from '@inkmigrate/target-obsidian';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { parsePositiveInt } from '../util.js';
+import { parsePositiveInt, parseOptionalPositiveInt, DB_FILENAME } from '../util.js';
 import { buildToutiaoSource, resolveEvernoteSource, resolveTargetConfig } from '@inkmigrate/wiring';
 
 /**
@@ -60,33 +61,49 @@ export function createMigrateCommand(): Command {
       maxItems?: string;
       interval?: string;
     }) => {
-      const dbPath = join(opts.stateDir, 'inkmigrate.sqlite');
+      const dbPath = join(opts.stateDir, DB_FILENAME);
       // N1: openDatabase 会自动 migrate（不存在则建库），两个分支等价，去掉冗余三元。
       const db: DB = openDatabase({ path: dbPath });
       try {
-        const jobId = `mig-${Date.now()}`;
+        // 同毫秒并发启动会撞主键（migration_jobs.id），附随机后缀
+        const jobId = `mig-${Date.now()}-${randomUUID().slice(0, 8)}`;
         const now = new Date().toISOString();
+        // commander 选项已带默认值，这里归一一次供下方各处复用
+        const configPath = opts.config ?? 'inkmigrate.yaml';
+        // max-items 解析一次，fixture 与浏览器模式共用
+        const maxItems = parseOptionalPositiveInt(opts.maxItems, 'max-items');
 
         // §10.2 配置驱动的适配器选择（migrate/resume 共用接线，见 source-wiring.ts）：
         // yaml 命中 adapter: evernote → 文件源；否则 toutiao 浏览器（--fixture-dir
-        // 测试模式优先）。
-        const wiring = resolveEvernoteSource({
-          config: opts.config ?? 'inkmigrate.yaml',
-          sourceId: opts.source,
-        });
-        const sourceAdapter: SourceAdapter = opts.fixtureDir
-          ? createFixtureSource(opts.fixtureDir, opts.source)
-          : wiring !== undefined
-            ? wiring.adapter
-            : buildToutiaoSource({
-                sourceId: opts.source,
-                stateDir: opts.stateDir,
-                ...(opts.favoritesUrl !== undefined ? { favoritesUrl: opts.favoritesUrl } : {}),
-                ...(opts.maxItems !== undefined
-                  ? { maxItems: parsePositiveInt(opts.maxItems, 'max-items') }
-                  : {}),
-              }).adapter;
-        const sourceAdapterKind = opts.fixtureDir ? 'toutiao' : (wiring?.kind ?? 'toutiao');
+        // 测试模式优先，不读 yaml——避免无关的配置错误阻塞 fixture 流程）。
+        let sourceAdapter: SourceAdapter;
+        let sourceAdapterKind: 'evernote' | 'toutiao';
+        let sourceInstanceConfig: Record<string, unknown>;
+        if (opts.fixtureDir !== undefined) {
+          sourceAdapter = createFixtureSource(opts.fixtureDir, opts.source, maxItems);
+          sourceAdapterKind = 'toutiao';
+          // 与 buildToutiaoSource 的 instanceConfig 保持一致（fixture 模式不能直接
+          // 调用它——Profile 缺失时它会 process.exit）
+          sourceInstanceConfig = {
+            sourceInstanceId: opts.source,
+            profileDir: profilePath(opts.stateDir, opts.source),
+            headless: false,
+          };
+        } else {
+          const wiring =
+            resolveEvernoteSource({ config: configPath, sourceId: opts.source }) ??
+            buildToutiaoSource({
+              sourceId: opts.source,
+              stateDir: opts.stateDir,
+              ...(opts.favoritesUrl !== undefined ? { favoritesUrl: opts.favoritesUrl } : {}),
+              ...(maxItems !== undefined ? { maxItems } : {}),
+            });
+          sourceAdapter = wiring.adapter;
+          sourceAdapterKind = wiring.kind;
+          // 复用 wiring 生成的 instanceConfig，避免本地副本与接线层漂移导致
+          // config_hash 分叉（GUI/resume 路径会看到虚假的配置 UPDATE）
+          sourceInstanceConfig = wiring.instanceConfig;
+        }
 
         // 构造 target adapter + context
         // intervalMs 作为 runMigrationJob 一级字段传入（§18.1 类型化速率控制契约），
@@ -98,29 +115,13 @@ export function createMigrateCommand(): Command {
           vaultPath: opts.vaultPath,
           // yaml 命中 obsidian target 时用其配置（含 §13.3 默认 Imports/InkMigrate
           // 目录结构）；否则维持 legacy 硬编码（头条老用户路径不变）
-          targetConfig: resolveTargetConfig(
-            opts.config ?? 'inkmigrate.yaml',
-            opts.target,
-            opts.vaultPath,
-          ),
+          targetConfig: resolveTargetConfig(configPath, opts.target, opts.vaultPath),
         };
 
         // H5: 确保实例记录存在——移到 config 构造后，传入实际 config 以计算真实
         // config_hash（原硬编码 'h' 与 Engine 的真实哈希分叉，导致 CLI 创建的 instance
         // 随后被 GUI 迁移看到哈希「变化」触发虚假 UPDATE）。
-        ensureInstance(
-          db,
-          opts.source,
-          sourceAdapterKind,
-          'source',
-          opts.fixtureDir || wiring === undefined
-            ? {
-                sourceInstanceId: opts.source,
-                profileDir: profilePath(opts.stateDir, opts.source),
-                headless: false,
-              }
-            : wiring.instanceConfig,
-        );
+        ensureInstance(db, opts.source, sourceAdapterKind, 'source', sourceInstanceConfig);
         ensureInstance(db, opts.target, 'obsidian', 'target', targetContext.targetConfig);
 
         new MigrationJobs(db).create({
@@ -172,6 +173,20 @@ export function createMigrateCommand(): Command {
             console.log(`  reason: ${result.reconciliationReason}`);
           }
           console.log(`\n报告：${join(opts.stateDir, 'reports', jobId, 'summary.md')}`);
+        } catch (err) {
+          // runMigrationJob 内部只有 finally（无 catch）：错误上抛时 Job 行停留在
+          // running。CLI 每次生成新 jobId，core 的孤儿自愈（同 jobId 重跑触发）
+          // 覆盖不到，这里显式落库 failed，否则只能等 stale-running 兜底。
+          try {
+            new MigrationJobs(db).updateStatus(jobId, {
+              status: 'failed',
+              updatedAt: new Date().toISOString(),
+            });
+          } catch {
+            // 状态落库失败不应掩盖原始错误
+          }
+          console.error(`迁移失败，Job ${jobId} 已标记为 failed。`);
+          throw err;
         } finally {
           process.off('SIGINT', onSigInt);
         }
@@ -184,12 +199,18 @@ export function createMigrateCommand(): Command {
 function createFixtureSource(
   fixtureDir: string,
   sourceInstanceId: string,
+  maxItems?: number,
 ): SourceAdapter {
-  const favoritesHtml = readFileSync(
-    join(fixtureDir, 'favorites-list.html'),
-    'utf8',
-  );
-  const articleHtml = readFileSync(join(fixtureDir, 'article.html'), 'utf8');
+  const favoritesPath = join(fixtureDir, 'favorites-list.html');
+  const articlePath = join(fixtureDir, 'article.html');
+  if (!existsSync(favoritesPath) || !existsSync(articlePath)) {
+    // 目录写错时给明确提示，而非 ENOENT 堆栈
+    throw new Error(
+      `fixture 目录不完整：${fixtureDir} 需包含 favorites-list.html 与 article.html`,
+    );
+  }
+  const favoritesHtml = readFileSync(favoritesPath, 'utf8');
+  const articleHtml = readFileSync(articlePath, 'utf8');
 
   const real = createToutiaoSource();
   return {
@@ -201,7 +222,10 @@ function createFixtureSource(
         scrollForMore: async () => null,
         maxEmptyCycles: 1,
       });
-      for (const fav of result.items) {
+      // --max-items 在 fixture 测试模式同样生效（限制扫描+迁移条目数）
+      const items =
+        maxItems === undefined ? result.items : result.items.slice(0, maxItems);
+      for (const fav of items) {
         const fpBuilder: Parameters<typeof deriveFingerprintInput>[0] = {
           canonicalUrl: fav.canonicalUrl,
         };
@@ -222,7 +246,13 @@ function createFixtureSource(
       }
     },
     async extract(ref) {
-      const url = ref.canonicalUrl ?? '';
+      if (ref.canonicalUrl === undefined) {
+        // 空 URL 会污染 links/asset 元数据及下游 URL 逻辑，明确拒绝而非静默兜底
+        throw new Error(
+          `fixture 条目缺少 canonicalUrl，无法提取：${ref.title ?? '(untitled)'}`,
+        );
+      }
+      const url = ref.canonicalUrl;
       const detail = extractDetail({
         html: articleHtml,
         canonicalUrl: url,
