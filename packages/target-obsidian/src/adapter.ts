@@ -123,12 +123,20 @@ async function planNote(
     item.ref.fingerprint,
   );
   const stableShortId = deriveStableShortId(stableKey);
+  // §13.3 来源提供的笔记目录段（如 Evernote 的 Stack/笔记本层级）。
+  // 仅接受字符串数组；缺失时（头条等）维持 contentKind 目录，行为不变。
+  const rawSegments = (item.sourceMetadata as { notePathSegments?: unknown }).notePathSegments;
+  const notePathSegments =
+    Array.isArray(rawSegments) && rawSegments.every((s) => typeof s === 'string' && s.length > 0)
+      ? (rawSegments as string[])
+      : undefined;
   let relativePath = noteRelativePath({
     config,
     sourceInstanceId: item.ref.sourceInstanceId,
     contentKind: item.ref.contentKind,
     title: item.title,
     stableShortId,
+    ...(notePathSegments !== undefined ? { notePathSegments } : {}),
   });
 
   // 文件名冲突解决：stableShortId 后缀已保证不同指纹落到不同稳定路径（§13.4），

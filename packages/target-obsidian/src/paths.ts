@@ -50,6 +50,11 @@ export interface NotePathInput {
   contentKind: SourceContentKind;
   title: string;
   stableShortId: string;
+  /**
+   * §13.3 来源提供的笔记目录段（如 Evernote 的 `[Stack, "笔记本-<shortId>"]`）。
+   * 存在且非空时替代 contentKind 目录；每段独立清洗，防注入路径分隔符。
+   */
+  notePathSegments?: readonly string[];
 }
 
 /**
@@ -76,8 +81,17 @@ export function noteRelativePath(i: NotePathInput): string {
   if (!i.config.importSubdir) {
     return filename;
   }
-  const dir = CONTENT_KIND_DIR[i.contentKind];
   const safeSourceId = sanitizePathSegment(i.sourceInstanceId);
+  // §13.3 来源目录段优先（Evernote Stack/笔记本层级）；缺失时按 contentKind 目录
+  if (i.notePathSegments !== undefined && i.notePathSegments.length > 0) {
+    const segments = i.notePathSegments.map((s) =>
+      sanitizePathSegment(sanitizeFilename(s, { maxLength: 80 })),
+    );
+    return [i.config.importSubdir, safeSourceId, ...segments, filename]
+      .filter(Boolean)
+      .join('/');
+  }
+  const dir = CONTENT_KIND_DIR[i.contentKind];
   return [i.config.importSubdir, safeSourceId, dir, filename]
     .filter(Boolean)
     .join('/');

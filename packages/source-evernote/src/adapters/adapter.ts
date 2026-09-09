@@ -51,6 +51,8 @@ export interface EnexRefMetadata {
   notebook: string;
   stack?: string | undefined;
   notebookKey: string;
+  /** §13.3 笔记目录段：[Stack?, `<笔记本>-<notebookKey前8位>`]。 */
+  notePathSegments: string[];
 }
 
 export interface HtmlRefMetadata {
@@ -60,6 +62,18 @@ export interface HtmlRefMetadata {
   notebook: string;
   resourcesDir?: string | undefined;
   exportRoot: string;
+  /** §13.3 笔记目录段（notebookKey = SHA-256(相对目录 + NUL + 笔记本名)）。 */
+  notePathSegments: string[];
+}
+
+/** §13.3/§15.5：笔记本目录段 = [Stack?, `<笔记本名>-<notebookKey 前 8 位>`]。 */
+export function buildNotePathSegments(
+  notebook: string,
+  notebookKey: string,
+  stack: string | undefined,
+): string[] {
+  const notebookDir = `${notebook}-${notebookKey.slice(0, 8)}`;
+  return stack !== undefined && stack.length > 0 ? [stack, notebookDir] : [notebookDir];
 }
 
 interface ScanState {
@@ -169,6 +183,7 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
             notebook: file.notebook,
             stack: file.stack,
             notebookKey: file.notebookKey,
+            notePathSegments: buildNotePathSegments(file.notebook, file.notebookKey, file.stack),
           };
           yield {
             sourceInstanceId: cfg.sourceInstanceId,
@@ -191,6 +206,11 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
           const fingerprint = computeFingerprint({
             raw: [header.fileSha256, header.title].join('\0'),
           });
+          // §15.5 notebookKey 对 HTML 导出按目录维度推导（目录路径 + 笔记本名）
+          const relDir = dirname(header.relPath);
+          const htmlNotebookKey = createHash('sha256')
+            .update(`${relDir}\0${header.notebook}`)
+            .digest('hex');
           yield {
             sourceInstanceId: cfg.sourceInstanceId,
             externalId: `html:${header.relPath}`,
@@ -206,6 +226,7 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
                 notebook: header.notebook,
                 ...(header.resourcesDir !== undefined ? { resourcesDir: header.resourcesDir } : {}),
                 exportRoot,
+                notePathSegments: buildNotePathSegments(header.notebook, htmlNotebookKey, undefined),
               },
             },
           };
@@ -358,6 +379,7 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
 
       const sourceMetadata: Record<string, unknown> = {
         enex: enexMeta,
+        notePathSegments: enexMeta.notePathSegments,
         notebook: enexMeta.notebook,
         stack: enexMeta.stack,
         source_type: attrs.source,
@@ -487,6 +509,7 @@ async function extractHtmlAsItem(
     extractionWarnings: warnings,
     sourceMetadata: {
       html: meta,
+      notePathSegments: meta.notePathSegments,
       notebook: meta.notebook,
     },
   };

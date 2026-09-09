@@ -113,11 +113,29 @@ describe('evernote e2e migrate', () => {
       expect(result.scanCount).toBe(7);
       expect(result.reconciliationOk).toBe(true);
 
-      // 笔记目录：contentKind=note → 笔记/
-      const notesDir = join(w.vaultDir, 'Imports/InkMigrate/evernote-archive/笔记');
-      expect(existsSync(notesDir)).toBe(true);
-      const notes = readdirSync(notesDir).filter((f) => f.endsWith('.md'));
-      expect(notes).toHaveLength(7);
+      // §13.3 笔记目录：evernote-archive/<笔记本>-<shortId>/（有 Stack 时在 Stack 下）
+      const archiveDir = join(w.vaultDir, 'Imports/InkMigrate/evernote-archive');
+      expect(existsSync(archiveDir)).toBe(true);
+      const mdFiles: Array<{ path: string; content: string }> = [];
+      // 深度 ≥1 的 .md 才是笔记（archiveDir 根下的 <source>收藏索引.md 是索引文件）
+      const walkMd = (d: string, depth = 0) => {
+        for (const e of readdirSync(d, { withFileTypes: true })) {
+          const full = join(d, e.name);
+          if (e.isDirectory() && e.name !== '_索引') walkMd(full, depth + 1);
+          else if (e.name.endsWith('.md') && depth >= 1) {
+            mdFiles.push({ path: full, content: readFileSync(full, 'utf8') });
+          }
+        }
+      };
+      walkMd(archiveDir);
+      expect(mdFiles).toHaveLength(7);
+      // Work@@@Projects.enex → Work/Projects-<key8>/ 层级
+      const workNote = mdFiles.find((m) => m.content.includes('项目会议纪要'))!;
+      expect(workNote.path).toMatch(/\/Work\/Projects-[0-9a-f]{8}\//);
+      // 各笔记本目录带 8 位 notebookKey 短 ID 后缀
+      const notebookDirs = readdirSync(archiveDir).filter((d) => !d.startsWith('_') && !d.startsWith('.'));
+      expect(notebookDirs.some((d) => /^basic-[0-9a-f]{8}$/.test(d))).toBe(true);
+      expect(notebookDirs).toContain('Work');
 
       // 附件目录按 item-key 隔离（§15.7.4）
       const attachRoot = join(w.vaultDir, 'Attachments/InkMigrate/evernote-archive');
@@ -143,11 +161,7 @@ describe('evernote e2e migrate', () => {
       expect(allFiles).toContain('孤儿.png'); // 哈希不匹配笔记的未引用资源
 
       // 带附件笔记正文：图片内嵌 wikilink + 附件区列表 + 加密占位（§15.7.5/§15.11）
-      const namedNote = readdirSync(notesDir)
-        .map((f) => join(notesDir, f))
-        .map((p) => readFileSync(p, 'utf8'))
-        .find((c) => c.includes('带附件的笔记'));
-      expect(namedNote).toBeDefined();
+      const namedNote = mdFiles.find((m) => m.content.includes('带附件的笔记'))!.content;
       expect(namedNote).toContain('![[Attachments/InkMigrate/evernote-archive/im-');
       expect(namedNote).toContain('截图.png]]');
       expect(namedNote).toContain('## 附件');
@@ -155,17 +169,23 @@ describe('evernote e2e migrate', () => {
       expect(namedNote).toContain('加密内容未迁移');
 
       // 剪藏笔记保留远程链接（未下载）
-      const remoteNote = readdirSync(notesDir)
-        .map((f) => join(notesDir, f))
-        .map((p) => readFileSync(p, 'utf8'))
-        .find((c) => c.includes('剪藏笔记'));
+      const remoteNote = mdFiles.find((m) => m.content.includes('剪藏笔记'))!.content;
       expect(remoteNote).toContain('https://example.invalid/remote.png');
 
       // 幂等重跑（§24.5 #6）：无新增文件、对账仍通过
-      const before = readdirSync(notesDir).length;
+      const before = mdFiles.length;
       const r2 = await setupAndRun(w.dbDir, w.vaultDir, w.inputDir, 2);
       expect(r2.result.reconciliationOk).toBe(true);
-      expect(readdirSync(notesDir)).toHaveLength(before);
+      const after: string[] = [];
+      const walkAgain = (d: string, depth = 0) => {
+        for (const e of readdirSync(d, { withFileTypes: true })) {
+          const full = join(d, e.name);
+          if (e.isDirectory() && e.name !== '_索引') walkAgain(full, depth + 1);
+          else if (e.name.endsWith('.md') && depth >= 1) after.push(full);
+        }
+      };
+      walkAgain(archiveDir);
+      expect(after).toHaveLength(before);
     } finally {
       rmSync(w.dbDir, { recursive: true, force: true });
       rmSync(w.vaultDir, { recursive: true, force: true });
@@ -244,8 +264,22 @@ describe('evernote e2e migrate', () => {
       expect(result.scanCount).toBe(3);
       expect(result.reconciliationOk).toBe(true);
 
-      const notesDir = join(vaultDir, 'Imports/InkMigrate/evernote-archive/笔记');
-      const contents = readdirSync(notesDir).map((f) => readFileSync(join(notesDir, f), 'utf8'));
+      // §13.3 HTML 笔记目录：工作笔记本-<key8>/ 与 根目录笔记本 html-export-<key8>/
+      const archiveDir = join(vaultDir, 'Imports/InkMigrate/evernote-archive');
+      const contents: string[] = [];
+      // 深度 ≥1 的 .md 才是笔记（根下的收藏索引是索引文件）
+      const walkMd = (d: string, depth = 0) => {
+        for (const e of readdirSync(d, { withFileTypes: true })) {
+          const full = join(d, e.name);
+          if (e.isDirectory() && e.name !== '_索引') walkMd(full, depth + 1);
+          else if (e.name.endsWith('.md') && depth >= 1) contents.push(readFileSync(full, 'utf8'));
+        }
+      };
+      walkMd(archiveDir);
+      expect(contents).toHaveLength(3);
+      expect(
+        readdirSync(archiveDir).some((d) => /^工作笔记本-[0-9a-f]{8}$/.test(d)),
+      ).toBe(true);
       const meeting = contents.find((c) => c.includes('会议记录'))!;
       expect(meeting).toBeDefined();
       // 图片内嵌 wikilink（原文件名）+ PDF 进附件区，脚本被清洗

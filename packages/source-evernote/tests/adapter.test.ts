@@ -80,10 +80,18 @@ describe('createEvernoteSource', () => {
       const meta = (workRef!.sourceMetadata as { enex: Record<string, unknown> }).enex;
       expect(meta.stack).toBe('Work');
       expect(meta.notebook).toBe('Projects');
+      // §13.3 目录段：[Stack, 笔记本-notebookKey前8位]
+      const segments = meta.notePathSegments as string[];
+      expect(segments).toHaveLength(2);
+      expect(segments[0]).toBe('Work');
+      expect(segments[1]).toMatch(/^Projects-[0-9a-f]{8}$/);
       const basicRef = refs.find((r) => r.title === '第一条笔记');
       const basicMeta = (basicRef!.sourceMetadata as { enex: Record<string, unknown> }).enex;
       expect(basicMeta.stack).toBeUndefined();
       expect(basicMeta.notebook).toBe('basic');
+      expect(basicMeta.notePathSegments).toEqual([
+        expect.stringMatching(/^basic-[0-9a-f]{8}$/),
+      ]);
     } finally {
       rmSync(input, { recursive: true, force: true });
     }

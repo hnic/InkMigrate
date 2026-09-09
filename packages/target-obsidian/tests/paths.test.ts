@@ -191,3 +191,55 @@ describe('assetRelativePath (§13.7)', () => {
     expect(filename).not.toMatch(/[\\:*?"<>|]/);
   });
 });
+
+describe('noteRelativePath §13.3 notePathSegments（Evernote 笔记本层级）', () => {
+  it('来源目录段优先于 contentKind 目录', () => {
+    const p = noteRelativePath({
+      config: baseConfig,
+      sourceInstanceId: 'evernote-archive',
+      contentKind: 'note',
+      title: '会议纪要',
+      stableShortId: '0f7d1a2b3c',
+      notePathSegments: ['Work', 'Projects-a1b2c3d4'],
+    });
+    expect(p).toBe(
+      'Imports/InkMigrate/evernote-archive/Work/Projects-a1b2c3d4/会议纪要-0f7d1a2b3c.md',
+    );
+  });
+  it('无 Stack 时单层笔记本目录', () => {
+    const p = noteRelativePath({
+      config: baseConfig,
+      sourceInstanceId: 'evernote-archive',
+      contentKind: 'note',
+      title: '随笔',
+      stableShortId: '0f7d1a2b3c',
+      notePathSegments: ['Inbox-eeeeeeee'],
+    });
+    expect(p).toBe(
+      'Imports/InkMigrate/evernote-archive/Inbox-eeeeeeee/随笔-0f7d1a2b3c.md',
+    );
+  });
+  it('目录段逐段清洗：路径分隔符与非法字符被替换', () => {
+    const p = noteRelativePath({
+      config: baseConfig,
+      sourceInstanceId: 'evernote-archive',
+      contentKind: 'note',
+      title: 't',
+      stableShortId: '0f7d1a2b3c',
+      notePathSegments: ['../evil', 'a/b:c'],
+    });
+    expect(p.split('/')).not.toContain('..'); // '..-evil' 是字面目录名，安全
+    expect(p.split('/').length).toBe(6); // Imports/InkMigrate/source/seg1/seg2/file
+  });
+  it('空数组回退 contentKind 目录（与不传一致）', () => {
+    const p = noteRelativePath({
+      config: baseConfig,
+      sourceInstanceId: 'evernote-archive',
+      contentKind: 'note',
+      title: 't',
+      stableShortId: '0f7d1a2b3c',
+      notePathSegments: [],
+    });
+    expect(p).toContain('/笔记/');
+  });
+});
