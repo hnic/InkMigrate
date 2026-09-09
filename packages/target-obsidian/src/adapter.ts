@@ -2,6 +2,7 @@ import {
   computeStableKey,
   deriveItemKey,
   deriveStableShortId,
+  sanitizeFilename,
   sourceContentHash,
   targetContentHash,
   writtenFileHash,
@@ -171,60 +172,84 @@ async function planNote(
 
   // §13.7 附件本地化：把已下载字节（asset.data）的图片替换为本地嵌入。
   // 只处理 kind==='image' 且携带 data 的 asset；下载失败的（无 data）保留远程 URL。
+  // §15.7.4：asset.fileName 存在时优先用来源侧已清洗的原文件名（Evernote）；
+  // 未设置时维持头条的序号命名。正文未匹配到、但携带 fileName 的资产（任意 kind，
+  // 含未引用图片与 PDF/Office 等附件）写入附件目录并进文末附件区（§15.7.5）——
+  // 头条资产不带 fileName，此门控保证其行为不变。
   const itemKey = deriveItemKey(stableKey);
   const assetLinks: { markdownPlaceholder: string; relativePath: string }[] = [];
+  const attachmentLinks: string[] = [];
   const assetRecords: AssetWriteRecord[] = [];
   let imgIdx = 0;
   for (const asset of item.assets) {
-    if (asset.kind !== 'image' || asset.data === undefined || asset.sha256 === undefined) {
+    if (asset.data === undefined || asset.sha256 === undefined) {
       continue;
     }
-    if (asset.originalUrl === undefined) continue;
-    // 在 markdownBody 里定位这张图片的引用，替换为唯一占位符。
-    //
-    // 匹配策略：头条 CDN 图片 URL 的子域名（p3/p9/p11 随机分配）和 query 参数
-    // （x-signature/x-expires 每次新签名）会变化，但内容路径
-    // `/tos-cn-i-xxx/<hash>~tplv-xxx` 是图片唯一标识，稳定不变。
-    // 即便 extract 拿到的 URL 和 bodyHtml 里的子域名/签名不同也能匹配。
-    // 内容路径不存在时（非头条图片）回退到完整 baseUrl（? 之前）精确匹配。
-    const contentPath = asset.originalUrl.match(/\/tos-cn-i-[^/]+\/[^?]+/)?.[0];
-    const baseUrl = asset.originalUrl.split('?')[0] ?? asset.originalUrl;
-    const matchKey = contentPath ?? baseUrl;
-    const escaped = matchKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const placeholder = `\x00IMG${imgIdx}\x00`;
-    const before = markdownBody;
-    // matchKey 可能是完整 URL（含 https://）或仅内容路径（/tos-cn-i-...）。
-    // 两种情况都用它在 url 位置匹配，前面允许任意协议+子域名，后面允许任意 query。
-    markdownBody = markdownBody.replace(
-      new RegExp(`!\\[[^\\]]*\\]\\([^)]*${escaped}[^)]*\\)`, 'g'),
-      placeholder,
-    );
-    // 匹配 <img src="url..."> HTML 标签形式（turndown 未转换的残留）。
-    markdownBody = markdownBody.replace(
-      new RegExp(`<img[^>]*src="[^"]*${escaped}[^"]*"[^>]*>`, 'g'),
-      placeholder,
-    );
-    if (markdownBody === before) {
-      // 正文里找不到该 url（可能是 css 背景图等未内联的资源），跳过本地化。
-      continue;
+    const hasFileName = asset.fileName !== undefined && asset.fileName.length > 0;
+    if (asset.kind === 'image' && asset.originalUrl !== undefined) {
+      // 在 markdownBody 里定位这张图片的引用，替换为唯一占位符。
+      //
+      // 匹配策略：头条 CDN 图片 URL 的子域名（p3/p9/p11 随机分配）和 query 参数
+      // （x-signature/x-expires 每次新签名）会变化，但内容路径
+      // `/tos-cn-i-xxx/<hash>~tplv-xxx` 是图片唯一标识，稳定不变。
+      // 即便 extract 拿到的 URL 和 bodyHtml 里的子域名/签名不同也能匹配。
+      // 内容路径不存在时（非头条图片）回退到完整 baseUrl（? 之前）精确匹配。
+      const contentPath = asset.originalUrl.match(/\/tos-cn-i-[^/]+\/[^?]+/)?.[0];
+      const baseUrl = asset.originalUrl.split('?')[0] ?? asset.originalUrl;
+      const matchKey = contentPath ?? baseUrl;
+      const escaped = matchKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const placeholder = `\x00IMG${imgIdx}\x00`;
+      const before = markdownBody;
+      // matchKey 可能是完整 URL（含 https://）或仅内容路径（/tos-cn-i-...）。
+      // 两种情况都用它在 url 位置匹配，前面允许任意协议+子域名，后面允许任意 query。
+      markdownBody = markdownBody.replace(
+        new RegExp(`!\\[[^\\]]*\\]\\([^)]*${escaped}[^)]*\\)`, 'g'),
+        placeholder,
+      );
+      // 匹配 <img src="url..."> HTML 标签形式（turndown 未转换的残留）。
+      markdownBody = markdownBody.replace(
+        new RegExp(`<img[^>]*src="[^"]*${escaped}[^"]*"[^>]*>`, 'g'),
+        placeholder,
+      );
+      if (markdownBody !== before) {
+        const ext = deriveMimeExtension(asset.mimeType ?? '');
+        const filename = hasFileName
+          ? sanitizeFilename(asset.fileName!, { maxLength: 200 })
+          : `${String(imgIdx + 1).padStart(3, '0')}.${ext}`;
+        const relPath = assetRelativePath({
+          config,
+          sourceInstanceId: item.ref.sourceInstanceId,
+          itemKey,
+          filename,
+        });
+        assetLinks.push({ markdownPlaceholder: placeholder, relativePath: relPath });
+        assetRecords.push({ relativePath: relPath, data: asset.data, sha256: asset.sha256 });
+        imgIdx++;
+        continue;
+      }
+      // 正文里找不到该 url（可能是 css 背景图等未内联的资源）：无 fileName 的资产
+      // 维持原行为（跳过）；有 fileName 的（Evernote 未引用资源）落入下方附件区。
     }
-    const ext = deriveMimeExtension(asset.mimeType ?? '');
-    const filename = `${String(imgIdx + 1).padStart(3, '0')}.${ext}`;
-    const relPath = assetRelativePath({
-      config,
-      sourceInstanceId: item.ref.sourceInstanceId,
-      itemKey,
-      filename,
-    });
-    assetLinks.push({ markdownPlaceholder: placeholder, relativePath: relPath });
-    assetRecords.push({ relativePath: relPath, data: asset.data, sha256: asset.sha256 });
-    imgIdx++;
+    if (hasFileName) {
+      const ext = deriveMimeExtension(asset.mimeType ?? '');
+      let filename = sanitizeFilename(asset.fileName!, { maxLength: 200 });
+      if (!/\.[a-z0-9]{1,8}$/i.test(filename)) filename = `${filename}.${ext}`;
+      const relPath = assetRelativePath({
+        config,
+        sourceInstanceId: item.ref.sourceInstanceId,
+        itemKey,
+        filename,
+      });
+      attachmentLinks.push(relPath);
+      assetRecords.push({ relativePath: relPath, data: asset.data, sha256: asset.sha256 });
+    }
   }
 
   const body = renderBody({
     item,
     markdownBody,
     assetLinks,
+    attachmentLinks,
     linkStyle: config.linkStyle,
   });
 

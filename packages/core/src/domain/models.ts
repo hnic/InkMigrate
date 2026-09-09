@@ -78,6 +78,12 @@ export interface SourceAsset {
   sha256?: string;
   kind: 'image' | 'pdf' | 'audio' | 'video' | 'office' | 'other';
   /**
+   * §15.7.4 来源侧已清洗的落盘文件名（含扩展名，冲突已消解）。
+   * Evernote 等携带原文件名的来源设置；头条等按序号命名的来源不设置，
+   * 目标端对未设置的资产维持原有序号命名行为。
+   */
+  fileName?: string;
+  /**
    * 瞬态：下载的资源字节（仅 image 下载成功时填充）。
    * 不参与序列化、不进 sourceContentHash；只在同一次迁移的进程内从 extract
    * 流到 plan/write（processOneItem 内串行完成）。跨进程/持久化后失效。

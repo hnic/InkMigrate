@@ -35,6 +35,8 @@ export interface RenderBodyInput {
   markdownBody: string;
   /** 正文中的附件引用。 */
   assetLinks: AssetLink[];
+  /** §15.7.5 文末附件区的附件相对路径（未内联进正文的资源）。 */
+  attachmentLinks?: readonly string[];
   /** §13.7 链接风格，默认 wikilink。 */
   linkStyle?: 'wikilink' | 'markdown';
 }
@@ -75,6 +77,18 @@ export function renderBody(i: RenderBodyInput): string {
   }
   lines.push(body);
   lines.push('');
+
+  // §15.7.5 附件区：未内联进正文的资源（PDF/Office/音视频、未引用图片）统一列出
+  if (i.attachmentLinks !== undefined && i.attachmentLinks.length > 0) {
+    lines.push('## 附件');
+    lines.push('');
+    for (const relPath of i.attachmentLinks) {
+      const label = relPath.split('/').pop() ?? relPath;
+      const link = linkStyle === 'wikilink' ? `[[${relPath}]]` : `[${label}](${relPath})`;
+      lines.push(`- ${link}`);
+    }
+    lines.push('');
+  }
 
   return lines.join('\n');
 }
