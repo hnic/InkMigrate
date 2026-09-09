@@ -38,21 +38,35 @@ export function createLogger(opts: LoggerOptions = {}): Logger {
 }
 
 function wrapRedacted(logger: Logger, redactor: Redactor): Logger {
+  // 从实例取全部 level（含 customLevels，如 security/audit），而非硬编码六个
+  // 方法名——自定义 level 的方法若不拦截，会成为绕过脱敏的旁路。
+  const levelMethods = new Set(Object.keys(logger.levels.values));
+  const wrapCache = new Map<
+    string,
+    (objOrMsg: unknown, msg?: string, ...rest: unknown[]) => void
+  >();
   const wrap =
     (fn: (...args: unknown[]) => void) =>
     (objOrMsg: unknown, msg?: string, ...rest: unknown[]): void => {
-      const safeObj =
-        typeof objOrMsg === 'string'
-          ? redactor(objOrMsg)
-          : redactValue(objOrMsg, redactor);
-      const safeMsg = msg !== undefined ? redactor(msg) : undefined;
-      // H3: printf 风格的 rest 插值参数（如 log.info({url}, 'fetched %s', token)）
-      // 也需脱敏，否则会泄漏。
-      const safeRest = rest.map((x) => (typeof x === 'string' ? redactor(x) : redactValue(x, redactor)));
-      if (safeMsg === undefined) {
-        fn.call(logger, safeObj);
-      } else {
-        fn.call(logger, safeObj, safeMsg, ...safeRest);
+      // 脱敏路径可能因用户 getter 等抛错；此时既不能丢日志、更不能把异常抛回
+      // 调用方（catch 块里的 logger.error 会掩盖原始错误）。降级为占位符，
+      // 严禁回退输出原值。
+      try {
+        const safeObj =
+          typeof objOrMsg === 'string'
+            ? redactor(objOrMsg)
+            : redactValue(objOrMsg, redactor);
+        const safeMsg = msg !== undefined ? redactor(msg) : undefined;
+        // H3: printf 风格的 rest 插值参数（如 log.info({url}, 'fetched %s', token)）
+        // 也需脱敏，否则会泄漏。
+        const safeRest = rest.map((x) => (typeof x === 'string' ? redactor(x) : redactValue(x, redactor)));
+        if (safeMsg === undefined) {
+          fn.call(logger, safeObj);
+        } else {
+          fn.call(logger, safeObj, safeMsg, ...safeRest);
+        }
+      } catch {
+        fn.call(logger, '[redaction failed — payload suppressed]');
       }
     };
   // Logger 是函数与对象的混合体；用 Proxy 拦截已知方法。
@@ -60,65 +74,93 @@ function wrapRedacted(logger: Logger, redactor: Redactor): Logger {
   // 任何 logger.child({...}).info(...) 会写未脱敏内容，静默击穿 redact 保证。
   return new Proxy(logger, {
     get(target, prop, receiver) {
-      if (
-        typeof prop === 'string' &&
-        ['trace', 'debug', 'info', 'warn', 'error', 'fatal'].includes(prop)
-      ) {
-        return wrap(Reflect.get(target, prop, receiver) as (...a: unknown[]) => void);
+      if (typeof prop === 'string' && levelMethods.has(prop)) {
+        // 缓存包装闭包：同一方法多次属性访问不再重复分配。
+        let wrapped = wrapCache.get(prop);
+        if (wrapped === undefined) {
+          wrapped = wrap(Reflect.get(target, prop, receiver) as (...a: unknown[]) => void);
+          wrapCache.set(prop, wrapped);
+        }
+        return wrapped;
       }
       // 拦截 child：返回的子 logger 递归包装（共享同一 redactor）。
       if (prop === 'child') {
         const origChild = Reflect.get(target, prop, receiver) as Logger['child'];
-        return (...args: Parameters<Logger['child']>) =>
-          wrapRedacted(origChild.apply(target, args) as unknown as Logger, redactor);
+        return (...args: Parameters<Logger['child']>) => {
+          const [bindings, ...rest] = args;
+          // Pino 在 child() 内部把 bindings 序列化进 chindings，前置到该 child 的
+          // 每一行日志——方法级拦截看不到这些字段，必须在传入前脱敏，否则
+          // logger.child({ token }).info(...) 会在每一行泄漏原始 token。
+          const safeBindings = redactValue(bindings, redactor) as typeof bindings;
+          return wrapRedacted(
+            origChild.apply(target, [safeBindings, ...rest] as Parameters<Logger['child']>) as unknown as Logger,
+            redactor,
+          );
+        };
       }
       return Reflect.get(target, prop, receiver);
     },
   }) as Logger;
 }
 
-function redactValue(v: unknown, r: Redactor, seen?: WeakSet<object>): unknown {
+function redactValue(v: unknown, r: Redactor, ancestors: object[] = []): unknown {
   if (v === null || v === undefined) return v;
   if (typeof v === 'string') return r(v);
-  // H-3/R3-H2: 循环引用守卫。原数组分支传 seen（undefined）而非 visited（WeakSet），
-  // 且数组自身不加入 visited → arr.push(arr) 或 err.cause=[err] 仍栈溢出。
-  // 统一：数组和对象都用同一 visited WeakSet，进入前检查+标记。
+  // H-3/R3-H2: 循环引用守卫。用祖先路径判环而非全量 WeakSet：后者会把 DAG 中
+  // 被多处共享的普通对象（{req:{meta},res:{meta}}）误标 [Circular]，腐蚀合法数据；
+  // 祖先路径只剪断真正的回边。
   if (typeof v === 'object') {
-    const visited = seen ?? new WeakSet<object>();
-    if (visited.has(v as object)) {
+    if (ancestors.includes(v as object)) {
       return '[Circular]';
     }
-    visited.add(v as object);
-    if (Array.isArray(v)) {
-      // R3-H2: 数组也加入 visited，递归传 visited（非原始 seen）
-      return v.map((x) => redactValue(x, r, visited));
-    }
-    // L3: Map/Set/Error.cause 等非普通对象，Object.entries 不遍历其内部条目，
-    // 需显式处理避免泄漏。
-    if (v instanceof Map) {
-      const out = new Map();
-      for (const [k, val] of v) out.set(redactValue(k, r, visited), redactValue(val, r, visited));
-      return out;
-    }
-    if (v instanceof Set) {
-      return new Set([...v].map((x) => redactValue(x, r, visited)));
-    }
-    if (v instanceof Error) {
+    ancestors.push(v as object);
+    try {
+      if (Array.isArray(v)) {
+        // R3-H2: 数组同样进入祖先链，递归传同一数组
+        return v.map((x) => redactValue(x, r, ancestors));
+      }
+      // 常见内建类型短路：Date/RegExp 的数据在内部槽，Object.entries 拿不到
+      //（会序列化成 {}）；Buffer/TypedArray 会被逐字节展开成海量数字属性。
+      if (v instanceof Date) return v.toISOString();
+      if (v instanceof RegExp) return v.toString();
+      if (ArrayBuffer.isView(v) || v instanceof ArrayBuffer) {
+        return '[binary data]';
+      }
+      // L3: Map/Set/Error.cause 等非普通对象，Object.entries 不遍历其内部条目，
+      // 需显式处理避免泄漏。
+      if (v instanceof Map) {
+        const out = new Map();
+        for (const [k, val] of v) out.set(redactValue(k, r, ancestors), redactValue(val, r, ancestors));
+        return out;
+      }
+      if (v instanceof Set) {
+        return new Set([...v].map((x) => redactValue(x, r, ancestors)));
+      }
+      if (v instanceof Error) {
+        const out: Record<string, unknown> = {};
+        // message/stack/name 是非枚举 own 属性，Object.entries 取不到，必须显式
+        // 带出，否则 logger.error({ err }) 输出近乎 {}，丢失最关键的诊断信息。
+        // message/stack 可能含敏感串（URL 内嵌 token、家目录路径），同样过脱敏。
+        out.name = v.name;
+        out.message = r(v.message);
+        if (v.stack !== undefined) out.stack = r(v.stack);
+        for (const [k, val] of Object.entries(v)) {
+          out[k] = redactValue(val, r, ancestors);
+        }
+        // Error.cause 可能是嵌套 Error 或含敏感信息，递归处理
+        if (v.cause !== undefined) {
+          out.cause = redactValue(v.cause, r, ancestors);
+        }
+        return out;
+      }
       const out: Record<string, unknown> = {};
-      for (const [k, val] of Object.entries(v)) {
-        out[k] = redactValue(val, r, visited);
-      }
-      // Error.cause 可能是嵌套 Error 或含敏感信息，递归处理
-      if (v.cause !== undefined) {
-        out.cause = redactValue(v.cause, r, visited);
+      for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+        out[k] = redactValue(val, r, ancestors);
       }
       return out;
+    } finally {
+      ancestors.pop();
     }
-    const out: Record<string, unknown> = {};
-    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
-      out[k] = redactValue(val, r, visited);
-    }
-    return out;
   }
   return v;
 }

@@ -21,17 +21,30 @@ export function installSignalHandlers(
   let exiting = false;
 
   const onInt = (): void => {
-    if (interrupted && !exiting) {
+    if (exiting) {
+      // 已进入强制退出路径：忽略后续信号。onSecondInterrupt 未必同步终止进程
+      //（异步 exit / 仅记录日志），若不加此守卫，第三个信号会落到下方分支
+      // 再次触发第一次清理，重复执行可能仍在进行的 DB/浏览器收尾。
+      return;
+    }
+    if (interrupted) {
       // 第二次中断：不再走软退，直接强制。
       exiting = true;
       h.onSecondInterrupt();
       return;
     }
     interrupted = true;
-    // 第一次：异步清理；失败属于退出路径，吞掉错误。
-    h.onFirstInterrupt().catch(() => {
+    // 第一次：异步清理；失败属于退出路径，吞掉错误但留痕（stderr），
+    // 否则 DB flush / 浏览器关闭失败完全不可诊断。同步抛出同样属于退出路径。
+    try {
+      h.onFirstInterrupt().catch((err: unknown) => {
+        /* shutdown path: swallow */
+        console.error('[signals] graceful shutdown failed:', err);
+      });
+    } catch (err: unknown) {
       /* shutdown path: swallow */
-    });
+      console.error('[signals] graceful shutdown threw synchronously:', err);
+    }
   };
 
   process.on('SIGINT', onInt);

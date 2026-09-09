@@ -98,32 +98,38 @@ describe('acquireLock (§18.4)', () => {
     expect(after.jobId).toBe('other-job');
   });
 
-  it('T-2: 心跳连续写失败达阈值后 checkHealth 抛 LockHeartbeatError', async () => {
+  it('T-2: 心跳写失败达阈值或锁被接管后 checkHealth 抛 LockHeartbeatError', async () => {
     // C2: 原实现心跳失败时在 setInterval 回调里 throw，会变成未捕获异常 + 锁残留。
     // 改为设置失败标志，由持锁方在主循环调用 checkHealth() 轮询。
-    // T-2: 真实触发失败——把锁文件替换为目录（writeFileSync 写目录抛 EISDIR）。
-    const { rmSync, mkdirSync } = await import('node:fs');
+    // 心跳经持有期打开的 fd 写入后，「删除锁文件」不再触发写失败，而是被
+    // fstatSync(fd).nlink === 0 检测为接管——本测试模拟接管场景（删除 + 以
+    // 另一 jobId 重建），验证：checkHealth 抛错、release 不删新持有方的文件。
     const held = acquireLock({
       locksDir: dir,
-      lockName: 'heartbeat-fail-real',
+      lockName: 'takeover-real',
       jobId: 'j1',
       heartbeatMs: 10,
     });
     // 正常情况下 checkHealth 不抛
     expect(() => held.checkHealth()).not.toThrow();
-    // 把锁文件替换为同名目录，使心跳 writeFileSync 抛 EISDIR
-    const lockPath = held.path;
-    rmSync(lockPath, { force: true });
-    mkdirSync(lockPath);
+    // 模拟另一进程接管：删除锁文件并以不同 jobId 重建
+    const takeover: LockFileContent = {
+      pid: 4242,
+      hostname: 'other-host',
+      jobId: 'other-job',
+      startedAt: new Date().toISOString(),
+      heartbeatAt: new Date().toISOString(),
+    };
+    rmSync(held.path, { force: true });
+    writeFileSync(held.path, JSON.stringify(takeover, null, 2));
     try {
-      // 等待足够心跳周期（10ms × 阈值3 + 余量）
-      await new Promise((r) => setTimeout(r, 120));
-      // 阈值后 checkHealth 应抛 LockHeartbeatError
-      expect(() => held.checkHealth()).toThrow(/锁心跳连续.*次写入失败/);
+      // 等待足够心跳周期（10ms + 余量）触发 nlink 检测
+      await new Promise((r) => setTimeout(r, 60));
+      expect(() => held.checkHealth()).toThrow(/接管/);
     } finally {
-      // 清理：删目录，release 会尝试读锁文件（已是目录），rmSync force 兜底
-      rmSync(lockPath, { recursive: true, force: true });
       held.release();
+      // 新持有方的锁文件不被删除
+      expect(existsSync(held.path)).toBe(true);
     }
   });
 

@@ -1,9 +1,22 @@
 import { resolve, relative, isAbsolute } from 'node:path';
-import { realpathSync } from 'node:fs';
+import { realpathSync, lstatSync, readlinkSync } from 'node:fs';
 
 /**
  * §13.2 / §13.4 路径防护。所有目标路径都必须在解引用符号链接后再次确认位于 Vault 内。
  */
+
+/**
+ * 路径逃逸错误。机器可判别（`code === 'E_VAULT_ESCAPE'`），供调用方与
+ * `realpathSync` 的 ENOENT（`NodeJS.ErrnoException`）精确区分后分别 catch，
+ * 不必依赖错误消息文本。
+ */
+export class VaultPathEscapeError extends Error {
+  readonly code = 'E_VAULT_ESCAPE' as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'VaultPathEscapeError';
+  }
+}
 
 /** 检测字符串中是否包含 `..` 路径段（正斜杠或反斜杠）。 */
 export function rejectsTraversal(p: string): boolean {
@@ -19,8 +32,11 @@ export function rejectsTraversal(p: string): boolean {
 export function resolveWithin(root: string, target: string): string {
   const resolved = resolve(root, target);
   const rel = relative(root, resolved);
-  if (rel.startsWith('..') || isAbsolute(rel)) {
-    throw new Error(`path "${target}" escapes root "${root}"`);
+  // 首段精确比较 '..'：startsWith('..') 会把合法的「.. 开头文件名」（如
+  // ..draft.md，POSIX/Windows 上只要不恰好是 .. 即合法）误判为逃逸。
+  const firstSeg = rel.split(/[\\/]/, 1)[0];
+  if (firstSeg === '..' || isAbsolute(rel)) {
+    throw new VaultPathEscapeError(`path "${target}" escapes root "${root}"`);
   }
   return resolved;
 }
@@ -28,7 +44,9 @@ export function resolveWithin(root: string, target: string): string {
 /** `child` 是否位于 `parent` 内（非符号链接解析）。 */
 export function isPathInside(child: string, parent: string): boolean {
   const rel = relative(parent, child);
-  return !!rel && !rel.startsWith('..') && !isAbsolute(rel);
+  // 同 resolveWithin：按首段精确比较，避免误判 .. 开头的合法文件名
+  const firstSeg = rel.split(/[\\/]/, 1)[0];
+  return !!rel && firstSeg !== '..' && !isAbsolute(rel);
 }
 
 /**
@@ -51,7 +69,7 @@ export function assertSymlinkSafe(root: string, target: string): void {
   const realRoot = realpathSync(root);
   const realTarget = realpathSync(target);
   if (realTarget !== realRoot && !isPathInside(realTarget, realRoot)) {
-    throw new Error(
+    throw new VaultPathEscapeError(
       `resolved path "${realTarget}" escapes root "${realRoot}" via symlink`,
     );
   }
@@ -80,4 +98,28 @@ export function assertSymlinkSafe(root: string, target: string): void {
 export function assertWriteDirSafe(root: string, targetAbsPath: string): void {
   const parentDir = resolve(targetAbsPath, '..');
   assertSymlinkSafe(root, parentDir);
+  // 终组件若已存在且为符号链接：按路径直接 writeFileSync 会跟随它逃逸到 Vault 外
+  //（rename 型写入不受影响——rename 替换目录项而非跟随，但本函数是共享防护，
+  // 需同时覆盖两种写入方式）。目标尚不存在时无逃逸面。
+  let isLink = false;
+  try {
+    isLink = lstatSync(targetAbsPath).isSymbolicLink();
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+  }
+  if (isLink) {
+    try {
+      // 非悬空链接：realpath 解完整链接链后复核仍在 root 内
+      assertSymlinkSafe(root, targetAbsPath);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+      // 悬空链接（realpath ENOENT）：写入会在链接目标处创建文件，词法校验目标位置
+      const linkTarget = resolve(targetAbsPath, '..', readlinkSync(targetAbsPath));
+      if (linkTarget !== resolve(root) && !isPathInside(linkTarget, root)) {
+        throw new VaultPathEscapeError(
+          `dangling symlink "${targetAbsPath}" resolves outside root "${root}"`,
+        );
+      }
+    }
+  }
 }

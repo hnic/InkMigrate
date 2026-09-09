@@ -34,6 +34,13 @@ export class RateLimitedError extends Error {
     public readonly httpStatus: number,
     message: string,
   ) {
+    // H8 单一判定源：构造期即校验状态码，防止任意 httpStatus（如 500）构造出
+    // 「限流错误」后通过 instanceof 判定被当作应触发 Job paused 的限流条件。
+    if (!shouldPauseForRateLimit(httpStatus)) {
+      throw new TypeError(
+        `RateLimitedError: httpStatus ${httpStatus} 不是限流状态码（仅 429/503）`,
+      );
+    }
     super(message);
     this.name = 'RateLimitedError';
   }
@@ -75,13 +82,25 @@ export function isPermanentHttpError(httpStatus: number): boolean {
  * - 其它错误按 `policy.backoffMs` 退避后重试，最多 `maxRetries` 次。
  * - 耗尽后抛出最后一次错误。
  * - 可选 `signal`：在重试退避等待期间若被 abort，立即抛出 AbortError 而非等满退避时长，
- *   让取消信号能在长退避（最长 30s）期间更快穿透。
+ *   让取消信号能在长退避（默认策略最长 10s，叠加 ±50% 抖动后约 15s）期间更快穿透。
  */
 export async function withRetry<T>(
   fn: () => Promise<T>,
   policy: RetryPolicy,
   signal?: AbortSignal,
 ): Promise<T> {
+  // 策略校验：maxRetries <= 0 会让循环体一次都不执行并 throw undefined（丢失全部
+  // 诊断信息）；backoffMs 过短此前由 `?? 1000` 静默兜底，掩盖配置漂移。统一快速失败。
+  if (!Number.isInteger(policy.maxRetries) || policy.maxRetries < 1) {
+    throw new TypeError(
+      `withRetry: maxRetries 必须为 >= 1 的整数（收到 ${policy.maxRetries}）`,
+    );
+  }
+  if (policy.backoffMs.length < policy.maxRetries - 1) {
+    throw new TypeError(
+      `withRetry: backoffMs 长度（${policy.backoffMs.length}）必须 >= maxRetries - 1（${policy.maxRetries - 1}）`,
+    );
+  }
   let lastError: unknown;
   for (let attempt = 0; attempt < policy.maxRetries; attempt++) {
     // 每次尝试前检查取消：避免在已取消时仍发起一次新的 extract。
@@ -95,8 +114,8 @@ export async function withRetry<T>(
       // R4-C2: adapter 自身抛的 AbortError（非 signal 触发）也不重试——
       // 否则取消一个 in-flight extract 会浪费 3 轮退避重试。
       if (isAbortError(e)) throw e;
-      const httpStatus = (e as { httpStatus?: number }).httpStatus;
-      const retryable = (e as { retryable?: boolean }).retryable;
+      const httpStatus = numberProp(e, 'httpStatus');
+      const retryable = booleanProp(e, 'retryable');
       // 显式标记 retryable=false 的错误不重试（如导航超时）
       if (retryable === false) {
         throw e;
@@ -105,13 +124,30 @@ export async function withRetry<T>(
         throw e;
       }
       if (attempt < policy.maxRetries - 1) {
-        const base = policy.backoffMs[attempt] ?? 1000;
+        // 入口已校验 backoffMs 覆盖 maxRetries-1，此处必存在
+        const base = policy.backoffMs[attempt]!;
         // §18.1 退避叠加抖动：base×(0.5~1.5) 均匀采样
         await sleep(withJitter(base, RETRY_BACKOFF_JITTER), signal);
       }
     }
   }
   throw lastError;
+}
+
+/**
+ * 读取错误对象上的可选数字属性（duck-typed 的 httpStatus 等）。adapter 抛出的
+ * 错误形态不受控：属性可能缺失或类型不符（如字符串 '404'），运行时校验类型，
+ * 非数字视为缺失，避免真值但非数字的值绕过 isPermanentHttpError 等判定。
+ */
+function numberProp(e: unknown, key: string): number | undefined {
+  const v = (e as Record<string, unknown> | null | undefined)?.[key];
+  return typeof v === 'number' ? v : undefined;
+}
+
+/** 同 numberProp，读取可选布尔属性（如 retryable）；非布尔视为缺失。 */
+function booleanProp(e: unknown, key: string): boolean | undefined {
+  const v = (e as Record<string, unknown> | null | undefined)?.[key];
+  return typeof v === 'boolean' ? v : undefined;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {

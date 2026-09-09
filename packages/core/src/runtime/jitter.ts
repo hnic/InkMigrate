@@ -21,12 +21,23 @@ export const RETRY_BACKOFF_JITTER = 0.5;
  * @param base 基准毫秒数（≥ 0）。
  * @param jitterRatio 抖动比例，范围 [0, 1]；0 表示不抖动（恒等于 base）。
  * @param random 可注入的随机源，默认 Math.random，便于测试做确定性断言。
+ *
+ * 输入契约在此强制而非信任调用方：base/jitterRatio 可能源自用户配置，非有限值
+ * 传给 setTimeout 会被静默截断为 0ms，恰好产生本模块要消除的固定零间隔，故入口
+ * 显式失败；越界值收敛到文档范围。
  */
 export function withJitter(
   base: number,
   jitterRatio: number,
   random: () => number = Math.random,
 ): number {
-  const factor = 1 + (random() * 2 - 1) * jitterRatio;
-  return Math.max(0, Math.round(base * factor));
+  if (!Number.isFinite(base) || !Number.isFinite(jitterRatio)) {
+    throw new RangeError(
+      `withJitter: base 与 jitterRatio 必须为有限数值（base=${base}, jitterRatio=${jitterRatio}）`,
+    );
+  }
+  const safeBase = Math.max(0, base);
+  const safeRatio = Math.min(1, Math.max(0, jitterRatio));
+  const factor = 1 + (random() * 2 - 1) * safeRatio;
+  return Math.max(0, Math.round(safeBase * factor));
 }

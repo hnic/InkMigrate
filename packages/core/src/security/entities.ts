@@ -19,12 +19,15 @@ const NAMED_ENTITIES: Readonly<Record<string, string>> = {
   quot: '"',
   amp: '&', // 放在这里但通过单次替换处理，不会二次解码
   apos: "'",
+  // 有意压平为普通空格而非保留 U+00A0：输出中出现不可见的不换行空格会在终端/
+  // 同步工具/后续空白处理中造成歧义；该行为由测试固定。
   nbsp: ' ',
   '#39': "'",
 };
 
-// 匹配命名实体或数字实体。仅限本函数处理的几个，不做通用实体展开。
-const ENTITY_RE = /&(quot|amp|apos|nbsp|#39);/g;
+// 从白名单派生正则：分支与 map 键由同一数据源生成，结构上不可能漂移
+//（新增实体只需改上表；也绝不会意外长出 lt/gt 分支绕过上游 sanitization）。
+const ENTITY_RE = new RegExp(`&(${Object.keys(NAMED_ENTITIES).join('|')});`, 'g');
 
 /**
  * 解码有限的、安全的 HTML 实体子集。
@@ -34,6 +37,8 @@ const ENTITY_RE = /&(quot|amp|apos|nbsp|#39);/g;
  */
 export function decodeHtmlEntities(input: string): string {
   return input.replace(ENTITY_RE, (m, name: string) => {
+    // 防御性兜底：正则已从白名单派生，正常不会缺键；若未来出现漂移，
+    // 原样返回匹配串，而不是把 undefined 注入输出。
     return NAMED_ENTITIES[name] ?? m;
   });
 }

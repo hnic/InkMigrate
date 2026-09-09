@@ -6,6 +6,9 @@ import {
   rmSync,
   openSync,
   closeSync,
+  fstatSync,
+  ftruncateSync,
+  writeSync,
 } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
@@ -23,8 +26,9 @@ export interface AcquireOptions {
 }
 
 /**
- * 心跳持续写入失败时由 {@link HeldLock.checkHealth} 抛出，供持锁方在主循环中
- * （而非 setInterval 回调中）轮询，避免回调内抛错变成未捕获异常。
+ * 心跳持续写入失败、或锁文件被其他进程接管时由 {@link HeldLock.checkHealth}
+ * 抛出，供持锁方在主循环中（而非 setInterval 回调中）轮询，避免回调内抛错
+ * 变成未捕获异常。
  */
 export class LockHeartbeatError extends Error {
   constructor(
@@ -41,8 +45,9 @@ export interface HeldLock {
   /** 释放锁并停止心跳。多次调用幂等。 */
   release: () => void;
   /**
-   * 心跳健康检查。心跳连续写入失败达阈值时抛出 {@link LockHeartbeatError}，
-   * 否则正常返回。持锁方应在主循环（而非信号/定时器回调）中周期性调用。
+   * 心跳健康检查。心跳连续写入失败达阈值、或检测到锁文件已被其他进程接管时
+   * 抛出 {@link LockHeartbeatError}，否则正常返回。持锁方应在主循环（而非
+   * 信号/定时器回调）中周期性调用。
    */
   checkHealth: () => void;
 }
@@ -66,6 +71,10 @@ export class LockConflictError extends Error {
  * 停止，下次 `acquireLock` 会通过 `isStaleLock` 识别并安全接管。
  *
  * 同一来源实例只允许一个清理任务；同一 (source, target) 对只允许一个迁移任务。
+ *
+ * 心跳经持有期一直打开的 fd 写入（而非按路径写）：锁被他人接管（文件被 rm 后
+ * 重建）时，写入落在已 unlink 的孤儿 inode 上，不会污染新持有方的锁文件；
+ * fstatSync(fd).nlink === 0 即检测到接管，主动停止心跳并放弃锁。
  */
 export function acquireLock(opts: AcquireOptions): HeldLock {
   mkdirSync(opts.locksDir, { recursive: true });
@@ -86,7 +95,7 @@ export function acquireLock(opts: AcquireOptions): HeldLock {
   // create 之间不存在可被另一进程插入的窗口。陈旧锁（进程异常退出、心跳停止）
   // 先识别并移除，再原子创建；移除后若另一进程抢先创建，本次 openSync('wx')
   // 抛 EEXIST → 转为 LockConflictError，语义与"锁被他人持有"一致。
-  const acquireAtomically = (): void => {
+  const acquireAtomically = (): number => {
     let fd: number;
     try {
       fd = openSync(path, 'wx'); // 排他创建：已存在即 EEXIST
@@ -97,17 +106,31 @@ export function acquireLock(opts: AcquireOptions): HeldLock {
       }
       throw e;
     }
-    // 拿到独占 fd 后直接写入该 fd（避免再次按路径 open 的潜在截断竞态）；
-    // 写入失败仍视为已持有（fd 已创建，锁文件已存在）
+    // fd 持有期保持打开：心跳经该 fd 写入（见 beat），锁文件被接管删除后写入
+    // 落在已 unlink 的孤儿 inode 上，且 fstatSync(fd).nlink === 0 可检测接管。
     try {
       writeFileSync(fd, JSON.stringify(content, null, 2));
-    } finally {
+    } catch (e) {
+      // 首次写入失败：清理刚创建的空锁文件再抛出，否则残留文件会让本锁的
+      // 后续获取永远失败（调用方拿不到 HeldLock，无人释放）。
+      rmSync(path, { force: true });
       closeSync(fd);
+      throw e;
     }
+    return fd;
   };
 
+  let raw: string | undefined;
   if (existsSync(path)) {
-    const raw = readFileSync(path, 'utf8');
+    try {
+      raw = readFileSync(path, 'utf8');
+    } catch (e) {
+      // existsSync 与 readFileSync 之间存在 ENOENT 竞态（他进程接管时已删除）：
+      // 视为无锁，走下方原子创建；其余读取错误如实抛出。
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+    }
+  }
+  if (raw !== undefined) {
     let existing: LockFileContent;
     try {
       existing = JSON.parse(raw) as LockFileContent;
@@ -130,7 +153,7 @@ export function acquireLock(opts: AcquireOptions): HeldLock {
     rmSync(path, { force: true });
   }
 
-  acquireAtomically();
+  const fd = acquireAtomically();
   const interval = opts.heartbeatMs ?? 1000;
   // I9: 心跳连续写失败计数。磁盘满/权限问题致心跳持续写失败时，锁会被误判陈旧并被
   // 另一进程接管，而本进程仍以为持锁 → 两进程并发写同一 (source,target)，破坏唯一约束。
@@ -144,9 +167,21 @@ export function acquireLock(opts: AcquireOptions): HeldLock {
   const beat = (): void => {
     // I10: release() 后排队中的 beat 可能重建已释放锁文件，首行检查 released。
     if (released || heartbeatFailureMessage !== undefined) return;
-    content.heartbeatAt = new Date().toISOString();
     try {
-      writeFileSync(path, JSON.stringify(content, null, 2));
+      // 接管检测：nlink === 0 说明本进程的锁文件已被他人删除（接管）。经 fd 写入
+      // 虽无害（落在孤儿 inode 上），但本进程已不再持锁——立即标记失败并停止
+      // 心跳，让持锁方在下次 checkHealth 时放弃锁，避免双进程并发写入。
+      if (fstatSync(fd).nlink === 0) {
+        heartbeatFailureMessage = `锁文件已被其他进程接管（${path}），本进程不再持有；为避免双进程并发写入，主动放弃锁。`;
+        clearInterval(timer);
+        return;
+      }
+      content.heartbeatAt = new Date().toISOString();
+      // 经 fd 定位写入（单次 write 原地覆盖，再截断到新长度——内容为同构 JSON、
+      // 时间戳等长，截断仅作防御），不经路径：路径可能已指向新持有方的锁文件。
+      const buf = Buffer.from(JSON.stringify(content, null, 2), 'utf8');
+      writeSync(fd, buf, 0, buf.length, 0);
+      ftruncateSync(fd, buf.length);
       heartbeatFailures = 0;
     } catch {
       heartbeatFailures++;
@@ -173,18 +208,28 @@ export function acquireLock(opts: AcquireOptions): HeldLock {
       if (released) return;
       released = true;
       clearInterval(timer);
-      // 竞态防护：只删除自己持有的锁。如果锁已被其他进程接管（jobId 不同），不删除。
-      if (existsSync(path)) {
-        try {
-          const raw = readFileSync(path, 'utf8');
-          const current = JSON.parse(raw) as LockFileContent;
-          if (current.jobId === opts.jobId) {
-            rmSync(path, { force: true });
-          }
-        } catch {
-          // 锁文件损坏或无法读取，安全删除
-          rmSync(path, { force: true });
+      try {
+        // 接管检测同 beat()：nlink === 0 说明锁文件已被他人删除重建，
+        // 路径上的文件属于新持有方，绝不能删除。
+        if (fstatSync(fd).nlink === 0) {
+          return;
         }
+        // 竞态防护：只删除自己持有的锁（Windows 上 nlink 不反映 unlink，
+        // jobId 复核仍必要）。读取/解析失败时不删除——可能是新持有方心跳
+        // 写入的中间态，误删会让第三个进程并发获取。
+        if (existsSync(path)) {
+          try {
+            const raw2 = readFileSync(path, 'utf8');
+            const current = JSON.parse(raw2) as LockFileContent;
+            if (current.jobId === opts.jobId) {
+              rmSync(path, { force: true });
+            }
+          } catch {
+            // 读取/解析失败：不删除，避免误删他人锁文件
+          }
+        }
+      } finally {
+        closeSync(fd);
       }
     },
     checkHealth: () => {

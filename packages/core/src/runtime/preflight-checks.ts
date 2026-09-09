@@ -9,8 +9,15 @@ export function checkDiskSpace(path: string, minFreeDiskBytes: number): void {
   try {
     const stats = statfsSync(path);
     available = stats.bavail * stats.bsize;
-  } catch {
-    return;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // 仅在 statfs 不被本平台支持（ENOSYS/EINVAL）时静默通过；其余失败（ENOENT
+    // 路径不存在、EACCES 无权限等）如实抛出——否则损坏的预检被误判为通过，
+    // 用户会在迁移中途才撞上 ENOSPC 且无任何预警。
+    if (code === 'ENOSYS' || code === 'EINVAL') return;
+    throw new Error(
+      `disk space check failed at "${path}": ${code ?? (error as Error).message}`,
+    );
   }
   if (available < minFreeDiskBytes) {
     throw new Error(
