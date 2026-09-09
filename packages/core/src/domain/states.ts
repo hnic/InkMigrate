@@ -70,16 +70,9 @@ export const ITEM_FINAL_STATES = [
 ] as const;
 export type ItemFinalState = (typeof ITEM_FINAL_STATES)[number];
 
-// §11.9 完整性方程允许的终态（与 ITEM_FINAL_STATES 一致，显式列出便于引用）
-export const COMPLETION_EQUATION_TERMS = [
-  'verified',
-  'degraded',
-  'permanent_failed',
-  'unsupported',
-  'blocked',
-  'conflict',
-  'skipped',
-] as const;
+// §11.9 完整性方程允许的终态：直接复用 ITEM_FINAL_STATES 作为单一真相源，
+// 避免两份字面量列表仅靠测试维持同步。
+export const COMPLETION_EQUATION_TERMS = ITEM_FINAL_STATES;
 
 // §16.6 target_artifacts.status 受控值
 export const ARTIFACT_STATUSES = [
@@ -117,15 +110,8 @@ export const ACTION_CODES = [
 ] as const;
 export type ActionCode = (typeof ACTION_CODES)[number];
 
-export interface FinalStateCounts {
-  verified: number;
-  degraded: number;
-  permanent_failed: number;
-  unsupported: number;
-  blocked: number;
-  conflict: number;
-  skipped: number;
-}
+// 由 ItemFinalState 联合派生，保证七个键与终态词表同步
+export type FinalStateCounts = Record<ItemFinalState, number>;
 
 export interface CompletionEquationInput {
   scanCount: number;
@@ -143,6 +129,9 @@ export function verifyCompletionEquation(
   input: CompletionEquationInput,
 ): boolean {
   if (input.recoverable !== 0) return false;
+  // 负数计数（聚合器损坏时可能出现）会让荒谬的组合凑平方程，先行拒绝
+  if (input.scanCount < 0) return false;
+  if (Object.values(input.counts).some((n) => n < 0)) return false;
   const sum =
     input.counts.verified +
     input.counts.degraded +
@@ -154,30 +143,30 @@ export function verifyCompletionEquation(
   return sum === input.scanCount;
 }
 
+/** §11.9 failed 口径的失败类终态（failed_count = permanent_failed + unsupported + blocked）。 */
+export const FAILED_FINAL_STATES = [
+  'permanent_failed',
+  'unsupported',
+  'blocked',
+] as const;
+
 /** §11.9 failed_count 聚合：permanent_failed + unsupported + blocked。 */
 export function aggregateFailedCount(c: FinalStateCounts): number {
-  return c.permanent_failed + c.unsupported + c.blocked;
+  return FAILED_FINAL_STATES.reduce((acc, s) => acc + c[s], 0);
 }
 
-export function isItemFinalState(v: unknown): v is ItemFinalState {
-  return (
-    typeof v === 'string' &&
-    (ITEM_FINAL_STATES as readonly string[]).includes(v)
-  );
+/** 字符串词表守卫的通用构造器，避免每个词表手写一遍相同的判定体。 */
+function makeStringGuard<T extends string>(values: readonly T[]) {
+  return (v: unknown): v is T =>
+    typeof v === 'string' && (values as readonly string[]).includes(v);
 }
 
-export function isItemRecoverableState(
-  v: unknown,
-): v is ItemRecoverableState {
-  return (
-    typeof v === 'string' &&
-    (ITEM_RECOVERABLE_STATES as readonly string[]).includes(v)
-  );
-}
+export const isItemFinalState = makeStringGuard(ITEM_FINAL_STATES);
 
-export function isJobStatus(v: unknown): v is JobStatus {
-  return typeof v === 'string' && (JOB_STATUS as readonly string[]).includes(v);
-}
+export const isItemRecoverableState =
+  makeStringGuard(ITEM_RECOVERABLE_STATES);
+
+export const isJobStatus = makeStringGuard(JOB_STATUS);
 
 /**
  * §11.1 Job status 合法转换矩阵（单一真相源）。
@@ -204,7 +193,8 @@ export const JOB_TRANSITIONS: Readonly<Record<JobStatus, ReadonlySet<JobStatus>>
  * 调用方若需允许「同 status 内推进 current_stage」（自环），自行处理 to===from。
  */
 export function canJobTransition(from: JobStatus, to: JobStatus): boolean {
-  return JOB_TRANSITIONS[from].has(to);
+  // 运行期 from 越界（如从存储读出的脏值）时返回 false 而非抛 TypeError
+  return JOB_TRANSITIONS[from]?.has(to) ?? false;
 }
 
 // §16.9 cleanup_jobs 生命周期
@@ -219,12 +209,7 @@ export const CLEANUP_JOB_STATUS = [
 ] as const;
 export type CleanupJobStatus = (typeof CLEANUP_JOB_STATUS)[number];
 
-export function isCleanupJobStatus(v: unknown): v is CleanupJobStatus {
-  return (
-    typeof v === 'string' &&
-    (CLEANUP_JOB_STATUS as readonly string[]).includes(v)
-  );
-}
+export const isCleanupJobStatus = makeStringGuard(CLEANUP_JOB_STATUS);
 
 /**
  * §16.9 cleanup_jobs 合法转换矩阵（N4: 单一真相源，供 storage 守卫复用）。
@@ -244,47 +229,18 @@ export function canCleanupJobTransition(
   from: CleanupJobStatus,
   to: CleanupJobStatus,
 ): boolean {
-  return CLEANUP_JOB_TRANSITIONS[from].has(to);
+  // 同 canJobTransition：越界 from 视为非法转换而非崩溃
+  return CLEANUP_JOB_TRANSITIONS[from]?.has(to) ?? false;
 }
 
-export function isJobPauseReason(v: unknown): v is JobPauseReason {
-  return (
-    typeof v === 'string' &&
-    (JOB_PAUSE_REASONS as readonly string[]).includes(v)
-  );
-}
+export const isJobPauseReason = makeStringGuard(JOB_PAUSE_REASONS);
 
-export function isCurrentStage(v: unknown): v is CurrentStage {
-  return (
-    typeof v === 'string' &&
-    (CURRENT_STAGES as readonly string[]).includes(v)
-  );
-}
+export const isCurrentStage = makeStringGuard(CURRENT_STAGES);
 
-export function isArtifactStatus(v: unknown): v is ArtifactStatus {
-  return (
-    typeof v === 'string' &&
-    (ARTIFACT_STATUSES as readonly string[]).includes(v)
-  );
-}
+export const isArtifactStatus = makeStringGuard(ARTIFACT_STATUSES);
 
-export function isArtifactKind(v: unknown): v is ArtifactKind {
-  return (
-    typeof v === 'string' &&
-    (ARTIFACT_KINDS as readonly string[]).includes(v)
-  );
-}
+export const isArtifactKind = makeStringGuard(ARTIFACT_KINDS);
 
-export function isAttemptScope(v: unknown): v is AttemptScope {
-  return (
-    typeof v === 'string' &&
-    (ATTEMPT_SCOPES as readonly string[]).includes(v)
-  );
-}
+export const isAttemptScope = makeStringGuard(ATTEMPT_SCOPES);
 
-export function isActionCode(v: unknown): v is ActionCode {
-  return (
-    typeof v === 'string' &&
-    (ACTION_CODES as readonly string[]).includes(v)
-  );
-}
+export const isActionCode = makeStringGuard(ACTION_CODES);

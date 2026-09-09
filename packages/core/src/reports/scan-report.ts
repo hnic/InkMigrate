@@ -15,6 +15,12 @@ export interface ScanReportInput {
 
 /** §21.1 生成扫描报告。 */
 export function generateScanReport(i: ScanReportInput): void {
+  // jobId 会拼接进文件系统路径，拒绝含路径字符的输入（防穿越写报告）
+  if (!/^[A-Za-z0-9_-]+$/.test(i.jobId)) {
+    throw new Error(
+      `invalid jobId (path characters rejected): ${JSON.stringify(i.jobId)}`,
+    );
+  }
   const jobDir = join(i.reportsDir, i.jobId);
   mkdirSync(jobDir, { recursive: true });
 
@@ -28,11 +34,6 @@ export function generateScanReport(i: ScanReportInput): void {
     adapter_kind: i.adapterKind,
     adapter_version: i.adapterVersion,
   };
-  writeFileSync(
-    join(jobDir, 'scan-report.json'),
-    JSON.stringify(json, null, 2) + '\n',
-    'utf8',
-  );
 
   const md = [
     `# 扫描报告 ${i.jobId}`,
@@ -45,5 +46,20 @@ export function generateScanReport(i: ScanReportInput): void {
     `- 适配器：${i.adapterKind}@${i.adapterVersion}`,
     '',
   ].join('\n');
-  writeFileSync(join(jobDir, 'scan-report.md'), md, 'utf8');
+
+  // 写入失败时带上 job 与目录上下文重新抛出，便于定位；replacer 把 undefined
+  // 归一为 null，保证宽松调用下 JSON 报告的字段集稳定。
+  try {
+    writeFileSync(
+      join(jobDir, 'scan-report.json'),
+      JSON.stringify(json, (_k, v) => (v === undefined ? null : v), 2) + '\n',
+      'utf8',
+    );
+    writeFileSync(join(jobDir, 'scan-report.md'), md, 'utf8');
+  } catch (err) {
+    throw new Error(
+      `failed to write scan report for job ${i.jobId} under ${jobDir}: ${(err as Error).message}`,
+      { cause: err },
+    );
+  }
 }

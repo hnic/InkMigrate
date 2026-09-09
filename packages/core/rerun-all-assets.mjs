@@ -21,28 +21,38 @@ import {
   computeStableKey,
 } from "./dist/index.js";
 
-// 解析参数
+// 解析参数（缺值/非整数直接报用法，避免 NaN 静默放大到全量）
 const args = process.argv.slice(2);
-const limitIdx = args.indexOf("--limit");
-const LIMIT = limitIdx >= 0 ? parseInt(args[limitIdx + 1], 10) : 0;
+function parseNonNegativeInt(name) {
+  const i = args.indexOf(name);
+  if (i < 0) return 0;
+  const n = parseInt(args[i + 1], 10);
+  if (!Number.isInteger(n) || n < 0) {
+    throw new Error(`${name} 需要一个非负整数（收到：${args[i + 1]}）`);
+  }
+  return n;
+}
+const LIMIT = parseNonNegativeInt("--limit");
 const DRY_RUN = args.includes("--dry-run");
-const ONLY_ID = (() => {
-  const i = args.indexOf("--only");
-  return i >= 0 ? parseInt(args[i + 1], 10) : 0;
-})();
+const ONLY_ID = parseNonNegativeInt("--only");
 // --ids 1,2,3 只跑指定 id 列表（逗号分隔）
 const IDS_FILTER = (() => {
   const i = args.indexOf("--ids");
   if (i < 0) return null;
-  return args[i + 1].split(",").map((s) => parseInt(s.trim(), 10)).filter(Boolean);
+  const raw = args[i + 1];
+  if (!raw) throw new Error("--ids 需要逗号分隔的 id 列表，如 --ids 1,2,3");
+  const ids = raw.split(",").map((s) => parseInt(s.trim(), 10)).filter(Number.isInteger);
+  if (ids.length === 0) throw new Error(`--ids 未解析出有效 id: ${raw}`);
+  return ids;
 })();
 
-const DB_PATH = "/Users/hnic/.inkmigrate/inkmigrate.sqlite";
-const STATE_DIR = "/Users/hnic/.inkmigrate";
+// 路径可经环境变量覆盖；DB/笔记目录从根路径推导，避免绝对前缀重复。
+const STATE_DIR = process.env.INKMIGRATE_STATE_DIR ?? "/Users/hnic/.inkmigrate";
+const DB_PATH = process.env.INKMIGRATE_DB_PATH ?? join(STATE_DIR, "inkmigrate.sqlite");
 // 笔记在 toutiao/ 子目录，附件在 vault 根的 Attachments/。
 // wikilink ![[Attachments/...]] 相对 vault 根，Obsidian 跨子目录能正确解析。
-const VAULT = "/Users/hnic/Documents/Obsidian";
-const NOTES_DIR = "/Users/hnic/Documents/Obsidian/toutiao";
+const VAULT = process.env.INKMIGRATE_VAULT ?? "/Users/hnic/Documents/Obsidian";
+const NOTES_DIR = join(VAULT, "toutiao");
 const SOURCE_ID = "toutiao-main";
 const ATTACHMENTS_SUBDIR = "Attachments";
 
@@ -63,7 +73,10 @@ if (IDS_FILTER) {
   params.push(ONLY_ID);
 }
 query += " ORDER BY si.id";
-if (LIMIT > 0) query += ` LIMIT ${LIMIT}`;
+if (LIMIT > 0) {
+  query += " LIMIT ?";
+  params.push(LIMIT);
+}
 
 const rows = db.prepare(query).all(...params);
 console.log(`待处理: ${rows.length} 条${DRY_RUN ? " [DRY-RUN]" : ""}`);
@@ -113,25 +126,28 @@ for (let idx = 0; idx < rows.length; idx++) {
       continue;
     }
     let content = readFileSync(notePath, "utf8");
-    if (content.includes("![[Attachments/")) {
+    // 只有正文不再残留远程图片 URL 时才视为已完成；部分本地化的笔记必须继续处理，
+    // 否则带 x-expires 签名的旧 URL 失效后图片将永久不可访问。
+    const hasRemoteImg = /!\[[^\]]*\]\(https?:\/\/[^)]+\)|<img[^>]+src=["']https?:/i.test(content);
+    if (!hasRemoteImg) {
       skipped++;
       continue; // 已本地化，跳过
     }
 
-    // extract（含图片下载）—— 对顽固超时的页面重试，逐次延长超时。
+    // extract（含图片下载）—— 对顽固超时的页面重试。
+    // ExtractContext 上无标准超时字段，单次超时由 source 内部默认值控制。
     let item;
-    const timeouts = [30_000, 60_000, 90_000];
+    const MAX_ATTEMPTS = 3;
     let lastErr;
-    for (let attempt = 0; attempt < timeouts.length; attempt++) {
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       try {
-        // extract-driver 读 ExtractContext 上无标准超时字段，这里靠它内部默认。
         // 重试间隔给页面/CDN 冷却。
         if (attempt > 0) await sleep(3000 * attempt);
         item = await source.extract(ref, { config: {}, workspaceDir: STATE_DIR });
         break;
       } catch (e) {
         lastErr = e;
-        if (attempt < timeouts.length - 1) continue;
+        if (attempt < MAX_ATTEMPTS - 1) continue;
       }
     }
     if (item === undefined) throw lastErr;
@@ -214,7 +230,8 @@ for (let idx = 0; idx < rows.length; idx++) {
     }
   } catch (e) {
     failed++;
-    const msg = e.message.slice(0, 120);
+    // e 可能不是 Error（throw lastErr 可能是 undefined），先归一化再截断
+    const msg = String(e?.message ?? e).slice(0, 120);
     errors.push({ id: r.id, msg });
     console.log(`${progress} id=${r.id} ✗ ${msg}`);
   }

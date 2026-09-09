@@ -29,7 +29,11 @@ export type VerifyContext = AdapterContext;
 
 export interface TargetContext extends AdapterContext {
   vaultPath: string;
-  /** §10.2 目标适配器运行时配置（已通过适配器自己的 Zod schema 校验）。 */
+  /**
+   * §10.2 目标适配器运行时配置（已通过适配器自己的 Zod schema 校验）。
+   * plan/write/verify 必须只读 `targetConfig`；继承自 AdapterContext 的
+   * `config` 是未校验的原始配置，目标适配器不得在写入路径回读它。
+   */
   targetConfig: Record<string, unknown>;
   /**
    * §13.8 renderIndex 输入：本 Job 已写入/验证的笔记条目，供目标适配器生成索引。
@@ -56,7 +60,10 @@ export interface IndexEntryInput {
   favoritedAt?: string;
   collections: readonly string[];
 }
-export interface CleanupContext extends AdapterContext {}
+export type CleanupContext = AdapterContext;
+
+/** §5/§14.12 需要走受控中断（而非硬等）的来源访问受限状态。 */
+export type SourceAccessIssue = 'login_required' | 'challenge_required';
 
 /**
  * §8.2 `verifySourceRef` 的返回状态。规格未在 §8 中细化字段，这里给出最小集合，
@@ -66,12 +73,7 @@ export interface SourceRefState {
   /** 当前是否能从来源解析该 Ref（条目仍存在、未失效、未删除）。 */
   resolvable: boolean;
   /** 来源给出的当前可见性或可访问性说明，例如 `available`/`deleted`/`login_required`。 */
-  availability?:
-    | 'available'
-    | 'deleted'
-    | 'login_required'
-    | 'challenge_required'
-    | 'unknown';
+  availability?: 'available' | 'deleted' | SourceAccessIssue | 'unknown';
   /** 适配器附加状态（不强制结构）。 */
   metadata?: Record<string, unknown>;
 }
@@ -98,7 +100,7 @@ export interface CleanupActionReceipt {
    * 驱动编排器对 login/challenge 走受控中断（而非 15 分钟硬等）；content_unavailable
    * 视为跳过。可选 + additive → 旧调用方不受影响。
    */
-  detectedState?: 'login_required' | 'challenge_required' | 'content_unavailable';
+  detectedState?: SourceAccessIssue | 'content_unavailable';
 }
 
 /** §8.3 cleanup 验证结果。 */
@@ -151,7 +153,11 @@ export interface TargetPlan {
   relativePath: string;
   /** §16.6 受控值，由 ARTIFACT_KINDS 枚举约束。 */
   artifactKind: ArtifactKind;
-  /** §16.4 source_content_hash（标准化正文哈希），由 target adapter 在 plan 时计算。 */
+  /**
+   * §16.4 source_content_hash（标准化正文哈希），由 target adapter 在 plan 时计算。
+   * 可选：适配器未提供时视为不提供内容哈希（调用方跳过相应比对），
+   * 不会导致写入被跳过。
+   */
   sourceContentHash?: string;
 }
 
@@ -183,11 +189,14 @@ export interface TargetAdapter {
    * §13.9 可选：传入上次成功写入的 expectedWrittenFileHash，
    * 适配器据此检测目标文件是否被用户修改（用于 conflict 判定）。
    * 如果适配器不支持，忽略此参数。
+   *
+   * 调用方规则：适配器实现了本方法时，调用方（Job Runner）必须优先调用本方法
+   * 而非 `write()`，否则会静默绕过用户内容保护（§13.9 冲突检测）。
    */
   writeWithExpectedHash?(plan: TargetPlan, ctx: TargetContext, expectedWrittenFileHash?: string): Promise<TargetWriteResult>;
   verify(
     result: TargetWriteResult,
-    ctx: VerifyContext,
+    ctx: TargetContext,
   ): Promise<TargetVerification>;
   /** §13.8 通用目标适配器可不支持索引；obsidian v1.1 必须实现 */
   renderIndex?(ctx: TargetContext): Promise<TargetWriteResult[]>;

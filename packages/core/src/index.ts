@@ -1,4 +1,11 @@
-export const CORE_VERSION = '0.0.0';
+import { createRequire } from 'node:module';
+
+// 版本号读取自 package.json，避免 CLI 报告的版本与发布版本漂移。
+// （rootDir 限制下不能直接 import JSON，改用运行时 require。）
+const pkg = createRequire(import.meta.url)('../package.json') as {
+  version: string;
+};
+export const CORE_VERSION = pkg.version;
 
 // domain
 export * from './domain/models.js';
@@ -51,6 +58,7 @@ export {
   isPathInside,
   assertSymlinkSafe,
   assertWriteDirSafe,
+  VaultPathEscapeError,
 } from './security/paths.js';
 export { sanitizeFilename } from './security/filenames.js';
 export type { SanitizeOptions } from './security/filenames.js';

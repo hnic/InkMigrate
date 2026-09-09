@@ -3,8 +3,10 @@
   "compilerOptions": {
     "noEmit": true,
     "composite": false,
-    "incremental": false,
-    "tsBuildInfoFile": null
+    "incremental": false
   },
+  // 注意：本配置直接 extends tsconfig.base.json（而非 packages/core/tsconfig.json），
+  // 且把 ../src 一并纳入检查。若后续给 packages/core/tsconfig.json 增加 paths 等
+  // 编译选项，需同步评估这里是否需要引入中间共享配置，避免两处对 src 的检查口径漂移。
   "include": ["**/*.ts", "../src/**/*.ts"]
 }

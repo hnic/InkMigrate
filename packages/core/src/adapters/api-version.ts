@@ -13,6 +13,13 @@ export const SUPPORTED_ADAPTER_API_RANGE = '>=1.0.0 <2.0.0';
  * 不接受 prerelease（避免 `1.0.0-beta` 被当作稳定契约）。
  */
 export function isAdapterApiCompatible(adapterApiVersion: string): boolean {
+  if (!semver.valid(adapterApiVersion)) {
+    // 格式非法（如 'v1.0.0'、'1.2'）与"真实不兼容"分开报告：
+    // semver.satisfies 对解析失败静默返回 false，会把声明笔误误诊为版本不兼容。
+    throw new Error(
+      `invalid adapter api version ${JSON.stringify(String(adapterApiVersion))}: expected strict semver (e.g. "1.4.0")`,
+    );
+  }
   return semver.satisfies(adapterApiVersion, SUPPORTED_ADAPTER_API_RANGE, {
     includePrerelease: false,
   });

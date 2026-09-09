@@ -1,7 +1,11 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeCsv } from './csv-writer.js';
-import { aggregateFailedCount, type FinalStateCounts } from '../domain/states.js';
+import {
+  aggregateFailedCount,
+  FAILED_FINAL_STATES,
+  type FinalStateCounts,
+} from '../domain/states.js';
 
 export interface ReportItemRow {
   fingerprint: string;
@@ -39,6 +43,12 @@ export interface ReportInput {
  * failed_count = permanent_failed + unsupported + blocked（§11.9）。
  */
 export function generateMigrationReport(i: ReportInput): void {
+  // jobId 会拼接进文件系统路径，拒绝含路径字符的输入（防穿越写报告）
+  if (!/^[A-Za-z0-9_-]+$/.test(i.jobId)) {
+    throw new Error(
+      `invalid jobId (path characters rejected): ${JSON.stringify(i.jobId)}`,
+    );
+  }
   const jobDir = join(i.reportsDir, i.jobId);
   mkdirSync(jobDir, { recursive: true });
 
@@ -96,32 +106,24 @@ export function generateMigrationReport(i: ReportInput): void {
   ].join('\n');
   writeFileSync(join(jobDir, 'summary.md'), md, 'utf8');
 
-  // CSV 明细
-  const failedStatuses = new Set([
-    'permanent_failed',
-    'unsupported',
-    'blocked',
-  ]);
-  const itemsArr = i.items as unknown as Record<string, unknown>[];
-  writeCsv(join(jobDir, 'items.csv'), itemsArr);
+  // CSV 明细（failed 口径与 domain.aggregateFailedCount 同源，避免字面量漂移）
+  const failedStatuses = new Set<string>(FAILED_FINAL_STATES);
+  writeCsv(join(jobDir, 'items.csv'), i.items);
   writeCsv(
     join(jobDir, 'failed-items.csv'),
-    itemsArr.filter((it) => failedStatuses.has(String(it['status']))),
+    i.items.filter((it) => failedStatuses.has(it.status)),
   );
   writeCsv(
     join(jobDir, 'degraded-items.csv'),
-    itemsArr.filter((it) => it['status'] === 'degraded'),
+    i.items.filter((it) => it.status === 'degraded'),
   );
   writeCsv(
     join(jobDir, 'conflicts.csv'),
-    itemsArr.filter((it) => it['status'] === 'conflict'),
+    i.items.filter((it) => it.status === 'conflict'),
   );
 
   // §15.10 未解析内部链接（Evernote 等来源保留原链接时的对账明细）
   if (i.unresolvedLinks !== undefined && i.unresolvedLinks.length > 0) {
-    writeCsv(
-      join(jobDir, 'unresolved-links.csv'),
-      i.unresolvedLinks as unknown as Record<string, unknown>[],
-    );
+    writeCsv(join(jobDir, 'unresolved-links.csv'), i.unresolvedLinks);
   }
 }
