@@ -37,6 +37,7 @@ describe('evernote e2e migrate', () => {
       'resources-unnamed.enex',
       'resource-hash-mismatch.enex',
       'remote-images.enex',
+      'interlinks.enex',
     ]) {
       copyFileSync(join(FIXTURES, f), join(inputDir, f));
     }
@@ -110,7 +111,7 @@ describe('evernote e2e migrate', () => {
     try {
       const { result } = await setupAndRun(w.dbDir, w.vaultDir, w.inputDir, 1);
       expect(result.status).toBe('completed');
-      expect(result.scanCount).toBe(7);
+      expect(result.scanCount).toBe(9);
       expect(result.reconciliationOk).toBe(true);
 
       // §13.3 笔记目录：evernote-archive/<笔记本>-<shortId>/（有 Stack 时在 Stack 下）
@@ -128,7 +129,13 @@ describe('evernote e2e migrate', () => {
         }
       };
       walkMd(archiveDir);
-      expect(mdFiles).toHaveLength(7);
+      expect(mdFiles).toHaveLength(9);
+      // §15.10：互链笔记的 wikilink 指向真实落盘文件名
+      const noteB = mdFiles.find((m) => m.path.includes('笔记乙'))!;
+      expect(noteB).toBeDefined();
+      const noteBShortId = (noteB.path.match(/笔记乙-([0-9a-f]{10})\.md/) ?? [])[1] ?? '';
+      const noteA = mdFiles.find((m) => m.path.includes('笔记甲'))!;
+      expect(noteA.content).toContain(`[[笔记乙-${noteBShortId}|笔记乙]]`);
       // Work@@@Projects.enex → Work/Projects-<key8>/ 层级
       const workNote = mdFiles.find((m) => m.content.includes('项目会议纪要'))!;
       expect(workNote.path).toMatch(/\/Work\/Projects-[0-9a-f]{8}\//);

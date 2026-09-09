@@ -53,7 +53,7 @@ function resource({ bytes, mime, fileName, attachment }) {
   </resource>`;
 }
 
-function note({ title, content, created, updated, tags = [], attrs = {}, resources = [] }) {
+function note({ title, content, created, updated, tags = [], attrs = {}, resources = [], guid }) {
   const parts = [`    <title>${title}</title>`];
   parts.push(`    <content><![CDATA[${content}]]></content>`);
   if (created) parts.push(`    <created>${created}</created>`);
@@ -66,6 +66,13 @@ function note({ title, content, created, updated, tags = [], attrs = {}, resourc
     parts.push('    </note-attributes>');
   }
   parts.push(...resources);
+  // evernote-backup `export --add-guid` 扩展（§15.4 第 1 优先级身份 / §15.10 链接重写）
+  if (guid !== undefined) {
+    parts.push(`    <guid>${guid}</guid>`);
+    parts.push('    <note-custom-metadata>');
+    parts.push(`      <guid>${guid}</guid>`);
+    parts.push('    </note-custom-metadata>');
+  }
   return `  <note>\n${parts.join('\n')}\n  </note>`;
 }
 
@@ -259,6 +266,32 @@ writeFileSync(
 <img src="不存在的资源.png">
 </body></html>
 `,
+);
+
+// ─── interlinks.enex：evernote-backup --add-guid 形态，双笔记互链 + 未解析链接 ───
+const GUID_A = 'aaaaaaaa-1111-2222-3333-444444444444';
+const GUID_B = 'bbbbbbbb-1111-2222-3333-444444444444';
+const GUID_X = '99999999-8888-7777-6666-555555555555'; // 不在导出内 → 未解析
+const viewLink = (g) => `evernote:///view/999/s1/${g}/${g}/`;
+writeFileSync(
+  join(OUT, 'interlinks.enex'),
+  enex([
+    note({
+      title: '笔记甲',
+      created: '20250101T000000Z',
+      guid: GUID_A,
+      content: enml(
+        `<div>参见 <a href="${viewLink(GUID_B)}">笔记乙</a>；` +
+          `失效链接 <a href="${viewLink(GUID_X)}">消失的笔记</a>。</div>`,
+      ),
+    }),
+    note({
+      title: '笔记乙',
+      created: '20250102T000000Z',
+      guid: GUID_B,
+      content: enml(`<div>回到 <a href="${viewLink(GUID_A)}">笔记甲</a>。</div>`),
+    }),
+  ]),
 );
 
 console.log(`fixtures written to ${OUT}`);

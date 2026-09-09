@@ -27,6 +27,7 @@ function cleanInput(): string {
     'resources-unnamed.enex',
     'resource-hash-mismatch.enex',
     'remote-images.enex',
+    'interlinks.enex',
   ]) {
     copyFileSync(join(FIXTURES, f), join(dir, f));
   }
@@ -70,9 +71,9 @@ describe('createEvernoteSource', () => {
         refs.push(ref);
       }
       // basic 2 + Work@@@Projects 1 + resources-named 1 + resources-unnamed 1
-      // + resource-hash-mismatch 1 + remote-images 1 = 7
-      expect(refs).toHaveLength(7);
-      expect(new Set(refs.map((r) => r.externalId)).size).toBe(7);
+      // + resource-hash-mismatch 1 + remote-images 1 + interlinks 2 = 9
+      expect(refs).toHaveLength(9);
+      expect(new Set(refs.map((r) => r.externalId)).size).toBe(9);
       expect(refs.every((r) => r.sourceInstanceId === 'evernote-archive')).toBe(true);
       expect(refs.every((r) => r.contentKind === 'note')).toBe(true);
 
@@ -165,7 +166,7 @@ describe('createEvernoteSource', () => {
       expect(
         named.extractionWarnings.join('\n'),
       ).toContain('资源对账：总数 3，成功 3，失败 0');
-      expect(named.extractionWarnings.join('\n')).toContain('内部链接：1 条未解析');
+      expect(named.extractionWarnings.join('\n')).toContain('内部链接：重写 0，未解析 1');
 
       // ── 未命名资源：序号命名 ──
       const unnamed = await adapter.extract(
@@ -283,6 +284,41 @@ describe('createEvernoteSource', () => {
       expect(clip.quality).toBe('degraded');
       expect(clip.degradations.map((d) => d.code)).toContain('asset-incomplete');
       expect(clip.extractionWarnings.join('\n')).toContain('缺失 1');
+      await adapter.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('GUID 身份与内部链接重写（§15.4 第 1 优先级 / §15.10 两遍处理）', async () => {
+    const dir = tmpDir();
+    copyFileSync(join(FIXTURES, 'interlinks.enex'), join(dir, 'interlinks.enex'));
+    try {
+      const adapter = createEvernoteSource(CONFIG(dir));
+      const ctx = { config: {}, workspaceDir: dir };
+      const refs = [];
+      for await (const ref of adapter.scan(ctx)) refs.push(ref);
+
+      // §15.4 第 1 优先级：GUID 身份（跨导出稳定）
+      expect(refs.map((r) => r.externalId).sort()).toEqual([
+        'evernote-guid:aaaaaaaa-1111-2222-3333-444444444444',
+        'evernote-guid:bbbbbbbb-1111-2222-3333-444444444444',
+      ]);
+
+      // §15.10 第二遍：互链重写为 evernote-wikilink:// 伪链接（目标端转 wikilink），
+      // 未解析的保留原链接
+      const a = await adapter.extract(refs.find((r) => r.title === '笔记甲')!, ctx);
+      expect(a.bodyHtml).toMatch(
+        new RegExp(`href="evernote-wikilink://${encodeURIComponent('笔记乙')}-[0-9a-f]{10}"`),
+      );
+      expect(a.bodyHtml).toContain('evernote:///view/999/s1/99999999-8888-7777-6666-555555555555');
+      expect(a.links.filter((l) => l.kind === 'internal')).toHaveLength(1); // 仅未解析的
+      expect(a.extractionWarnings.join('\n')).toContain('内部链接：重写 1，未解析 1');
+
+      const b = await adapter.extract(refs.find((r) => r.title === '笔记乙')!, ctx);
+      expect(b.bodyHtml).toMatch(
+        new RegExp(`href="evernote-wikilink://${encodeURIComponent('笔记甲')}-[0-9a-f]{10}"`),
+      );
       await adapter.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });

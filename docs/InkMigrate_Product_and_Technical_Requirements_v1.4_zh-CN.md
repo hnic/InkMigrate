@@ -2209,6 +2209,8 @@ HTML 作为 ENEX 的补充输入；对印象笔记（中国版）用户，HTML �
 - 笔记正文 ENML：`enml2.dtd`（`http://xml.evernote.com/pub/enml2.dtd`），刻意放宽的 XHTML 子集。
 - OCR 索引：`recoIndex.dtd`（`recognition` 元素内容，不迁移）。
 - `en-media` 的 `hash` 为资源二进制字节的 MD5 十六进制摘要（Evernote 官方开发论坛确认；ENEX 不存储该值，必须自行计算）。
+- evernote-backup 数据库（`en_backup.db`）不是可消费的数据格式：笔记以 lzma 压缩的 Python pickle 存储（内部实现细节，无稳定性承诺）。消费 evernote-backup 数据的唯一受支持路径是 `export` 产出的标准 ENEX。
+- evernote-backup `export --add-guid --add-metadata` 会在每条笔记附带 `<guid>`（及 `<note-custom-metadata>`）；InkMigrate 利用它实现 §15.4 第 1 优先级 GUID 身份与 §15.10 的内部链接重写。操作建议：导出命令加这两个标志。
 - 真实导出可能偏离 DTD 注释中的 MIME 合法集合与字段出现率；解析以 DTD 结构为骨架、以实际内容为准，未知值降级记录而不是拒绝整个文件。
 - 印象笔记（中国版）`.notes`：2022 年 7 月起替代 ENEX 的专有导出格式，笔记内容以未公开密钥的 AES 加密（`base64:aes`），无官方规范与可靠公开逆向；本适配器按 15.2.1 明确拒绝。国际版 Evernote 桌面端 ENEX/HTML 导出以官方帮助文档为准。
 

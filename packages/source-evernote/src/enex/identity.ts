@@ -4,13 +4,18 @@ import { computeFingerprint } from '@inkmigrate/core';
  * §15.4 笔记身份。
  *
  * 优先级：稳定 GUID → Evernote App Link → SHA-256(export-file-hash + note-ordinal +
- * title + createdAt)。ENEX（evernote-export3.dtd）的 note 元素不含 GUID，
- * App Link 仅在 note-attributes/source-url 恰好是 evernote:// 链接时可用；
- * 因此默认走第 3 级（确定性：同一文件集重扫指纹不变）。
+ * title + createdAt)。标准 ENEX（evernote-export3.dtd）不含 GUID；evernote-backup
+ * `export --add-guid/--add-metadata` 会在每条笔记附带 `<guid>`，此时走第 1 级
+ * （跨导出稳定：同一账号多次导出指纹不变）。App Link 仅在 note-attributes/
+ * source-url 恰好是 evernote:// 链接时可用；默认走第 3 级。
  * 标题永不作为唯一主键。
  */
 
+const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export interface NoteIdentityInput {
+  /** §15.4 第 1 优先级：稳定 GUID（evernote-backup --add-guid 扩展）。 */
+  guid?: string | undefined;
   /** ENEX 文件内容 SHA-256（hex）。 */
   fileSha256: string;
   /** 文件内 1 基序号。 */
@@ -30,6 +35,13 @@ export interface NoteIdentity {
 }
 
 export function buildNoteIdentity(i: NoteIdentityInput): NoteIdentity {
+  if (i.guid !== undefined && GUID_RE.test(i.guid)) {
+    const guid = i.guid.toLowerCase();
+    return {
+      externalId: `evernote-guid:${guid}`,
+      fingerprint: computeFingerprint({ raw: `guid:${guid}` }),
+    };
+  }
   // App Link 优先（§15.4）；否则 file#ordinal（数据库 external_id 在来源实例内唯一）
   const externalId =
     i.appLink !== undefined && i.appLink.length > 0

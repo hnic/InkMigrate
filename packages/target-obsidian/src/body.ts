@@ -22,6 +22,23 @@ export function htmlToMarkdown(html: string): string {
   return turndown.turndown(html).trim();
 }
 
+/**
+ * §15.10 内部链接后处理：来源侧（Evernote 适配器）把可解析的 evernote:// 链接
+ * 输出为 evernote-wikilink:// 伪链接（turndown 转为 markdown 链接、不转义方括号），
+ * 此处还原为 Obsidian wikilink；链接文字与目标同名时省略别名。
+ */
+export function convertEvernoteWikilinks(markdown: string): string {
+  return markdown.replace(
+    /\[([^\]]*)\]\(evernote-wikilink:\/\/([^)\s]+)\)/g,
+    (_m, text: string, encoded: string) => {
+      const target = decodeURIComponent(encoded);
+      return text.length > 0 && text !== target
+        ? `[[${target}|${text.replace(/[[\]|]/g, '')}]]`
+        : `[[${target}]]`;
+    },
+  );
+}
+
 export interface AssetLink {
   /** 在 markdownBody 中占位的字符串，渲染后会被替换为实际嵌入语法。 */
   markdownPlaceholder: string;

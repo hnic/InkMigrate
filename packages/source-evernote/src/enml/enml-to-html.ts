@@ -32,7 +32,7 @@ const SANITIZE_CONFIG = {
   ],
   // §15.10：保留 evernote:// 内部链接（默认白名单会剥掉该 scheme）
   ALLOWED_URI_REGEXP:
-    /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|evernote|evernote-resource|enex-resource):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
+    /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|evernote|evernote-wikilink|evernote-resource|enex-resource):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
 };
 
 export interface ResourceRefInfo {
@@ -45,8 +45,10 @@ export interface EnmlTransformResult {
   html: string;
   /** 正文中的远程 <img>（http/https，网页剪藏常见；非 resource）。 */
   remoteImages: Array<{ url: string; alt?: string | undefined }>;
-  /** evernote:// 内部链接（ENEX 无 GUID 映射，保留原链接并记录，§15.10）。 */
+  /** evernote:// 内部链接中未解析的（保留原链接，§15.10）。 */
   internalLinks: Array<{ url: string; text: string }>;
+  /** §15.10 经 GUID 解析并重写为 wikilink 的内部链接数。 */
+  resolvedInternalLinks: number;
   externalLinks: Array<{ url: string; text: string }>;
   /** §15.11 加密块占位记录。 */
   cryptBlocks: Array<{ hint?: string | undefined; cipher?: string | undefined; length?: string | undefined }>;
@@ -55,7 +57,28 @@ export interface EnmlTransformResult {
   todoCount: number;
 }
 
+export interface EnmlTransformOptions {
+  /**
+   * §15.10 两遍处理的第二遍：evernote:// 链接的目标 GUID → wikilink 目标名
+   * （目标笔记文件名主体，如 `标题-<shortId>`）。实现为 evernote-wikilink://
+   * 伪链接（turndown 转为 markdown 链接、不转义方括号），由目标端后处理为
+   * Obsidian wikilink。linkText 为原链接文字（可用作别名）。
+   * 未提供或返回 undefined 时保留原链接。
+   */
+  resolveGuidLink?: (guid: string, linkText: string) => string | undefined;
+}
+
 const MD5_HEX = /^[0-9a-f]{32}$/i;
+const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** 从 evernote:///view/{user}/{shard}/{guid}/{guid}/ 或 /l/{shard}/{guid}/ 提取 GUID。 */
+export function guidFromEvernoteLink(url: string): string | undefined {
+  const segments = url.replace(/^evernote:\/\//i, '').split('/').filter(Boolean);
+  for (const seg of segments) {
+    if (GUID_RE.test(seg)) return seg.toLowerCase();
+  }
+  return undefined;
+}
 
 /**
  * §15.12 共享的正文清洗（HTML 导出解析复用）：DOMPurify 允许列表 +
@@ -69,11 +92,13 @@ export function sanitizeNoteHtml(html: string): string {
 export function enmlToHtml(
   enml: string,
   resourceByMd5: ReadonlyMap<string, ResourceRefInfo>,
+  opts: EnmlTransformOptions = {},
 ): EnmlTransformResult {
   const result: EnmlTransformResult = {
     html: '',
     remoteImages: [],
     internalLinks: [],
+    resolvedInternalLinks: 0,
     externalLinks: [],
     cryptBlocks: [],
     missingMediaHashes: [],
@@ -187,7 +212,16 @@ export function enmlToHtml(
     if (href === null) continue;
     const text = (a.textContent ?? '').trim();
     if (href.startsWith('evernote://')) {
-      result.internalLinks.push({ url: href, text });
+      // §15.10 两遍处理第二遍：GUID 可解析 → evernote-wikilink:// 伪链接
+      // （目标端后处理为 Obsidian wikilink）；否则保留原链接并记录
+      const guid = guidFromEvernoteLink(href);
+      const wikilinkTarget = guid !== undefined ? opts.resolveGuidLink?.(guid, text) : undefined;
+      if (wikilinkTarget !== undefined) {
+        a.setAttribute('href', `evernote-wikilink://${encodeURIComponent(wikilinkTarget)}`);
+        result.resolvedInternalLinks += 1;
+      } else {
+        result.internalLinks.push({ url: href, text });
+      }
     } else if (/^https?:\/\//i.test(href)) {
       result.externalLinks.push({ url: href, text });
     }

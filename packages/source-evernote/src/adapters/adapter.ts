@@ -1,6 +1,9 @@
 import {
   computeFingerprint,
+  computeStableKey,
+  deriveStableShortId,
   downloadImage,
+  sanitizeFilename,
   type SourceAdapter,
   type SourceItem,
   type SourceItemRef,
@@ -53,6 +56,8 @@ export interface EnexRefMetadata {
   notebookKey: string;
   /** §13.3 笔记目录段：[Stack?, `<笔记本>-<notebookKey前8位>`]。 */
   notePathSegments: string[];
+  /** evernote-backup --add-guid 扩展携带的稳定 GUID（§15.4 第 1 优先级身份）。 */
+  guid?: string | undefined;
 }
 
 export interface HtmlRefMetadata {
@@ -125,6 +130,12 @@ type EvernoteAdapter = SourceAdapter & { __scanState?: ScanState };
 export function createEvernoteSource(input: EvernoteSourceConfigInput): EvernoteAdapter {
   const cfg: EvernoteSourceConfig = EvernoteSourceConfigSchema.parse(input);
   const scanState: ScanState = { issues: [], skippedInputs: [] };
+  /**
+   * §15.10 两遍处理第一遍的索引：GUID → {title, fingerprint}。
+   * scan 阶段（job-runner 先完整扫描后提取）累积；extract 用它把 evernote://
+   * 链接重写为指向目标文件名的 wikilink。跨进程 resume 后为空 → 链接保留原样。
+   */
+  const guidMap = new Map<string, { title: string; fingerprint: string }>();
 
   const adapter: EvernoteAdapter = {
     kind: SOURCE_EVERNOTE_KIND,
@@ -147,6 +158,7 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
     async *scan(ctx): AsyncGenerator<SourceItemRef> {
       scanState.issues = [];
       scanState.skippedInputs = [];
+      guidMap.clear();
       const inputRoots = resolveInputPaths(cfg.inputPaths, ctx.workspaceDir);
       const includeHtml = cfg.formats.includes('html');
       const { files, htmlFiles, skipped } = await collectEnexFiles(
@@ -157,10 +169,21 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
       scanState.skippedInputs = skipped;
 
       for (const file of files) {
-        const notes: Array<{ ordinal: number; title: string; createdIso: string | undefined }> = [];
+        const notes: Array<{
+          ordinal: number;
+          title: string;
+          createdIso: string | undefined;
+          guid: string | undefined;
+        }> = [];
         const outcome = await streamNotes(file.path, {
           headerOnly: true,
-          onNote: (n) => notes.push({ ordinal: n.ordinal, title: n.title, createdIso: enexTimeToIso(n.created) }),
+          onNote: (n) =>
+            notes.push({
+              ordinal: n.ordinal,
+              title: n.title,
+              createdIso: enexTimeToIso(n.created),
+              guid: n.guid,
+            }),
           onIssue: (msg) => scanState.issues.push(`${file.baseName}.enex: ${msg}`),
         });
         if (outcome.error !== undefined) {
@@ -168,13 +191,18 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
           scanState.issues.push(`${file.path}: ${outcome.error.message}（已读出 ${notes.length} 条）`);
         }
         for (const n of notes) {
+          const refTitle = n.title.length > 0 ? n.title : `未命名笔记 #${n.ordinal}`;
           const { externalId, fingerprint } = buildNoteIdentity({
+            guid: n.guid,
             fileSha256: file.sha256,
             ordinal: n.ordinal,
             title: n.title,
             createdIso: n.createdIso,
             fileBaseName: file.baseName,
           });
+          if (n.guid !== undefined) {
+            guidMap.set(n.guid.toLowerCase(), { title: refTitle, fingerprint });
+          }
           const meta: EnexRefMetadata = {
             path: file.path,
             baseName: file.baseName,
@@ -184,11 +212,12 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
             stack: file.stack,
             notebookKey: file.notebookKey,
             notePathSegments: buildNotePathSegments(file.notebook, file.notebookKey, file.stack),
+            ...(n.guid !== undefined ? { guid: n.guid.toLowerCase() } : {}),
           };
           yield {
             sourceInstanceId: cfg.sourceInstanceId,
             externalId,
-            title: n.title.length > 0 ? n.title : `未命名笔记 #${n.ordinal}`,
+            title: refTitle,
             contentKind: 'note',
             discoveredAt: new Date().toISOString(),
             sourcePosition: n.ordinal,
@@ -282,7 +311,19 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
       );
 
       // §15.6 ENML 转换
-      const transform = enmlToHtml(note.content ?? '', resourceByMd5);
+      // §15.10 第二遍：GUID → 指向目标文件名的伪链接（目标文件名 =
+      // sanitizeFilename(标题) + '-' + stableShortId，按目标端 §13.4 默认参数推得；
+      // 目标端把 evernote-wikilink:// 后处理为 Obsidian wikilink）
+      const resolveGuidLink = (guid: string): string | undefined => {
+        const target = guidMap.get(guid.toLowerCase());
+        if (target === undefined) return undefined;
+        const shortId = deriveStableShortId(
+          computeStableKey(cfg.sourceInstanceId, target.fingerprint),
+        );
+        // 目标端 maxFilenameLength=100，扣除 `-${shortId}` 后的主体上限
+        return `${sanitizeFilename(target.title, { maxLength: 89 })}-${shortId}`;
+      };
+      const transform = enmlToHtml(note.content ?? '', resourceByMd5, { resolveGuidLink });
 
       // §15.6 远程图片下载（与 §12.10 同一管线；默认关闭不发起网络请求）
       const assets = processed.resources.map((r) => r.asset);
@@ -349,9 +390,9 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
           message: `${transform.cryptBlocks.length} 个加密块以占位符保留（不破解，§15.11）`,
         });
       }
-      if (transform.internalLinks.length > 0) {
+      if (transform.internalLinks.length > 0 || transform.resolvedInternalLinks > 0) {
         warnings.push(
-          `内部链接：${transform.internalLinks.length} 条未解析（ENEX 无 GUID 映射，保留原始链接，§15.10）`,
+          `内部链接：重写 ${transform.resolvedInternalLinks}，未解析 ${transform.internalLinks.length}（保留原始链接，§15.10）`,
         );
       }
       const unreferenced = processed.resources.filter(

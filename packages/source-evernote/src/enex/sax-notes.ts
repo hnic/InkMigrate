@@ -37,7 +37,12 @@ export interface RawNote {
   tags: string[];
   noteAttributes: Record<string, string>;
   resources: RawResource[];
+  /** evernote-backup --add-guid/--add-metadata 扩展；标准 ENEX 无此字段。 */
+  guid?: string | undefined;
 }
+
+/** Evernote GUID 形态：8-4-4-4-12 十六进制。 */
+const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** ENEX 时间戳（ISO 8601 固定剖面 `yyyymmddThhmmssZ`）→ 标准 ISO 8601；非法输入返回 undefined。 */
 export function enexTimeToIso(v: string | undefined): string | undefined {
@@ -60,6 +65,8 @@ interface AccumState {
   tags: string[];
   noteAttributes: Record<string, string>;
   resources: RawResource[];
+  /** evernote-backup --add-guid / --add-metadata 扩展携带的 GUID。 */
+  guid?: string | undefined;
 }
 
 export interface StreamNotesOptions {
@@ -118,6 +125,7 @@ export function streamNotes(path: string, opts: StreamNotesOptions): Promise<Str
   let textBuf = '';
   let currentResource: RawResource | null = null;
   let inNoteAttributes = false;
+  let inNoteCustomMetadata = false;
   let sawRoot = false;
 
   const appendText = (t: string) => {
@@ -138,6 +146,10 @@ export function streamNotes(path: string, opts: StreamNotesOptions): Promise<Str
       if (trimmed.length > 0) acc.tags.push(trimmed);
     } else if (field === 'content') {
       acc.content = textBuf; // 正文保留原始空白，规范化交给 ENML 转换
+    } else if (field === 'guid') {
+      if (GUID_RE.test(trimmed)) acc.guid = trimmed;
+    } else if (field === 'notemeta:guid') {
+      if (GUID_RE.test(trimmed) && acc.guid === undefined) acc.guid = trimmed;
     } else if (field.startsWith('noteattr:')) {
       if (trimmed.length > 0) acc.noteAttributes[field.slice('noteattr:'.length)] = trimmed;
     } else if (currentResource !== null) {
@@ -172,6 +184,22 @@ export function streamNotes(path: string, opts: StreamNotesOptions): Promise<Str
     }
     if (name === 'note-attributes') {
       inNoteAttributes = true;
+      return;
+    }
+    // evernote-backup `export --add-guid --add-metadata` 扩展（§15.14）：
+    // <guid> 与 <note-custom-metadata><guid> 携带稳定 GUID（§15.4 第 1 优先级身份）
+    if (name === 'guid') {
+      currentField = 'guid';
+      textBuf = '';
+      return;
+    }
+    if (name === 'note-custom-metadata') {
+      inNoteCustomMetadata = true;
+      return;
+    }
+    if (inNoteCustomMetadata) {
+      currentField = `notemeta:${name}`;
+      textBuf = '';
       return;
     }
     if (name === 'resource-attributes') return; // 容器，子元素单独累积
@@ -225,6 +253,7 @@ export function streamNotes(path: string, opts: StreamNotesOptions): Promise<Str
             tags: acc.tags,
             noteAttributes: acc.noteAttributes,
             resources: headerOnly ? [] : acc.resources,
+            ...(acc.guid !== undefined ? { guid: acc.guid } : {}),
           });
         }
         if (opts.stopAfterOrdinal !== undefined && ordinal >= opts.stopAfterOrdinal) {
@@ -236,6 +265,7 @@ export function streamNotes(path: string, opts: StreamNotesOptions): Promise<Str
       acc = null;
       currentResource = null;
       inNoteAttributes = false;
+      inNoteCustomMetadata = false;
       currentField = null;
       textBuf = '';
       return;
@@ -252,6 +282,11 @@ export function streamNotes(path: string, opts: StreamNotesOptions): Promise<Str
     if (name === 'note-attributes') {
       flushField();
       inNoteAttributes = false;
+      return;
+    }
+    if (name === 'note-custom-metadata') {
+      flushField();
+      inNoteCustomMetadata = false;
       return;
     }
     if (name === 'resource-attributes') return;

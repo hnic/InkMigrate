@@ -23,7 +23,7 @@ import {
   assetRelativePath,
 } from './paths.js';
 import { stringifyFrontmatter } from './frontmatter.js';
-import { renderBody, htmlToMarkdown } from './body.js';
+import { renderBody, htmlToMarkdown, convertEvernoteWikilinks } from './body.js';
 import { atomicWrite, readTargetIfExists } from './atomic-write.js';
 import { decideOverwrite } from './overwrite-policy.js';
 import { writeAsset, verifyAsset, deriveMimeExtension } from './assets.js';
@@ -172,7 +172,7 @@ async function planNote(
   // 改为：先尝试 bodyHtml→markdown，结果为空时回退 bodyText。
   let markdownBody = '';
   if (item.bodyHtml) {
-    markdownBody = htmlToMarkdown(item.bodyHtml);
+    markdownBody = convertEvernoteWikilinks(htmlToMarkdown(item.bodyHtml));
   }
   if (markdownBody.length === 0) {
     markdownBody = item.bodyText ?? '';
