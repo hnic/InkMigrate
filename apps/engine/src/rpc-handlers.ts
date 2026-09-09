@@ -28,6 +28,7 @@ import { lastScanIssues } from '@inkmigrate/source-evernote';
 import { resolveEvernoteSource, resolveSourceWiring, resolveTargetConfig } from '@inkmigrate/wiring';
 import { createObsidianTarget } from '@inkmigrate/target-obsidian';
 import { rmSync, mkdirSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import {
@@ -46,7 +47,7 @@ import {
   sendNotification,
   logToStderr,
 } from './transport.js';
-import { requestCancel, isCancelledFlag, beginTask, endTask } from './cancellation.js';
+import { requestCancel, isCancelledFlag, beginTask, endTask, getActiveTask } from './cancellation.js';
 import type {
   AuthLoginParams,
   AuthLoginResult,
@@ -148,6 +149,19 @@ function requirePositiveIntIfDefined(value: unknown, field: string): asserts val
   if (value === undefined) return;
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || !Number.isInteger(value)) {
     throw new Error(`${field} 必须是正整数，收到：${String(value)}`);
+  }
+}
+
+/** 打开 stateDir 下的状态库（统一 DB 文件名，所有 RPC 共用）。 */
+function openStateDb(stateDir: string): DB {
+  return openDatabase({ path: join(stateDir, 'inkmigrate.sqlite') });
+}
+
+/** 要求登录 Profile 已存在（toutiao 源的扫描/迁移/清理共同前置条件）。 */
+function requireProfileExists(stateDir: string, source: string): void {
+  const profileDir = profilePath(stateDir, source);
+  if (!profileExists(stateDir, source)) {
+    throw new Error(`Profile 不存在：${profileDir}，请先 auth.login`);
   }
 }
 
@@ -277,14 +291,19 @@ async function handleScanPreview(params: ScanPreviewParams | undefined): Promise
   }
   const byNotebook: Record<string, number> = {};
   let count = 0;
-  for await (const ref of wiring.adapter.scan({ config: {}, workspaceDir: params.stateDir })) {
-    count += 1;
-    const meta = ref.sourceMetadata as { enex?: { notebook?: string | undefined; stack?: string | undefined } };
-    const key = [meta.enex?.stack, meta.enex?.notebook].filter(Boolean).join('/') || '(未知)';
-    byNotebook[key] = (byNotebook[key] ?? 0) + 1;
+  let issues: string[] = [];
+  try {
+    for await (const ref of wiring.adapter.scan({ config: {}, workspaceDir: params.stateDir })) {
+      count += 1;
+      const meta = ref.sourceMetadata as { enex?: { notebook?: string | undefined; stack?: string | undefined } };
+      const key = [meta.enex?.stack, meta.enex?.notebook].filter(Boolean).join('/') || '(未知)';
+      byNotebook[key] = (byNotebook[key] ?? 0) + 1;
+    }
+    issues = [...lastScanIssues(wiring.adapter)];
+  } finally {
+    // scan 中途抛出（文件损坏/IO 错误）也必须关闭 adapter，长驻 sidecar 不容忍资源泄漏
+    await wiring.adapter.close();
   }
-  const issues = [...lastScanIssues(wiring.adapter)];
-  await wiring.adapter.close();
   return { sourceInstanceId: params.source, uniqueItems: count, byNotebook, issues, skipped: [] };
 }
 
@@ -298,19 +317,17 @@ async function handleScanStart(params: ScanStartParams | undefined): Promise<Sca
   // M5: scan.start 路径补 maxItems 校验，与 migrate.start/cleanup.unfavorite 一致，
   // 拒绝 GUI parseInt 产生的 NaN（I25：非法数值不应直达抓取层）。
   requirePositiveIntIfDefined(params.maxItems, 'maxItems');
-  beginTask('scan'); // C10: 占用活跃任务槽位（拒绝并发长任务，避免 resetCancel 互踩取消请求）
-  const profileDir = profilePath(params.stateDir, params.source);
-  if (!profileExists(params.stateDir, params.source)) {
-    endTask();
-    throw new Error(`Profile 不存在：${profileDir}，请先 auth.login`);
-  }
+  requireProfileExists(params.stateDir, params.source);
 
   const session = new ToutiaoBrowserSession({
-    profileDir,
+    profileDir: profilePath(params.stateDir, params.source),
     // 默认有头：头条对 headless 浏览器做反爬检测，会返回空壳页面（实测 headless 扫出 0 条，
     // 有头扫出全部）。仅当显式传 headless:true 时才用无头。
     headless: params.headless ?? false,
   });
+  // C10: 占用活跃任务槽位（拒绝并发长任务，避免 resetCancel 互踩取消请求）。
+  // 紧贴 try：占槽与 try 之间插入任何可能抛出的语句都会让槽位泄漏。
+  beginTask('scan');
   try {
     await session.launch();
     const page = await session.newPage();
@@ -366,7 +383,7 @@ async function handleScanStart(params: ScanStartParams | undefined): Promise<Sca
     };
   } finally {
     await session.close();
-    endTask(); // C10: 释放活跃任务槽位
+    endTask('scan'); // C10: 释放活跃任务槽位
   }
 }
 
@@ -397,7 +414,7 @@ async function handleMigrateResumable(
   if (params === undefined) throw new Error('missing params');
   requireStateDir(params.stateDir);
   requireId(params.source, 'source');
-  const db: DB = openDatabase({ path: join(params.stateDir, 'inkmigrate.sqlite') });
+  const db: DB = openStateDb(params.stateDir);
   try {
     const job = resolveResumableJob(db, params.source);
     if (job === undefined) return { job: null };
@@ -418,7 +435,9 @@ async function handleMigrateResumable(
 
     return {
       job: job.id,
-      status: job.status,
+      // 与 handleStatusQuery 同理：DB 的 CHECK 约束保证 status ∈ JobStatus 合法值，
+      // 编译期 DB 读出为 string 需窄化。
+      status: job.status as JobStatus,
       total,
       verified,
       targetInstanceId: job.targetInstanceId,
@@ -456,7 +475,9 @@ function resolveResumableJob(
   // 兜底：running 但卡住（进程已死），仍允许续跑
   if (job.status === 'running') {
     const age = Date.now() - new Date(job.updatedAt).getTime();
-    if (age > STALE_RUNNING_MS) return job;
+    // 本进程正有 migrate 在跑时，该 running Job 很可能就是它（大附件/限流退避下
+    // updated_at 可能超过 5 分钟未更新）——此时不得判定可续跑，否则同源并发写库。
+    if (age > STALE_RUNNING_MS && getActiveTask() !== 'migrate') return job;
   }
   return undefined;
 }
@@ -479,14 +500,16 @@ async function runMigrateJob(
   const { runMigrationJob } = await import('@inkmigrate/core');
 
   mkdirSync(params.stateDir, { recursive: true });
-  // 每个 RPC 各自 open/close 连接：better-sqlite3 在 WAL 模式下连接打开很轻量，
-  // 且长任务（migrate）与瞬时查询（status）用各自连接读到的都是已提交快照（WAL 隔离），
-  // 不会读到半提交状态。未做进程级连接复用——多 stateDir 场景下连接生命周期管理复杂，
-  // 易引入悬挂连接；当前访问模式下重开的代价可忽略，故优先正确性与简单性。
-  const db: DB = openDatabase({ path: join(params.stateDir, 'inkmigrate.sqlite') });
-
-  beginTask('migrate'); // C10: 占用活跃任务槽位（拒绝并发长任务）
+  // C10: 先占活跃任务槽位再开库——若已有并发长任务，beginTask 抛出时不会泄漏
+  // 已打开的 SQLite 连接（原实现 openDatabase 在 beginTask 之前，长驻 sidecar 会累积句柄）。
+  beginTask('migrate');
+  let db: DB | undefined;
   try {
+    // 每个 RPC 各自 open/close 连接：better-sqlite3 在 WAL 模式下连接打开很轻量，
+    // 且长任务（migrate）与瞬时查询（status）用各自连接读到的都是已提交快照（WAL 隔离），
+    // 不会读到半提交状态。未做进程级连接复用——多 stateDir 场景下连接生命周期管理复杂，
+    // 易引入悬挂连接；当前访问模式下重开的代价可忽略，故优先正确性与简单性。
+    db = openStateDb(params.stateDir);
     let sourceInstanceId: string;
     let targetInstanceId: string;
 
@@ -523,10 +546,7 @@ async function runMigrateJob(
         : undefined;
 
     if (wiring === undefined || wiring.kind === 'toutiao') {
-      const profileDir = profilePath(params.stateDir, sourceInstanceId);
-      if (!profileExists(params.stateDir, sourceInstanceId)) {
-        throw new Error(`Profile 不存在：${profileDir}，请先 auth.login`);
-      }
+      requireProfileExists(params.stateDir, sourceInstanceId);
     }
 
     // 确保实例存在（FK 约束要求）。config_hash 反映各实例配置指纹。
@@ -553,8 +573,9 @@ async function runMigrateJob(
 
     sendNotification('log', { level: 'info', message: isResume ? `续跑 Job ${(params as MigrateResumeParams).job}...` : '正在创建迁移任务...' });
 
-    // 创建新 Job
-    const jobId = `mig-${Date.now()}`;
+    // 创建新 Job。毫秒时间戳不保证唯一（同一毫秒两次调用/时钟回拨会撞主键——
+    // sidecar 与 CLI 共享同一 DB），追加随机后缀保证碰撞免疫。
+    const jobId = `mig-${Date.now()}-${randomUUID().slice(0, 8)}`;
     const now = new Date().toISOString();
     new MigrationJobs(db).create({
       id: jobId,
@@ -650,8 +671,8 @@ async function runMigrateJob(
       jobId,
     };
   } finally {
-    db.close();
-    endTask(); // C10: 释放活跃任务槽位
+    db?.close();
+    endTask('migrate'); // C10: 释放活跃任务槽位
   }
 }
 
@@ -671,9 +692,11 @@ async function handleCleanupUnfavorite(
   // I25: 信任边界校验速率/上限数值
   if (params.intervalMs !== undefined) requirePositiveMs(params.intervalMs, 'intervalMs');
   requirePositiveIntIfDefined(params.maxItems, 'maxItems');
-  const db: DB = openDatabase({ path: join(params.stateDir, 'inkmigrate.sqlite') });
-  beginTask('cleanup'); // C10: 占用活跃任务槽位（拒绝并发长任务）
+  // C10: 先占活跃任务槽位再开库——占槽失败（并发长任务）抛出时不泄漏已打开的 DB 连接
+  beginTask('cleanup');
+  let db: DB | undefined;
   try {
+    db = openStateDb(params.stateDir);
     const profileDir = profilePath(params.stateDir, params.source);
     if (!profileExists(params.stateDir, params.source)) {
       throw new Error(`Profile 不存在：${profileDir}，请先 auth.login`);
@@ -688,9 +711,11 @@ async function handleCleanupUnfavorite(
       // 有头模式：头条反爬会拦截 headless（收藏按钮状态返回异常），清理必须用有头
       headless: false,
     });
-    await adapter.prepare({ config: {}, workspaceDir: params.stateDir });
 
     try {
+      // prepare 在 try 内：部分启动后抛出（导航/超时）同样要经 closeAdapterSafely
+      // 兜底关闭，否则 Chromium 进程泄漏。
+      await adapter.prepare({ config: {}, workspaceDir: params.stateDir });
       const result = await runCleanupUnfavorite({
         db,
         sourceAdapter: adapter,
@@ -716,7 +741,11 @@ async function handleCleanupUnfavorite(
         // §5/§14.12 登录墙/风控挑战受控中断信息——GUI 据此提示用户重新登录，
         // 此前被丢弃导致用户只看到"失败 N 条"不知是风控。
         loginPauseCount: result.loginPauseCount,
-        ...(result.pauseReason !== undefined ? { pauseReason: result.pauseReason } : {}),
+        // orchestrator 只会赋 'login_required' | 'challenge_required'（接口声明仍为
+        // string），按协议类型窄化
+        ...(result.pauseReason !== undefined
+          ? { pauseReason: result.pauseReason as NonNullable<CleanupResult['pauseReason']> }
+          : {}),
         ...(result.jobId ? { jobId: result.jobId } : {}),
       };
     } finally {
@@ -726,8 +755,8 @@ async function handleCleanupUnfavorite(
       await closeAdapterSafely(adapter);
     }
   } finally {
-    db.close();
-    endTask(); // C10: 释放活跃任务槽位
+    db?.close();
+    endTask('cleanup'); // C10: 释放活跃任务槽位
   }
 }
 
@@ -739,8 +768,9 @@ async function handleCleanupUnfavorite(
 async function closeAdapterSafely(adapter: { close(): Promise<void> }): Promise<void> {
   const CLOSE_TIMEOUT_MS = 20_000; // 略大于 BrowserSession 内层的 15s，给第一层先兜
   let timed = false;
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
   const timer = new Promise<void>((resolve) => {
-    setTimeout(() => {
+    timeoutId = setTimeout(() => {
       timed = true;
       resolve();
     }, CLOSE_TIMEOUT_MS);
@@ -763,6 +793,9 @@ async function closeAdapterSafely(adapter: { close(): Promise<void> }): Promise<
     }
   } catch (e) {
     logToStderr('warn', `adapter.close() 异常（已忽略）：${e instanceof Error ? e.message : String(e)}`);
+  } finally {
+    // close() 先完成时清掉定时器：游离 timer 会挂住事件循环最长 20s（延迟进程退出/卡测试）
+    clearTimeout(timeoutId);
   }
 }
 
@@ -787,7 +820,7 @@ async function handleStatusQuery(
   if (params === undefined) throw new Error('missing params');
   requireStateDir(params.stateDir);
   requireId(params.job, 'job');
-  const db: DB = openDatabase({ path: join(params.stateDir, 'inkmigrate.sqlite') });
+  const db: DB = openStateDb(params.stateDir);
   try {
     const job = new MigrationJobs(db).get(params.job);
     if (job === undefined) {

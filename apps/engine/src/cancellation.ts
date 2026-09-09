@@ -15,11 +15,19 @@
  * 不放进 core 包——这是 engine（sidecar 进程）专属的运行时控制，core 是纯逻辑库。
  */
 let cancelled = false;
-/** 当前活跃长任务标识（'scan' | 'migrate' | 'cleanup'），null 表示无活跃任务。 */
-let activeTask: string | null = null;
 
-/** 已有活跃长任务时抛错（拒绝并发启动，避免 resetCancel 互踩取消请求）。 */
-export function beginTask(taskKind: string): void {
+/** 长任务种类（活跃任务槽位的封闭集合）。 */
+export type TaskKind = 'scan' | 'migrate' | 'cleanup';
+
+/** 当前活跃长任务标识，null 表示无活跃任务。 */
+let activeTask: TaskKind | null = null;
+
+/**
+ * 已有活跃长任务时抛错（拒绝并发启动，避免 resetCancel 互踩取消请求）。
+ * 注意：同步抛出——调用方必须处于能接住异常并转为 RPC 错误响应的上下文
+ * （transport.handleRequest 的 try/catch），裸调用会变成进程级 unhandled rejection。
+ */
+export function beginTask(taskKind: TaskKind): void {
   if (activeTask !== null) {
     throw new Error(
       `已有活跃长任务（${activeTask}）正在运行，请先终止或等待完成后再启动 ${taskKind}`,
@@ -29,13 +37,21 @@ export function beginTask(taskKind: string): void {
   cancelled = false;
 }
 
-/** 长任务结束时释放槽位（无论成功/失败/取消）。幂等。 */
-export function endTask(): void {
+/**
+ * 长任务结束时释放槽位（无论成功/失败/取消）。幂等。
+ * 调用约定：每个 beginTask 的调用方必须在 finally 中调用 endTask 释放，
+ * 遗漏会让槽位永久占用（此后所有长任务都被拒绝，直到 sidecar 重启）。
+ * 传入 taskKind 时只释放自己占用的槽位：迟到的 endTask（上一任务残留的
+ * 异步清理）不会误清新任务的槽位/取消标志。
+ */
+export function endTask(taskKind?: TaskKind): void {
+  if (taskKind !== undefined && activeTask !== taskKind) return; // 不是自己的槽位，不动
   activeTask = null;
+  cancelled = false; // 标志随槽位一起复位，避免空闲期残留 true 误导状态查询
 }
 
 /** 查询当前活跃任务（供 status / UI 显示）。 */
-export function getActiveTask(): string | null {
+export function getActiveTask(): TaskKind | null {
   return activeTask;
 }
 

@@ -11,6 +11,10 @@ import type { HealthDegradedNotification } from '@inkmigrate/protocol';
  * 使其与 transport 模块解耦，可在单测中 mock。
  */
 export interface HandlerDeps {
+  /**
+   * 必须为同步实现：TS 的 void 返回类型拦不住 async 函数，若返回 Promise，
+   * 其 rejection 会逃逸出 handler 内的 try/catch（成为 unhandledRejection）。
+   */
   sendNotification: (method: string, params?: Record<string, unknown>) => void;
   logToStderr: (level: string, message: string) => void;
 }
@@ -18,11 +22,19 @@ export interface HandlerDeps {
 export function createUncaughtExceptionHandler(deps: HandlerDeps) {
   let healthDegradedSent = false;
 
-  return function handleUncaughtException(err: Error): void {
-    deps.logToStderr('error', `未捕获异常（已恢复，sidecar 继续运行）：${err.message}\n${err.stack ?? ''}`);
+  return function handleUncaughtException(thrown: unknown): void {
+    // 'uncaughtException' 也可能送达非 Error 值（throw 'boom' / Promise.reject(null)）：
+    // 先规范化——对 null 取 .message 会在 handler 内二次抛出（uncaughtException handler
+    // 内抛异常是致命的），字符串则会让 message 静默退化成 undefined。
+    const err = thrown instanceof Error ? thrown : new Error(String(thrown));
+
+    try {
+      deps.logToStderr('error', `未捕获异常（已恢复，sidecar 继续运行）：${err.message}\n${err.stack ?? ''}`);
+    } catch {
+      // stderr 写入失败（管道 EPIPE 等）：吞掉，handler 自身绝不二次抛出。
+    }
 
     if (healthDegradedSent) return; // 单次节流
-    healthDegradedSent = true;
 
     const payload = {
       reason: 'uncaughtException',
@@ -31,10 +43,17 @@ export function createUncaughtExceptionHandler(deps: HandlerDeps) {
     } satisfies HealthDegradedNotification;
     try {
       deps.sendNotification('health_degraded', payload);
+      // 发送成功才置位：首条发送失败（stdout 断开，或 transport 背压路径静默丢弃）时
+      // 保留重试机会，在下次异常再试一次——提前置位会让降级通知永久丢失。
+      healthDegradedSent = true;
     } catch {
       // 兜底：sendNotification 自身失败（stdout 已断等）不应让 handler 二次崩溃。
       // writeLine 内部已有 try/catch，此处为防御性双保险。
-      deps.logToStderr('warn', 'health_degraded notification 发送失败，已忽略');
+      try {
+        deps.logToStderr('warn', 'health_degraded notification 发送失败，已忽略');
+      } catch {
+        // 同上：handler 绝不二次抛出。
+      }
     }
   };
 }
