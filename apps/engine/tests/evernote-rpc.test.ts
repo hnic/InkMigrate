@@ -128,7 +128,9 @@ describe('engine RPC: evernote file source', () => {
     expect(r.byNotebook['basic']).toBe(2);
     expect(r.byNotebook['interlinks']).toBe(2);
     expect(r.byNotebook['resources-named']).toBe(1);
-    expect(r.issues).toEqual([]);
+    // §15.5：无 Stack 的导出文件产生"无法自动还原"提示（进报告）
+    expect(r.issues).toHaveLength(3);
+    expect(r.issues.join('\n')).toContain('basic.enex：无 Stack 信息');
     // 不写库：stateDir 无数据库文件（scan.preview 是纯读）
     expect(existsSync(join(w.stateDir, 'inkmigrate.sqlite'))).toBe(false);
   }, 30_000);

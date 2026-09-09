@@ -47,12 +47,22 @@ export interface EnexFileInfo {
   mtimeMs: number;
 }
 
+/** §15.5 用户映射清单（键 = ENEX 文件名，带/不带 .enex 后缀均可；stack null = 清除推断值）。 */
+export interface NotebookMapping {
+  stack?: string | null | undefined;
+  notebook?: string | undefined;
+  mergeKey: string | null;
+}
+export type NotebookMappings = Record<string, NotebookMapping>;
+
 export interface CollectInputResult {
   files: EnexFileInfo[];
   /** §15.12 HTML 导出文件（绝对路径；仅 includeHtml 时收集，供报告提示）。 */
   htmlFiles: string[];
   /** 跳过的其余文件（不支持的格式），供报告提示。 */
   skipped: string[];
+  /** §15.5 无 Stack 提示、映射键未命中等非致命警告（进扫描报告）。 */
+  warnings: string[];
 }
 
 /** `.resources`/`_resources` 是 §15.12 笔记附属资源目录，不作为笔记来源递归。 */
@@ -117,13 +127,15 @@ async function sha256File(path: string): Promise<string> {
 export async function collectEnexFiles(
   inputPaths: readonly string[],
   stackSeparator: string,
-  opts: { includeHtml?: boolean } = {},
+  opts: { includeHtml?: boolean; notebookMappings?: NotebookMappings } = {},
 ): Promise<CollectInputResult> {
   const includeHtml = opts.includeHtml ?? false;
+  const mappings = opts.notebookMappings ?? {};
   const enexPaths: string[] = [];
   const notesPaths: string[] = [];
   const htmlPaths: string[] = [];
   const skipped: string[] = [];
+  const warnings: string[] = [];
 
   for (const p of inputPaths) {
     let st;
@@ -156,26 +168,95 @@ export async function collectEnexFiles(
   }
 
   enexPaths.sort((a, b) => a.localeCompare(b, 'en'));
-  const files: EnexFileInfo[] = [];
+  interface Draft {
+    path: string;
+    baseName: string;
+    stack: string | undefined;
+    notebook: string;
+    mergeKey: string | null;
+    sha: string;
+    sizeBytes: number;
+    mtimeMs: number;
+  }
+  const drafts: Draft[] = [];
+  const matchedMappingKeys = new Set<string>();
   for (const p of enexPaths) {
     const baseName = basename(p, extname(p));
-    const { stack, notebook } = splitStackNotebook(baseName, stackSeparator);
+    let { stack, notebook } = splitStackNotebook(baseName, stackSeparator);
+    // §15.5 用户映射覆盖（键接受带/不带 .enex 后缀）
+    const mapping =
+      mappings[baseName] !== undefined ? mappings[baseName] : mappings[`${baseName}.enex`];
+    let mergeKey: string | null = null;
+    if (mapping !== undefined) {
+      matchedMappingKeys.add(
+        mappings[baseName] !== undefined ? baseName : `${baseName}.enex`,
+      );
+      if (mapping.stack !== undefined) stack = mapping.stack ?? undefined;
+      if (mapping.notebook !== undefined) notebook = mapping.notebook;
+      mergeKey = mapping.mergeKey;
+    } else if (stack === undefined) {
+      // §15.5 默认导出缺少 Stack 信息时报告必须说明无法自动还原
+      warnings.push(
+        `${baseName}.enex：无 Stack 信息，无法自动还原笔记本组层级（可用 notebookMappings 手动指定）`,
+      );
+    }
     const st = statSync(p);
-    const sha = await sha256File(p);
-    files.push({
+    drafts.push({
       path: p,
       baseName,
       stack,
       notebook,
-      notebookKey: createHash('sha256')
-        .update(`${sha}\0${stack ?? ''}\0${notebook}`)
-        .digest('hex'),
-      sha256: sha,
+      mergeKey,
+      sha: await sha256File(p),
       sizeBytes: st.size,
       mtimeMs: st.mtimeMs,
     });
   }
-  return { files, htmlFiles: htmlPaths.sort((a, b) => a.localeCompare(b, 'en')), skipped };
+  for (const key of Object.keys(mappings)) {
+    if (!matchedMappingKeys.has(key)) {
+      warnings.push(`notebookMappings 键 "${key}" 未匹配任何输入文件`);
+    }
+  }
+  // §15.5 mergeKey 非空必须经过配置验证：同组最终笔记本名必须一致（含 Stack）
+  const groups = new Map<string, { notebook: string; stack: string | undefined }>();
+  for (const d of drafts) {
+    if (d.mergeKey === null) continue;
+    const prev = groups.get(d.mergeKey);
+    if (prev !== undefined && (prev.notebook !== d.notebook || prev.stack !== d.stack)) {
+      throw new Error(
+        `notebookMappings 校验失败：mergeKey "${d.mergeKey}" 组内笔记本不一致` +
+          `（${[prev.stack, prev.notebook].filter(Boolean).join('/')} vs ${[d.stack, d.notebook].filter(Boolean).join('/')}）；合并前请先统一 stack/notebook 映射`,
+      );
+    }
+    if (prev === undefined) groups.set(d.mergeKey, { notebook: d.notebook, stack: d.stack });
+  }
+  // mergeKey 组共享 notebookKey（同组落同一笔记本目录）；否则按文件哈希派生
+  const mergeKeys = new Map<string, string>();
+  for (const [mk, info] of groups) {
+    mergeKeys.set(
+      mk,
+      createHash('sha256').update(`merge\0${mk}\0${info.stack ?? ''}\0${info.notebook}`).digest('hex'),
+    );
+  }
+  const files: EnexFileInfo[] = drafts.map((d) => ({
+    path: d.path,
+    baseName: d.baseName,
+    stack: d.stack,
+    notebook: d.notebook,
+    notebookKey:
+      d.mergeKey !== null
+        ? (mergeKeys.get(d.mergeKey)!)
+        : createHash('sha256').update(`${d.sha}\0${d.stack ?? ''}\0${d.notebook}`).digest('hex'),
+    sha256: d.sha,
+    sizeBytes: d.sizeBytes,
+    mtimeMs: d.mtimeMs,
+  }));
+  return {
+    files,
+    htmlFiles: htmlPaths.sort((a, b) => a.localeCompare(b, 'en')),
+    skipped,
+    warnings,
+  };
 }
 
 /** §15.5 文件名 → Stack/笔记本；无分隔符时整体作为笔记本名。 */

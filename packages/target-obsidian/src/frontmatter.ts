@@ -50,6 +50,10 @@ export function stringifyFrontmatter(i: FrontmatterInput): string {
     stack?: string;
     source_url?: string;
     source_type?: string;
+    latitude?: string;
+    longitude?: string;
+    altitude?: string;
+    place_name?: string;
   };
   if (sm?.notebook !== undefined) {
     props.source_notebook = sm.notebook;
@@ -62,6 +66,19 @@ export function stringifyFrontmatter(i: FrontmatterInput): string {
   }
   if (sm?.source_type !== undefined) {
     props.source_type = sm.source_type;
+  }
+  // §15.8 地理位置（来源显式启用才会出现）
+  if (sm?.latitude !== undefined) {
+    props.source_latitude = sm.latitude;
+  }
+  if (sm?.longitude !== undefined) {
+    props.source_longitude = sm.longitude;
+  }
+  if (sm?.altitude !== undefined) {
+    props.source_altitude = sm.altitude;
+  }
+  if (sm?.place_name !== undefined) {
+    props.source_place_name = sm.place_name;
   }
   props.source_content_hash = i.sourceContentHash;
   props.inkmigrate_id = i.stableKey;

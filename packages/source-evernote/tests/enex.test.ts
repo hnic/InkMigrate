@@ -284,3 +284,81 @@ describe('mkdir fixture 环境', () => {
     expect(FIXTURES.length).toBeGreaterThan(0);
   });
 });
+
+describe('notebookMappings（§15.5 用户映射覆盖）', () => {
+  function dir2(): string {
+    const d = tmp();
+    copyFileSync(join(FIXTURES, 'basic.enex'), join(d, 'basic.enex'));
+    copyFileSync(join(FIXTURES, 'Work@@@Projects.enex'), join(d, 'Work@@@Projects.enex'));
+    return d;
+  }
+
+  it('覆盖文件名推断的 stack/notebook', async () => {
+    const d = dir2();
+    try {
+      const { files } = await collectEnexFiles([d], '@@@', {
+        notebookMappings: {
+          basic: { stack: '自定义栈', notebook: '重命名笔记本', mergeKey: null },
+        },
+      });
+      const basic = files.find((f) => f.baseName === 'basic')!;
+      expect(basic.stack).toBe('自定义栈');
+      expect(basic.notebook).toBe('重命名笔记本');
+      // notebookKey 随映射后的名称派生（与未映射时不同）
+      const unmapped = await collectEnexFiles([d], '@@@');
+      expect(basic.notebookKey).not.toBe(
+        unmapped.files.find((f) => f.baseName === 'basic')!.notebookKey,
+      );
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  it('mergeKey 相同且笔记本名一致的文件共享 notebookKey（合并目录）', async () => {
+    const d = dir2();
+    try {
+      const { files } = await collectEnexFiles([d], '@@@', {
+        notebookMappings: {
+          basic: { notebook: '合并笔记本', mergeKey: 'merged' },
+          'Work@@@Projects': { notebook: '合并笔记本', stack: null, mergeKey: 'merged' },
+        },
+      });
+      const keys = files.map((f) => f.notebookKey);
+      expect(keys[0]).toBe(keys[1]);
+      expect(files.every((f) => f.notebook === '合并笔记本')).toBe(true);
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  it('mergeKey 组内笔记本名不一致时显式校验失败', async () => {
+    const d = dir2();
+    try {
+      await expect(
+        collectEnexFiles([d], '@@@', {
+          notebookMappings: {
+            basic: { notebook: 'A', mergeKey: 'm' },
+            'Work@@@Projects': { notebook: 'B', mergeKey: 'm' },
+          },
+        }),
+      ).rejects.toThrow(/mergeKey.*不一致/);
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  it('映射键未命中与无 Stack 均产生警告（进报告）', async () => {
+    const d = dir2();
+    try {
+      const { warnings } = await collectEnexFiles([d], '@@@', {
+        notebookMappings: { '不存在的文件': { notebook: 'X', mergeKey: null } },
+      });
+      expect(warnings.join('\n')).toContain('未匹配任何输入文件');
+      // basic.enex 无 Stack 且无映射 → 提示无法自动还原（Work@@@Projects 有分隔符不提示）
+      expect(warnings.join('\n')).toContain('basic.enex：无 Stack 信息');
+      expect(warnings.join('\n')).not.toContain('Work@@@Projects.enex：无 Stack');
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+});

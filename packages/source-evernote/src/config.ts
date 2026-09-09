@@ -19,6 +19,24 @@ export const EvernoteSourceConfigSchema = z
     notebookNameStrategy: z.literal('filename').default('filename'),
     /** §15.5 `Stack@@@Notebook.enex` 命名约定的分隔符。 */
     stackSeparator: z.string().min(1).default('@@@'),
+    /**
+     * §15.5 用户映射清单覆盖：键为 ENEX 文件名（带或不带 .enex 后缀），
+     * 值覆盖文件名推断出的 stack/notebook；mergeKey 非空的多个文件合并进
+     * 同一笔记本目录（同组笔记本名必须一致，采集时校验）。
+     */
+    notebookMappings: z
+      .record(
+        z.string().min(1),
+        z.object({
+          /** 覆盖 Stack；null 表示清除文件名推断出的 Stack（merge 场景）。 */
+          stack: z.string().min(1).nullable().optional(),
+          notebook: z.string().min(1).optional(),
+          mergeKey: z.string().min(1).nullable().default(null),
+        }),
+      )
+      .default({}),
+    /** §15.8 地理位置显式启用（默认关闭：位置信息敏感性高）。 */
+    includeGeolocation: z.boolean().default(false),
     assets: z
       .object({
         /** §15.6 正文远程 <img> 是否按 §12.10 管线下载。默认关闭（不发起网络请求）。 */

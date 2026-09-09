@@ -184,6 +184,7 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
       // 预检：路径可达 + .notes 显式失败（§15.2.1）提前到 prepare，避免迁移半途报错
       await collectEnexFiles(resolveInputPaths(cfg.inputPaths, ctx.workspaceDir), cfg.stackSeparator, {
         includeHtml: cfg.formats.includes('html'),
+        notebookMappings: cfg.notebookMappings,
       });
     },
 
@@ -193,12 +194,13 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
       guidMap.clear();
       const inputRoots = resolveInputPaths(cfg.inputPaths, ctx.workspaceDir);
       const includeHtml = cfg.formats.includes('html');
-      const { files, htmlFiles, skipped } = await collectEnexFiles(
+      const { files, htmlFiles, skipped, warnings } = await collectEnexFiles(
         inputRoots,
         cfg.stackSeparator,
-        { includeHtml },
+        { includeHtml, notebookMappings: cfg.notebookMappings },
       );
       scanState.skippedInputs = skipped;
+      scanState.issues.push(...warnings);
 
       for (const file of files) {
         const notes: Array<{
@@ -472,6 +474,17 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
         reminder_order: attrs['reminder-order'],
         content_class: attrs['content-class'],
         enml_todo_count: transform.todoCount,
+        // §15.8 地理位置（显式启用时保留；含 place-name）
+        ...(cfg.includeGeolocation && attrs.latitude !== undefined
+          ? {
+              latitude: attrs.latitude,
+              ...(attrs.longitude !== undefined ? { longitude: attrs.longitude } : {}),
+              ...(attrs.altitude !== undefined ? { altitude: attrs.altitude } : {}),
+              ...(attrs['place-name'] !== undefined
+                ? { place_name: attrs['place-name'] }
+                : {}),
+            }
+          : {}),
       };
 
       return {

@@ -128,6 +128,8 @@ describe('createEvernoteSource', () => {
         ctx,
       );
       expect(basic.quality).toBe('full');
+      // §15.8 地理位置：默认关闭不进 sourceMetadata
+      expect((basic.sourceMetadata as Record<string, unknown>).latitude).toBeUndefined();
       expect(basic.degradations).toHaveLength(0);
       expect(basic.tags).toEqual(['阅读', '项目/子项']);
       expect(basic.collections).toEqual(['basic']);
@@ -322,6 +324,58 @@ describe('createEvernoteSource', () => {
       await adapter.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('includeGeolocation 启用时地理位置进 sourceMetadata（§15.8）', async () => {
+    const input = cleanInput();
+    try {
+      const adapter = createEvernoteSource({
+        sourceInstanceId: 'evernote-archive',
+        inputPaths: [input],
+        includeGeolocation: true,
+      });
+      const ctx = { config: {}, workspaceDir: input };
+      const refs = [];
+      for await (const ref of adapter.scan(ctx)) refs.push(ref);
+      const basic = await adapter.extract(refs.find((r) => r.title === '第一条笔记')!, ctx);
+      const sm = basic.sourceMetadata as Record<string, unknown>;
+      expect(sm.latitude).toBe('39.9042000');
+      expect(sm.longitude).toBe('116.4074000');
+      expect(sm.place_name).toBe('北京市东城区');
+      await adapter.close();
+    } finally {
+      rmSync(input, { recursive: true, force: true });
+    }
+  });
+
+  it('notebookMappings 覆盖目录段（§15.5）', async () => {
+    const input = cleanInput();
+    try {
+      const adapter = createEvernoteSource({
+        sourceInstanceId: 'evernote-archive',
+        inputPaths: [input],
+        notebookMappings: {
+          basic: { stack: '映射栈', notebook: '映射笔记本', mergeKey: null },
+        },
+      });
+      const ctx = { config: {}, workspaceDir: input };
+      const refs = [];
+      for await (const ref of adapter.scan(ctx)) refs.push(ref);
+      const meta = (refs.find((r) => r.title === '第一条笔记')!.sourceMetadata as {
+        enex: { notePathSegments: string[] };
+      }).enex;
+      expect(meta.notePathSegments).toEqual([
+        '映射栈',
+        expect.stringMatching(/^映射笔记本-[0-9a-f]{8}$/),
+      ]);
+      // basic 被映射（有 Stack）不再提示无 Stack；Work@@@Projects 本就有 Stack
+      const issues = lastScanIssues(adapter).join('\n');
+      expect(issues).not.toContain('basic.enex：无 Stack');
+      expect(issues).not.toContain('Work@@@Projects.enex：无 Stack');
+      await adapter.close();
+    } finally {
+      rmSync(input, { recursive: true, force: true });
     }
   });
 

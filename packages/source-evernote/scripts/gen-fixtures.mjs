@@ -93,6 +93,10 @@ writeFileSync(
         author: '张三',
         'source-url': 'https://example.com/original',
         source: 'web.clip',
+        latitude: '39.9042000',
+        longitude: '116.4074000',
+        altitude: '43.5',
+        'place-name': '北京市东城区',
       },
       content: enml(
         '<div>正文第一段。</div><h1>小标题</h1><div><a href="https://example.com/link">外部链接</a></div>',
