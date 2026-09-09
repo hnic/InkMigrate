@@ -18,12 +18,13 @@ export interface RpcRequest<P = Record<string, unknown>> {
   params?: P;
 }
 
-export interface RpcResponse<T = unknown> {
-  jsonrpc: '2.0';
-  id: string | number;
-  result?: T;
-  error?: RpcError;
-}
+/**
+ * JSON-RPC 2.0 规定响应只能携带 result 或 error 之一——用可辨识联合在类型层面
+ * 强制该不变量（error?: undefined / result?: undefined 标记保持字段可探测）。
+ */
+export type RpcResponse<T = unknown> =
+  | { jsonrpc: '2.0'; id: string | number; result: T; error?: undefined }
+  | { jsonrpc: '2.0'; id: string | number; result?: undefined; error: RpcError };
 
 export interface RpcError {
   code: number;
@@ -113,15 +114,23 @@ export interface MigrateResumableParams {
 /** 可续跑 Job 的摘要。`job` 为 null 表示没有可续跑的 Job。 */
 export interface MigrateResumableResult {
   job: string | null;
-  status?: string;
+  status?: JobStatus;
   total?: number;
   verified?: number;
   targetInstanceId?: string;
 }
 
+/** 对齐 core 的 JobStatus（packages/core/src/domain/states.ts），单一真相源。 */
+export type JobStatus =
+  | 'created'
+  | 'running'
+  | 'paused'
+  | 'interrupted'
+  | 'completed'
+  | 'failed';
+
 export interface MigrateResult {
-  /** 对齐 core 的 JobStatus：created|running|paused|interrupted|completed|failed */
-  status: 'created' | 'running' | 'paused' | 'interrupted' | 'completed' | 'failed';
+  status: JobStatus;
   scanCount: number;
   reconciliationOk: boolean;
   reconciliationReason?: string;
@@ -144,8 +153,8 @@ export interface CleanupResult {
   unknownCount: number;
   /** §5/§14.12 因登录墙/风控挑战而受控中断的条目数。GUI 据此提示用户重新登录。 */
   loginPauseCount: number;
-  /** §5/§14.12 受控中断原因（'login_required' | 'challenge_required'），无则 undefined。 */
-  pauseReason?: string;
+  /** §5/§14.12 受控中断原因（toutiao cleanup 实际只会发出这两种），无则 undefined。 */
+  pauseReason?: 'login_required' | 'challenge_required';
 }
 
 export interface StatusQueryParams {
@@ -154,8 +163,7 @@ export interface StatusQueryParams {
 }
 
 export interface StatusQueryResult {
-  /** 对齐 core 的 JobStatus */
-  status: 'created' | 'running' | 'paused' | 'interrupted' | 'completed' | 'failed';
+  status: JobStatus;
   currentStage: string;
   scanCount: number;
   verifiedCount: number;
@@ -217,6 +225,15 @@ export interface HealthDegradedNotification {
 }
 
 // ─── 方法映射（类型安全 dispatch 用） ───
+
+/** 通知方法名 → params 映射（方法名以 engine 的 sendNotification 调用点为准）。 */
+export interface RpcNotificationMap {
+  progress: ProgressNotification;
+  log: LogNotification;
+  health_degraded: HealthDegradedNotification;
+}
+
+export type RpcNotificationName = keyof RpcNotificationMap;
 
 export interface RpcMethodMap {
   'auth.login': { params: AuthLoginParams; result: AuthLoginResult };

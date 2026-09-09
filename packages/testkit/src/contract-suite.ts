@@ -5,6 +5,25 @@ import {
   type TargetAdapter,
 } from '@inkmigrate/core';
 
+/** adapterApiVersion / kind / version 声明契约（§24.2），来源与目标套件共用。 */
+function runAdapterDeclarationContract(
+  makeAdapter: () => { adapterApiVersion: string; kind: string; version: string },
+): void {
+  it('declares a valid adapterApiVersion in the supported range', () => {
+    expect(isAdapterApiCompatible(makeAdapter().adapterApiVersion)).toBe(true);
+  });
+
+  it('declares a non-empty stable kind', () => {
+    expect(typeof makeAdapter().kind).toBe('string');
+    expect(makeAdapter().kind.length).toBeGreaterThan(0);
+  });
+
+  it('declares a non-empty impl version', () => {
+    expect(typeof makeAdapter().version).toBe('string');
+    expect(makeAdapter().version.length).toBeGreaterThan(0);
+  });
+}
+
 /**
  * §24.2 来源适配器契约测试套件。
  *
@@ -29,30 +48,20 @@ export function runSourceAdapterContract(
       adapter = makeAdapter();
     });
 
-    it('declares a valid adapterApiVersion in the supported range', () => {
-      expect(isAdapterApiCompatible(adapter.adapterApiVersion)).toBe(true);
-    });
-
-    it('declares a non-empty stable kind', () => {
-      expect(typeof adapter.kind).toBe('string');
-      expect(adapter.kind.length).toBeGreaterThan(0);
-    });
-
-    it('declares a non-empty impl version', () => {
-      expect(typeof adapter.version).toBe('string');
-      expect(adapter.version.length).toBeGreaterThan(0);
-    });
+    runAdapterDeclarationContract(makeAdapter);
 
     it('capabilities object is consistent with §8.2 cleanup invariant', () => {
       const c = adapter.capabilities;
       expect(Array.isArray(c.cleanupActions)).toBe(true);
       expect(Array.isArray(c.supportedInputFormats)).toBe(true);
-      if (c.supportsSourceCleanup === false) {
-        expect(c.cleanupActions).toEqual([]);
-        expect(adapter.cleanup).toBeUndefined();
-      } else {
+      // 与 AdapterRegistry.registerSource 的真值分支语义对齐（undefined 视为不支持）
+      expect(typeof c.supportsSourceCleanup).toBe('boolean');
+      if (c.supportsSourceCleanup === true) {
         expect(adapter.cleanup).toBeDefined();
         expect(c.cleanupActions.length).toBeGreaterThan(0);
+      } else {
+        expect(c.cleanupActions).toEqual([]);
+        expect(adapter.cleanup).toBeUndefined();
       }
     });
 
@@ -63,11 +72,17 @@ export function runSourceAdapterContract(
         config: {},
         workspaceDir: '.',
       });
-      expect(typeof result[Symbol.asyncIterator]).toBe('function');
+      try {
+        expect(typeof result[Symbol.asyncIterator]).toBe('function');
+      } finally {
+        // 关闭未驱动的生成器，释放适配器在返回生成器前可能已获取的资源。
+        void result.return(undefined);
+      }
     });
 
     if (opts.expectCleanupImplemented) {
-      it('cleanup adapter is present when capability declared', () => {
+      it('declares supportsSourceCleanup=true and provides a cleanup adapter', () => {
+        expect(adapter.capabilities.supportsSourceCleanup).toBe(true);
         expect(adapter.cleanup).toBeDefined();
       });
     }
@@ -86,18 +101,15 @@ export function runTargetAdapterContract(
       adapter = makeAdapter();
     });
 
-    it('declares a valid adapterApiVersion in the supported range', () => {
-      expect(isAdapterApiCompatible(adapter.adapterApiVersion)).toBe(true);
-    });
+    runAdapterDeclarationContract(makeAdapter);
 
-    it('declares a non-empty stable kind', () => {
-      expect(typeof adapter.kind).toBe('string');
-      expect(adapter.kind.length).toBeGreaterThan(0);
-    });
-
-    it('declares a non-empty impl version', () => {
-      expect(typeof adapter.version).toBe('string');
-      expect(adapter.version.length).toBeGreaterThan(0);
+    // §8.4 运行时必需方法的存在性：契约套件正是为了抓住 TypeScript 抓不到的
+    // 运行时形状违规（纯 JS 适配器、构建错配）。
+    it('exposes the required §8.4 target methods', () => {
+      expect(typeof adapter.validateConfig).toBe('function');
+      expect(typeof adapter.plan).toBe('function');
+      expect(typeof adapter.write).toBe('function');
+      expect(typeof adapter.verify).toBe('function');
     });
   });
 }

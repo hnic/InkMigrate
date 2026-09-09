@@ -291,13 +291,13 @@ importers:
       '@inkmigrate/core':
         specifier: workspace:*
         version: link:../core
-      vitest:
-        specifier: ^2.1.0
-        version: 2.1.9(@types/node@24.13.2)(jsdom@25.0.1)
     devDependencies:
       typescript:
         specifier: ^5.6.0
         version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@24.13.2)(jsdom@25.0.1)
 
   packages/wiring:
     dependencies:
