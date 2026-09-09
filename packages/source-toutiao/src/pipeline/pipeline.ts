@@ -7,7 +7,11 @@ import { htmlToMarkdownSafe, postCleanMarkdown } from './post-clean.js';
 export interface PipelineOptions {
   /** 用于解析相对 URL 和懒加载资源。 */
   baseUrl: string;
-  /** 测试钩子：模拟 turndown 漏过的 HTML，验证 post-clean。 */
+  /**
+   * 测试钩子：模拟 turndown 漏过的 HTML，验证 post-clean。
+   * 仅在 NODE_ENV=test 下生效——注入内容不经过 stage 5 允许列表清洗，
+   * 生产路径不接受该旁路，调用方不得向其转发任何不可信数据。
+   */
   injectForPostCleanTest?: string;
 }
 
@@ -46,6 +50,14 @@ export interface PipelineOutput {
  * 多个信号（提取器失败、结构异常、内容被大量剥离）综合决定，因为单凭流水线
  * 无法判断"内容是否可疑"——它只能保证"已移除已知危险内容"。
  */
+/** body-missing 降级项：空输入与空产出两处共用，保持 code/stage 口径一致。 */
+function bodyMissing(
+  stage: SourceDegradation['stage'],
+  message: string,
+): SourceDegradation {
+  return { code: 'body-missing', stage, message };
+}
+
 export function runSafetyPipeline(
   html: string,
   options: PipelineOptions,
@@ -58,35 +70,55 @@ export function runSafetyPipeline(
       images: [],
       lazyLoadImages: [],
       quality: 'degraded',
-      degradations: [
-        { code: 'body-missing', stage: 'extract', message: 'empty body after trim' },
-      ],
+      degradations: [bodyMissing('extract', 'empty body after trim')],
     };
   }
 
-  // stage 3
-  const preCleaned = preCleanHtml(trimmed);
-  // stage 5
-  const sanitized = sanitizeHtml(preCleaned);
-  // stage 6
-  const resolved = resolveLazyLoadAndUrls(sanitized, options.baseUrl);
-  // stage 7
-  let markdown = htmlToMarkdownSafe(resolved.html);
-  if (options.injectForPostCleanTest !== undefined) {
-    markdown = markdown + '\n' + options.injectForPostCleanTest;
+  let resolved: ReturnType<typeof resolveLazyLoadAndUrls>;
+  let markdown: string;
+  try {
+    // stage 3
+    const preCleaned = preCleanHtml(trimmed);
+    // stage 5
+    const sanitized = sanitizeHtml(preCleaned);
+    // stage 6
+    resolved = resolveLazyLoadAndUrls(sanitized, options.baseUrl);
+    // stage 7
+    markdown = htmlToMarkdownSafe(resolved.html);
+    if (
+      options.injectForPostCleanTest !== undefined &&
+      process.env.NODE_ENV === 'test'
+    ) {
+      markdown = markdown + '\n' + options.injectForPostCleanTest;
+    }
+    // stage 8
+    markdown = postCleanMarkdown(markdown);
+  } catch (error) {
+    // 降级契约（§12.9 rule 7）：stage 3-8 任一异常（畸形/恶意输入让 jsdom、
+    // DOM 操作或 turndown 抛出）也按降级返回，不让单篇坏文档击穿整个提取流程
+    return {
+      html: '',
+      markdown: '',
+      images: [],
+      lazyLoadImages: [],
+      quality: 'degraded',
+      degradations: [
+        {
+          code: 'unsupported-structure',
+          stage: 'normalize',
+          message: `pipeline stage failed: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
+    };
   }
-  // stage 8
-  markdown = postCleanMarkdown(markdown);
 
   const degradations: SourceDegradation[] = [];
   let quality: SourceItemQuality = 'full';
   if (markdown.trim().length === 0) {
     quality = 'degraded';
-    degradations.push({
-      code: 'body-missing',
-      stage: 'normalize',
-      message: 'pipeline produced empty markdown after sanitize+convert',
-    });
+    degradations.push(
+      bodyMissing('normalize', 'pipeline produced empty markdown after sanitize+convert'),
+    );
   }
 
   return {

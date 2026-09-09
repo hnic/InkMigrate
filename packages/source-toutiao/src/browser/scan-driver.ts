@@ -23,7 +23,12 @@ export interface ScanDriverOptions {
   waitAfterScrollMs?: number;
   /** 页面导航超时毫秒。 */
   navigationTimeoutMs?: number;
-  /** 达到多少唯一条目后立即终止（不再滚动）。用于测试或限量迁移。 */
+  /**
+   * 达到多少唯一条目后立即终止（不再滚动）。用于测试或限量迁移。
+   * 注意：该计数发生在 video 过滤【之前】（scanner 以原始唯一条目计），
+   * 过滤 video 后产出的 refs 可能少于 maxItems；需保证 N 条迁移候选时
+   * 应按 video 占比放大该值。
+   */
   maxItems?: number;
   /** 每轮滚动后的进度回调。 */
   onProgress?: (info: { found: number; scrollRound: number; phase: string }) => void;
@@ -41,7 +46,8 @@ export interface ScanDriverResult {
  * §12.4 + §12.5 浏览器驱动的收藏列表扫描。
  *
  * 流程：
- * 1. 导航到 favoritesUrl，等待 networkidle。
+ * 1. 导航到 favoritesUrl，等待 domcontentloaded（不等待 networkidle；SPA 列表
+ *    异步渲染，未就绪时由空轮循环兜底）。
  * 2. 获取初始 HTML，交给 scanFavoritesList 解析。
  * 3. scrollForMore 回调：滚动到底部 → 等待 → 尝试点击"加载更多" → 返回新 HTML。
  * 4. scanner 负责去重和终止判断。
@@ -54,10 +60,24 @@ export interface ScanDriverResult {
 export async function driveScanFavorites(
   opts: ScanDriverOptions,
 ): Promise<ScanDriverResult> {
-  await opts.page.goto(opts.favoritesUrl, {
-    waitUntil: 'domcontentloaded',
-    timeout: opts.navigationTimeoutMs ?? 30_000,
-  });
+  try {
+    await opts.page.goto(opts.favoritesUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: opts.navigationTimeoutMs ?? 30_000,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`toutiao: favorites page navigation failed (${opts.favoritesUrl}): ${msg}`);
+  }
+  // 会话过期时收藏页会被静默重定向到登录/passport 页，随后扫出 0 条且终止原因
+  // 看似正常（连续空轮），调用方无法区分"没有收藏"和"未登录"。与
+  // adapter.verifySourceRef 同口径：URL 含 login/passport 即快速失败。
+  const afterUrl = opts.page.url().toLowerCase();
+  if (afterUrl.includes('login') || afterUrl.includes('passport')) {
+    throw new Error(
+      `toutiao: favorites page redirected to login page (login required): ${afterUrl}`,
+    );
+  }
 
   /**
    * 增量提取：每轮只返回 DOM 中【新出现】的收藏条目 HTML。
@@ -78,10 +98,11 @@ export async function driveScanFavorites(
         // href 中 query/追踪参数差异被浏览器端误判为"新条目"传回 Node，
         // 再被 Node 端归一化去重丢弃 → 本轮 newInThisRound=0 → 连续多轮
         // 触发 emptyCycles>=5 提前终止（扫描尚未到底）。
-        // 本函数复刻 src/normalize/dedupe-key.ts 的 deriveDedupeKey 口径
-        //（= externalId ?? canonicalUrl）。page.evaluate 在浏览器上下文执行，
-        // 无法闭包引用 Node 端 import，故在此内联；修改时务必同步两处 +
-        // tests/normalize/dedupe-key.test.ts。
+        // 口径 = externalId ?? canonicalUrl，其中 externalId 优先读条目容器的
+        // data-item-id 属性（与 scanner.parseItemsFromHtml 一致），无属性时才
+        // 从 URL 派生（复刻 src/normalize/dedupe-key.ts）。page.evaluate 在浏览器
+        // 上下文执行，无法闭包引用 Node 端 import，故在此内联；修改时务必同步
+        // 两处 + tests/normalize/dedupe-key.test.ts。
         const TRACKING_PARAMS = new Set([
           'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
           'from', 'source', 'log_from', 'wid', 'share_token', 'appshare',
@@ -101,7 +122,12 @@ export async function driveScanFavorites(
         function extractContentId(url: string): string | undefined {
           try {
             const u = new URL(url);
-            if (!u.hostname.endsWith('toutiao.com')) return undefined;
+            // 精确匹配 toutiao.com 或 *.toutiao.com：endsWith('toutiao.com') 会误吞
+            // notoutiao.com 等外部域名，其 /article/<id> 路径会与真实头条内容 id
+            // 在去重 key 上碰撞
+            if (u.hostname !== 'toutiao.com' && !u.hostname.endsWith('.toutiao.com')) {
+              return undefined;
+            }
             // §9 移动端分享短链接 /is/<digits>/（与 extractToutiaoContentId 保持同口径）
             const sl = /\/is\/(\d+)(?:\/|$)/.exec(u.pathname);
             if (sl) return sl[1];
@@ -141,14 +167,19 @@ export async function driveScanFavorites(
             'a[href*="/article/"], a[href*="/a/"], a[href*="/video/"], a[href*="/wenda/"], a[href*="/group/"], a[href*="/w/"]',
           );
           const href = link?.getAttribute('href');
-          let key: string | undefined;
-          if (href !== null && href !== undefined) {
-            key = dedupeKey(href);
-          } else {
-            const textKey = el.textContent?.trim().substring(0, 100) ?? '';
-            if (textKey) key = textKey;
+          if (href === null || href === undefined) {
+            // 无内容链接的条目（骨架/占位等）不发送：Node 端会把它解析成
+            // canonicalUrl=收藏页本身的垃圾条目；此前用文本兜底 key 也不稳定
+            //（时间戳变化/前缀碰撞会永久污染 seen）。等后续轮次 hydration
+            // 出现真实链接后，再按 URL 派生 key 正常发送。
+            continue;
           }
-          if (key !== undefined && !known.has(key)) {
+          // 与 Node 端 scanner 同口径（key = externalId ?? canonicalUrl）：
+          // 优先 data-item-id（scanner 的 externalId 直读该属性），其次 URL 派生
+          // id/canonicalUrl。两侧口径不同会导致同一元素被重复发送或提前终止。
+          const attrId = el.getAttribute('data-item-id');
+          const key = attrId !== null && attrId !== '' ? attrId : dedupeKey(href);
+          if (!known.has(key)) {
             newEls.push(el);
             newKeys.push(key);
           }
@@ -171,7 +202,14 @@ export async function driveScanFavorites(
     return result.html;
   };
 
-  const initialHtml = await extractItemsHtml();
+  let initialHtml: string;
+  try {
+    initialHtml = await extractItemsHtml();
+  } catch {
+    // 首轮提取失败（页面仍在跳转/执行上下文销毁）：以空 HTML 起步，
+    // 由后续滚动轮次与空轮循环兜底，不让整个扫描在起步时即失败
+    initialHtml = '';
+  }
   const waitMs = opts.waitAfterScrollMs ?? 1500;
   let scrollRound = 0;
 
@@ -182,32 +220,47 @@ export async function driveScanFavorites(
       opts.onProgress({ found: nodeSeen.size, scrollRound, phase: 'scrolling' });
     }
 
-    // §12.5 滚动到底部
-    await opts.page.evaluate(() => {
-      window.scrollTo(0, document.body.scrollHeight);
-    });
-    await opts.page.waitForTimeout(waitMs);
+    /** 提取本轮新条目并通知进度。失败向上抛，由调用方决定重试或终止。 */
+    const extractAfterScroll = async (): Promise<string> => {
+      const html = await extractItemsHtml();
+      if (opts.onProgress !== undefined) {
+        opts.onProgress({ found: nodeSeen.size, scrollRound, phase: 'loaded' });
+      }
+      return html;
+    };
 
-    // §12.5 尝试点击"加载更多"按钮（如果可见）
-    const loadMoreSelectors = FAVORITES_SELECTORS.loadMore;
-    for (const sel of loadMoreSelectors) {
-      const locator = opts.page.locator(sel).first();
-      const visible = await locator.isVisible().catch(() => false);
-      if (visible) {
-        await locator.click({ timeout: 2000 }).catch(() => {});
-        await opts.page.waitForTimeout(waitMs);
-        break;
+    try {
+      // §12.5 滚动到底部
+      await opts.page.evaluate(() => {
+        window.scrollTo(0, document.body.scrollHeight);
+      });
+      await opts.page.waitForTimeout(waitMs);
+
+      // §12.5 尝试点击"加载更多"按钮（如果可见）
+      const loadMoreSelectors = FAVORITES_SELECTORS.loadMore;
+      for (const sel of loadMoreSelectors) {
+        const locator = opts.page.locator(sel).first();
+        const visible = await locator.isVisible().catch(() => false);
+        if (visible) {
+          await locator.click({ timeout: 2000 }).catch(() => {});
+          await opts.page.waitForTimeout(waitMs);
+          break;
+        }
+      }
+
+      return await extractAfterScroll();
+    } catch {
+      // 点击可能触发导航销毁执行上下文（"Execution context was destroyed"），
+      // 滚动/提取调用也会因页面跳转或关闭而抛错。等新文档就绪后重试一次提取；
+      // 仍失败则按"无更多"终止，保留已累计条目——不能让第 N 轮的瞬时失败
+      // 把前 N-1 轮的扫描结果整批丢弃。
+      await opts.page.waitForLoadState('domcontentloaded').catch(() => {});
+      try {
+        return await extractAfterScroll();
+      } catch {
+        return null;
       }
     }
-
-    const html = await extractItemsHtml();
-
-    // 进度通知：本轮滚动完成
-    if (opts.onProgress !== undefined) {
-      opts.onProgress({ found: nodeSeen.size, scrollRound, phase: 'loaded' });
-    }
-
-    return html;
   };
 
   const scanInput: Parameters<typeof scanFavoritesList>[0] = {
@@ -238,7 +291,9 @@ export async function driveScanFavorites(
 
 /**
  * 从 FavoriteItem 构造 SourceItemRef。与 adapters/adapter.ts 中的 buildRefFromFavorite
- * 逻辑相同，内联在此处以避免循环依赖。
+ * 逻辑相同，内联在此处以避免循环依赖（adapter.ts 导入本模块）。
+ * 这是手工同步的两份实现：fingerprint 输入或 SourceItemRef 字段变动时，
+ * 改动任一份务必同步核对另一份，否则两侧会静默漂移产出不一致的 ref。
  */
 function buildRefInline(
   sourceInstanceId: string,

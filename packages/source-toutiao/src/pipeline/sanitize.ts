@@ -12,10 +12,21 @@ import createDompurify from 'dompurify';
  */
 
 // jsdom window 用于初始化 dompurify（隔离于 Playwright 的页面 window）。
-// §12.9 stage 1：所有 jsdom 实例必须显式禁用脚本执行。
-// `as never` 绕过 @types/dompurify 与 jsdom Window 之间的结构差异（运行时兼容）。
-const dom = new JSDOM('', { runScripts: 'outside-only', resources: undefined });
-const DOMPurify = createDompurify(dom.window as never);
+// §12.9 stage 1：不设置 runScripts（jsdom 默认）即完全禁用脚本执行。
+// 注意 'outside-only' 并不等于禁用——它仍会在 window 上安装 eval 等执行器，
+// 而本模块的单例 window 流过全部不可信文章 HTML，必须彻底关闭该入口。
+const dom = new JSDOM('');
+// 窄化 cast：dompurify 自带类型（WindowLike）与 jsdom DOMWindow 结构不一致，
+// 经 unknown 中转仅屏蔽这一处差异，两侧其余类型检查仍然生效（拒绝 as never
+// 这类全面静默的写法）。
+const DOMPurify = createDompurify(
+  dom.window as unknown as Parameters<typeof createDompurify>[0],
+);
+if (!DOMPurify.isSupported) {
+  // isSupported=false 时 sanitize 等于原样放行脏输入，是本阶段最危险的失败
+  // 模式，必须启动即失败而非静默继续。
+  throw new Error('DOMPurify 不支持当前 jsdom window，拒绝执行 sanitize（§12.9 stage 5）');
+}
 
 const ALLOWED_TAGS = [
   'p', 'br', 'hr', 'span', 'div',
@@ -29,6 +40,9 @@ const ALLOWED_TAGS = [
   'dl', 'dt', 'dd',
 ];
 
+/** §12.9 stage 6 在 stage 5 之后解析的懒加载属性。 */
+const LAZY_LOAD_ATTRS = ['data-src', 'data-original', 'data-lazy-src'] as const;
+
 const ALLOWED_ATTR = [
   'href',
   'src',
@@ -38,11 +52,7 @@ const ALLOWED_ATTR = [
   'rowspan',
   'lang',
   'dir',
-  // §12.9 stage 6 在 stage 5 之后；懒加载属性必须存活到 stage 6 解析。
-  // 这些是内容属性，非危险属性，允许通过 stage 5。
-  'data-src',
-  'data-original',
-  'data-lazy-src',
+  ...LAZY_LOAD_ATTRS,
   'srcset',
 ];
 
@@ -60,6 +70,32 @@ const ALLOWED_ATTR = [
  */
 const SAFE_URI =
   /^(?:(?:https?|ftp|mailto|tel):|[/?#]|[^/?#:]+(?:[/?#]|$))/i;
+
+// dompurify 的 ALLOWED_URI_REGEXP 按属性【整值】匹配，对两类属性会漏：
+// 1. srcset 是逗号分隔的候选列表——首候选满足白名单时，后续候选（如
+//    `javascript:alert(1) 2x`）可原样存活到 stage 6 输出（stage 6 只提升首候选、
+//    从不移除该属性）。这里逐候选校验，任一不合法即整个移除。
+// 2. data-* 懒加载属性"必须存活到 stage 6"的契约此前隐式依赖 dompurify 内部
+//    对 ALLOWED_ATTR 中 data-* 值的 URI 校验顺序，升级可能悄悄改变行为；此处
+//    显式执行同一白名单，契约由本模块自己保证。
+DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+  if (!(node instanceof dom.window.Element)) return;
+  const srcset = node.getAttribute('srcset');
+  if (
+    srcset !== null &&
+    !srcset.split(',').every((candidate) =>
+      SAFE_URI.test(candidate.trim().split(/\s+/)[0] ?? ''),
+    )
+  ) {
+    node.removeAttribute('srcset');
+  }
+  for (const attr of LAZY_LOAD_ATTRS) {
+    const v = node.getAttribute(attr);
+    if (v !== null && !SAFE_URI.test(v)) {
+      node.removeAttribute(attr);
+    }
+  }
+});
 
 export function sanitizeHtml(html: string): string {
   return DOMPurify.sanitize(html, {

@@ -43,22 +43,33 @@ import type { BrowserContext, Page } from 'playwright';
  */
 export class ToutiaoBrowserSession {
   private context: BrowserContext | undefined;
+  /** 在飞的 launch 任务；用于并发 launch 去重与 close 期间的串行化。 */
+  private launchPromise: Promise<void> | undefined;
 
   constructor(private readonly config: BrowserSessionConfig) {}
 
   async launch(): Promise<void> {
     if (this.context !== undefined) return;
-    const launchOptions: Parameters<typeof chromium.launchPersistentContext>[1] = {
-      headless: this.config.headless ?? false,
-      locale: this.config.locale ?? 'zh-CN',
-      timezoneId: this.config.timezoneId ?? 'Asia/Shanghai',
-    };
-    const viewport = this.config.viewport ?? { width: 1440, height: 1000 };
-    launchOptions.viewport = viewport;
-    this.context = await chromium.launchPersistentContext(
-      this.config.profileDir,
-      launchOptions,
-    );
+    // 复用在飞的 launch：guard 无法覆盖 await 窗口，并发调用会各起一个浏览器，
+    // 第二次赋值覆盖 this.context 后第一个 Chromium 进程就再无句柄可关。
+    this.launchPromise ??= (async () => {
+      const launchOptions: Parameters<typeof chromium.launchPersistentContext>[1] = {
+        headless: this.config.headless ?? false,
+        locale: this.config.locale ?? 'zh-CN',
+        timezoneId: this.config.timezoneId ?? 'Asia/Shanghai',
+      };
+      const viewport = this.config.viewport ?? { width: 1440, height: 1000 };
+      launchOptions.viewport = viewport;
+      this.context = await chromium.launchPersistentContext(
+        this.config.profileDir,
+        launchOptions,
+      );
+    })().catch((err: unknown) => {
+      // 失败后清除，允许后续 launch() 重试
+      this.launchPromise = undefined;
+      throw err;
+    });
+    await this.launchPromise;
   }
 
   async newPage(): Promise<Page> {
@@ -69,6 +80,14 @@ export class ToutiaoBrowserSession {
   }
 
   async close(): Promise<void> {
+    // launch 在飞时先等它落定再关闭：否则 close() 看到 context === undefined 直接
+    // 返回，随后 launch 完成会把一个全新 context 赋给已经"关闭"的会话（泄漏浏览器）
+    if (this.launchPromise !== undefined) {
+      await this.launchPromise.catch(() => {
+        /* launch 失败则无 context 可关 */
+      });
+      this.launchPromise = undefined;
+    }
     const ctx = this.context;
     this.context = undefined;
     if (ctx !== undefined) {
@@ -78,18 +97,26 @@ export class ToutiaoBrowserSession {
       //让 RPC 尽快释放；浏览器进程由 Playwright/系统最终回收。
       const CLOSE_TIMEOUT_MS = 15_000;
       let timedOut = false;
+      let timerId: ReturnType<typeof setTimeout> | undefined;
       const timer = new Promise<void>((resolve) => {
-        setTimeout(() => {
+        timerId = setTimeout(() => {
           timedOut = true;
           resolve();
         }, CLOSE_TIMEOUT_MS);
       });
-      await Promise.race([
-        ctx.close({ reason: 'browser-session close timeout' }),
-        timer,
-      ]).catch(() => {
-        /* close 失败不阻塞：会话即将被丢弃 */
-      });
+      try {
+        await Promise.race([
+          ctx.close({ reason: 'browser-session close timeout' }),
+          timer,
+        ]).catch((err: unknown) => {
+          // close 失败不阻塞（会话即将被丢弃），但记录日志便于排查
+          //（如 Windows 上 profile 锁残留、磁盘错误导致的静默浏览器泄漏）
+          console.warn('[toutiao-browser-session] context close failed:', err);
+        });
+      } finally {
+        // close 先完成也要清掉定时器：残留 timer 会把 Node 事件循环拖住最多 15s
+        clearTimeout(timerId);
+      }
       // R16: 超时后 ctx.close() 仍在后台挂起，浏览器进程可能泄漏。
       // Playwright 公开 API 不暴露 browser PID，无法直接 process.kill。
       // 兜底：遍历并强制关闭所有残留 page，触发浏览器释放大部分资源（渲染进程）。
@@ -97,7 +124,9 @@ export class ToutiaoBrowserSession {
       if (timedOut) {
         try {
           const pages = ctx.pages();
-          await Promise.allSettled(pages.map((p) => p.close({ runBeforeUnload: false })));
+          // 不 await：page.close() 走同一条（可能已卡死的）连接，await 会让 close()
+          // 远超 CLOSE_TIMEOUT_MS 上限；会话即将被丢弃，触发后不再等待
+          void Promise.allSettled(pages.map((p) => p.close({ runBeforeUnload: false })));
         } catch {
           /* ctx 已关闭或不可用，忽略 */
         }

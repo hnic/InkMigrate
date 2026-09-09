@@ -542,7 +542,7 @@ export async function runCleanupUnfavorite(
   const finalStatus = terminated ? 'interrupted' : 'completed';
   new CleanupJobs(db).updateStatus(jobId, { status: finalStatus, finishedAt, updatedAt: finishedAt });
 
-  // §14.15 生成清理报告（summary.json/md + success/failed/unknown/skipped.csv）。
+  // §14.15 生成清理报告（summary.json/md + success/failed/unknown/skipped/paused.csv）。
   // 写到 reports/cleanup-<jobId>/ 下，与迁移侧的 reports/<migJobId>/ 对称。
   // 即使任务被中断（terminated）也写报告，如实反映部分结果。
   generateCleanupReport({

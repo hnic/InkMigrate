@@ -8,6 +8,12 @@ import {
 } from '@inkmigrate/core';
 import { extractDetail } from '../extract/detail-extractor.js';
 import { downloadImage } from '../assets/image-downloader.js';
+import { ToutiaoSourceConfigSchema } from '../config.js';
+
+/** 默认单图上限：单源取自 ToutiaoSourceConfigSchema.maxImageBytes 的 zod default。 */
+const DEFAULT_MAX_IMAGE_BYTES = ToutiaoSourceConfigSchema.shape.maxImageBytes.parse(
+  undefined,
+);
 
 export interface ExtractDriverOptions {
   page: Page;
@@ -22,7 +28,8 @@ export interface ExtractDriverOptions {
  * §12.8 浏览器驱动的详情页提取。
  *
  * 流程：
- * 1. 导航到 ref.canonicalUrl，等待 networkidle。
+ * 1. 导航到 ref.canonicalUrl（waitUntil: 'domcontentloaded'，不等待 networkidle），
+ *    随后 best-effort 等待正文容器出现（超时降级继续）。
  * 2. 获取页面 HTML，交给 extractDetail（结构化数据 + readability + 安全流水线）。
  * 3. 对 detail.images 中的每张图片尝试 downloadImage（best-effort）。
  *    - 下载成功：asset 带 sha256/byteSize/mimeType。
@@ -45,23 +52,35 @@ export async function driveExtractDetail(
       waitUntil: 'domcontentloaded',
       timeout: opts.navigationTimeoutMs ?? 60_000,
     });
-    // 等正文容器出现（不等所有网络请求完成）
-    await opts.page.waitForSelector('article, .article-content, .post-content, body', {
+    // 等正文容器出现（不等所有网络请求完成）；超时则降级继续。
+    // 不把 body 放进 selector：body 在 domcontentloaded 后必然存在，
+    // 会让等待立即返回、形同虚设
+    await opts.page.waitForSelector('article, .article-content, .post-content', {
       timeout: 10_000,
     }).catch(() => {});
   } catch (e) {
-    // 包装 Playwright 导航错误，附带 retryable 标志
-    // 让 job-runner catch 块能正确分类为永久失败（不卡在同一条上反复超时）
+    // 包装 Playwright 导航错误，附带 retryable 标志：
+    // - 瞬时网络类错误（DNS 解析失败、连接被重置、net::ERR_TIMED_OUT 等）标记
+    //   retryable=true，交给 withRetry 的有界重试（§18.1，最多 3 次）恢复偶发
+    //   网络抖动，避免条目被静默永久丢弃；
+    // - 其余（导航超时、ERR_ABORTED 等）保持 retryable=false——实测超时页重试
+    //   大概率继续超时，会卡住批次（这正是引入该标记的原因），由 job-runner
+    //   归为永久失败，resume 时跳过
     const msg = e instanceof Error ? e.message : String(e);
+    const TRANSIENT_NAV_ERROR =
+      /ERR_NAME_NOT_RESOLVED|ERR_NETWORK|ERR_CONNECTION|ERR_TIMED_OUT|ERR_SOCKET|ECONNRESET|EAI_AGAIN|socket hang up/;
+    const isTransient = TRANSIENT_NAV_ERROR.test(msg);
     const wrapped = new Error(`navigation failed for ${url}: ${msg}`) as Error & {
-      retryable: false;
+      retryable: boolean;
       code: string;
       itemDisposition: string;
     };
-    wrapped.retryable = false;
+    wrapped.retryable = isTransient;
     wrapped.code = msg.includes('Timeout') || msg.includes('timeout')
       ? 'NAVIGATION_TIMEOUT'
-      : 'NAVIGATION_FAILED';
+      : isTransient
+        ? 'NAVIGATION_TRANSIENT_NETWORK'
+        : 'NAVIGATION_FAILED';
     wrapped.itemDisposition = 'permanent_failed';
     throw wrapped;
   }
@@ -73,10 +92,14 @@ export async function driveExtractDetail(
     originalUrl: opts.ref.originalUrl ?? url,
   });
 
+  // 先做廉价的同步契约校验（违反会 throw），再进入昂贵的图片下载，
+  // 避免校验失败时已白白下载全部图片
+  validateSourceItemQuality(detail.quality, detail.degradations);
+
   // §12.10 best-effort 图片下载
-  // 默认上限与 ToutiaoSourceConfigSchema.maxImageBytes 一致（50MB），避免两份默认值漂移
-  //（此前此处硬编码 150MB，config 的 50MB 形同虚设——因 adapter 仅在显式传值时透传）。
-  const maxBytes = opts.maxImageBytes ?? 50 * 1024 * 1024;
+  // 单图上限默认值单源取自 ToutiaoSourceConfigSchema.maxImageBytes（zod default），
+  // 不再手写字面量，避免与 config 默认值漂移（adapter 仅在显式配置时透传）。
+  const maxBytes = opts.maxImageBytes ?? DEFAULT_MAX_IMAGE_BYTES;
   // 有界并发下载：图集页常有数十张图，串行下载耗时数倍。并发度限制为 3，
   // 平衡吞吐与内存（每张图字节短暂驻留 asset.data，并发过高易 OOM）。
   const IMAGE_DOWNLOAD_CONCURRENCY = 3;
@@ -101,7 +124,6 @@ export async function driveExtractDetail(
 
   const quality = detail.quality;
   const degradations = detail.degradations;
-  validateSourceItemQuality(quality, degradations);
 
   const item: SourceItem = {
     ref: opts.ref,

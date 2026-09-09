@@ -2,8 +2,9 @@
 /**
  * 调试脚本：打开一篇已收藏文章的详情页，查找"取消收藏"按钮的 DOM 结构。
  *
- * 用法：
- *   node packages/source-toutiao/scripts/debug-unfavorite-dom.ts \
+ * 用法（.ts 需经 tsx 运行，node 无法直接执行 TypeScript/顶层 await）：
+ *   pnpm --filter @inkmigrate/source-toutiao exec tsx \
+ *     scripts/debug-unfavorite-dom.ts \
  *     --state-dir <path> --source toutiao-main \
  *     --url "https://www.toutiao.com/article/7654740435696402944/"
  */
@@ -38,11 +39,32 @@ const browser = await chromium.launchPersistentContext(profileDir, {
   viewport: { width: 1440, height: 1000 },
 });
 
+// Ctrl+C 时关闭浏览器再退出，否则持久化上下文的 Chromium 进程会被孤儿化、
+// profile 目录被 SingletonLock 锁住，导致后续用同一 profile 的运行失败。
+process.on('SIGINT', () => {
+  console.log('\n正在关闭浏览器...');
+  void browser.close().catch(() => {});
+  process.exit(0);
+});
+
 const page = browser.pages()[0] ?? (await browser.newPage());
 
-console.log(`导航到文章详情页: ${url}`);
-await page.goto(url, { waitUntil: 'networkidle', timeout: 45_000 });
-await page.waitForTimeout(5000);
+try {
+  console.log(`导航到文章详情页: ${url}`);
+  // 头条详情页有长连接轮询，networkidle 常年不触发；改用 domcontentloaded +
+  // 等操作栏渲染 + 少量缓冲。
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+  await page
+    .waitForSelector('[class*="action"], [class*="footer"], [class*="toolbar"]', {
+      timeout: 30_000,
+    })
+    .catch(() => {});
+  await page.waitForTimeout(1000);
+} catch (err) {
+  console.error(`导航失败: ${url}`, err);
+  await browser.close().catch(() => {});
+  process.exit(1);
+}
 
 console.log('\n========== 查找收藏/取消收藏按钮 ==========\n');
 console.log('URL:', page.url());
@@ -57,7 +79,7 @@ const analysis = await page.evaluate(() => {
   for (const pattern of patterns) {
     const els = Array.from(document.querySelectorAll('button, a, span, div, i')).filter((el) => {
       const text = el.textContent?.trim();
-      return text === pattern || text === pattern + ' ' || (el.children.length === 0 && text?.includes(pattern));
+      return text === pattern || (el.children.length === 0 && text?.includes(pattern));
     });
     for (const el of els.slice(0, 5)) {
       results.push({

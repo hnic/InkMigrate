@@ -2,4 +2,10 @@ export { ToutiaoBrowserSession, type BrowserSessionConfig } from './browser-sess
 export { driveScanFavorites, type ScanDriverOptions, type ScanDriverResult } from './scan-driver.js';
 export { driveExtractDetail, type ExtractDriverOptions } from './extract-driver.js';
 export { runLoginFlow, type LoginFlowOptions, type LoginFlowResult } from './login-flow.js';
-export { driveUnfavorite, type UnfavoriteDriverOptions, type UnfavoriteDriverResult } from './unfavorite-driver.js';
+export {
+  driveUnfavorite,
+  inspectCollectedState,
+  waitForCollectedAttribute,
+  type UnfavoriteDriverOptions,
+  type UnfavoriteDriverResult,
+} from './unfavorite-driver.js';

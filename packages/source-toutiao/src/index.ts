@@ -56,4 +56,7 @@ export {
   runLoginFlow,
   type LoginFlowOptions,
   type LoginFlowResult,
+  driveUnfavorite,
+  type UnfavoriteDriverOptions,
+  type UnfavoriteDriverResult,
 } from './browser/index.js';

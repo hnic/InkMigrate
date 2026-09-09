@@ -5,6 +5,7 @@ import {
   type SourceContentKind,
   type SourceItemRef,
 } from '@inkmigrate/core';
+import type { Page } from 'playwright';
 import { TOUTIAO_CAPABILITIES } from '../capabilities.js';
 import { deriveFingerprintInput } from '../normalize/fingerprint.js';
 import { ToutiaoBrowserSession } from '../browser/browser-session.js';
@@ -20,6 +21,46 @@ export const SOURCE_TOUTIAO_ADAPTER_API_VERSION = '1.0.0' as const;
 /** 默认收藏列表 URL。真实 URL 由配置或 CLI 提供。 */
 const DEFAULT_FAVORITES_URL = 'https://www.toutiao.com/favorites';
 const DEFAULT_BASE_URL = 'https://www.toutiao.com/';
+
+/** inspect/verify 读取详情页的默认导航超时（未配置 navigationTimeoutMs 时）。 */
+const DEFAULT_NAVIGATION_TIMEOUT_MS = 30_000;
+
+/**
+ * 打开详情页并读取收藏按钮状态（cleanup 的 inspect/verify 共用，避免两路径
+ * 各自维护一份 goto→waitFor→判定的序列而漂移）。返回：
+ * - null：无法判定（无 canonicalUrl / 导航失败 / 按钮未渲染）；
+ * - true：已收藏；false：未收藏。
+ */
+async function openDetailAndReadCollected(
+  page: Page,
+  ref: SourceItemRef,
+  navigationTimeoutMs: number,
+): Promise<boolean | null> {
+  const url = ref.canonicalUrl;
+  if (url === undefined) return null;
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: navigationTimeoutMs });
+  } catch {
+    // 瞬时导航失败（超时/网络错误）降级为"无法判定"，不向清理管线抛异常
+    return null;
+  }
+  const collectBtn = page
+    .locator(UNFAVORITE_SELECTORS.collectButton.join(', '))
+    .first();
+  try {
+    // 等待渲染：domcontentloaded 时 SPA 详情页可能尚未渲染按钮（瞬时
+    // count()=0 → 误判 unknown，是生产"未知"大量产生的根因）
+    await collectBtn.waitFor({ state: 'attached', timeout: 10_000 });
+    // M-3: 与 execute 路径（driveUnfavorite）一致，等待 SPA hydration 写入
+    // aria-pressed 属性，避免仅 attached 时 readCollectedState 回退到
+    // 真实页面不存在的 collected class → 误判未收藏。
+    await waitForCollectedAttribute(collectBtn, 10_000);
+  } catch {
+    // 超时则保留 not found → 无法判定
+    return null;
+  }
+  return inspectCollectedState(collectBtn);
+}
 
 /**
  * 浏览器适配器配置。传入 createToutiaoSource 时启用真实浏览器模式；
@@ -87,6 +128,22 @@ export function createToutiaoSource(
     }
   }
 
+  /**
+   * 所有共享 session 的页面操作统一走 recycle 锁（M11 完整版：仅串行化
+   * extract-vs-extract 不够，scan/cleanup 的在飞 page 同样会被跨阈值 recycle 的
+   * close()/launch() 杀掉，close→launch 窗口内的 newPage() 还会抛 'not launched'）。
+   */
+  async function withSessionPage<T>(fn: (page: Page) => Promise<T>): Promise<T> {
+    return withRecycleLock(async () => {
+      const page = await session!.newPage();
+      try {
+        return await fn(page);
+      } finally {
+        await page.close();
+      }
+    });
+  }
+
   return {
     kind: SOURCE_TOUTIAO_KIND,
     version: SOURCE_TOUTIAO_VERSION,
@@ -100,73 +157,45 @@ export function createToutiaoSource(
       // collected class、execute 用 aria-pressed 的不一致已消除。
       inspectActionState: async (ref) => {
         if (session === undefined) return { state: 'unknown' as const };
-        const page = await session.newPage();
-        try {
-          const url = ref.canonicalUrl;
-          if (url === undefined) return { state: 'unknown' as const };
-          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-          const collectBtn = page
-            .locator(UNFAVORITE_SELECTORS.collectButton.join(', '))
-            .first();
-          // 等待渲染：domcontentloaded 时 SPA 详情页可能尚未渲染按钮（旧逻辑瞬时
-          // count()=0 → 误判 unknown，是生产"未知"大量产生的根因）
-          try {
-            await collectBtn.waitFor({ state: 'attached', timeout: 10_000 });
-            // M-3: 与 execute 路径（driveUnfavorite）一致，等待 SPA hydration 写入
-            // aria-pressed 属性，避免仅 attached 时 readCollectedState 回退到
-            // 真实页面不存在的 collected class → 误判未收藏。
-            await waitForCollectedAttribute(collectBtn, 10_000);
-          } catch {
-            // 超时则保留 not found → unknown 语义
-          }
-          const collected = await inspectCollectedState(collectBtn);
-          if (collected === null) return { state: 'unknown' as const };
-          return { state: collected ? 'favorited' as const : 'not-favorited' as const };
-        } finally {
-          await page.close();
-        }
+        const collected = await withSessionPage((page) =>
+          openDetailAndReadCollected(
+            page,
+            ref,
+            browserConfig?.navigationTimeoutMs ?? DEFAULT_NAVIGATION_TIMEOUT_MS,
+          ),
+        );
+        if (collected === null) return { state: 'unknown' as const };
+        return { state: collected ? 'favorited' as const : 'not-favorited' as const };
       },
-      executeAction: async (ref, _action) => {
+      executeAction: async (ref, action) => {
+        // 破坏性操作前校验动作类型：编排方传错 action 时不能照样取消收藏
+        if (action !== 'unfavorite') {
+          return { success: false, reason: `unsupported action: ${String(action)}` };
+        }
         if (session === undefined || browserConfig === undefined) {
           return { success: false, reason: 'requires real browser session' };
         }
-        const page = await session.newPage();
-        try {
+        return withSessionPage(async (page) => {
           // driveUnfavorite 一次导航内完成：等待渲染 → 读状态 → 点击 → 轮询复核。
           // 编排器据此 receipt 区分 成功/跳过(wasCollected=false)/未知(not found)/失败(still collected)。
           const unfavOpts: Parameters<typeof driveUnfavorite>[0] = { page, ref };
           if (browserConfig.navigationTimeoutMs !== undefined) {
             unfavOpts.navigationTimeoutMs = browserConfig.navigationTimeoutMs;
           }
-          const result = await driveUnfavorite(unfavOpts);
-          return result;
-        } finally {
-          await page.close();
-        }
+          return driveUnfavorite(unfavOpts);
+        });
       },
       verifyAction: async (ref) => {
         if (session === undefined) return { verified: false };
-        const page = await session.newPage();
-        try {
-          const url = ref.canonicalUrl;
-          if (url === undefined) return { verified: false };
-          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-          const collectBtn = page
-            .locator(UNFAVORITE_SELECTORS.collectButton.join(', '))
-            .first();
-          try {
-            await collectBtn.waitFor({ state: 'attached', timeout: 10_000 });
-            // M-3: 与 execute/inspect 一致，等待 SPA hydration 写入 aria-pressed
-            await waitForCollectedAttribute(collectBtn, 10_000);
-          } catch {
-            return { verified: false };
-          }
-          // 弃用过时的 collected class，改用与 execute 一致的判定
-          const collected = await inspectCollectedState(collectBtn);
-          return { verified: collected === false };
-        } finally {
-          await page.close();
-        }
+        const collected = await withSessionPage((page) =>
+          openDetailAndReadCollected(
+            page,
+            ref,
+            browserConfig?.navigationTimeoutMs ?? DEFAULT_NAVIGATION_TIMEOUT_MS,
+          ),
+        );
+        // 弃用过时的 collected class，改用与 execute 一致的判定
+        return { verified: collected === false };
       },
     },
     validateConfig: async () => ({ ok: true }),
@@ -178,32 +207,38 @@ export function createToutiaoSource(
     scan: async function* (_ctx) {
       if (session === undefined || browserConfig === undefined) return;
       void _ctx;
-      const page = await session.newPage();
-      try {
-        const scanOpts: Parameters<typeof driveScanFavorites>[0] = {
-          page,
-          favoritesUrl: browserConfig.favoritesUrl ?? DEFAULT_FAVORITES_URL,
-          baseUrl: DEFAULT_BASE_URL,
-          sourceInstanceId: browserConfig.sourceInstanceId,
-        };
-        if (browserConfig.scanMaxEmptyCycles !== undefined) {
-          scanOpts.maxEmptyCycles = browserConfig.scanMaxEmptyCycles;
+      // 与 extract 一致走 recycle 锁：扫描的在飞 page 不被并发 recycle 的
+      // close/launch 杀掉。driveScanFavorites 本就先滚完列表再一次性返回 refs，
+      // 故锁内收集、锁外逐条 yield，行为不变。
+      const refs = await withRecycleLock(async () => {
+        const page = await session!.newPage();
+        try {
+          const scanOpts: Parameters<typeof driveScanFavorites>[0] = {
+            page,
+            favoritesUrl: browserConfig!.favoritesUrl ?? DEFAULT_FAVORITES_URL,
+            baseUrl: DEFAULT_BASE_URL,
+            sourceInstanceId: browserConfig!.sourceInstanceId,
+          };
+          if (browserConfig!.scanMaxEmptyCycles !== undefined) {
+            scanOpts.maxEmptyCycles = browserConfig!.scanMaxEmptyCycles;
+          }
+          if (browserConfig!.scanWaitAfterScrollMs !== undefined) {
+            scanOpts.waitAfterScrollMs = browserConfig!.scanWaitAfterScrollMs;
+          }
+          if (browserConfig!.navigationTimeoutMs !== undefined) {
+            scanOpts.navigationTimeoutMs = browserConfig!.navigationTimeoutMs;
+          }
+          if (browserConfig!.maxScanItems !== undefined) {
+            scanOpts.maxItems = browserConfig!.maxScanItems;
+          }
+          const { refs } = await driveScanFavorites(scanOpts);
+          return refs;
+        } finally {
+          await page.close();
         }
-        if (browserConfig.scanWaitAfterScrollMs !== undefined) {
-          scanOpts.waitAfterScrollMs = browserConfig.scanWaitAfterScrollMs;
-        }
-        if (browserConfig.navigationTimeoutMs !== undefined) {
-          scanOpts.navigationTimeoutMs = browserConfig.navigationTimeoutMs;
-        }
-        if (browserConfig.maxScanItems !== undefined) {
-          scanOpts.maxItems = browserConfig.maxScanItems;
-        }
-        const { refs } = await driveScanFavorites(scanOpts);
-        for (const ref of refs) {
-          yield ref;
-        }
-      } finally {
-        await page.close();
+      });
+      for (const ref of refs) {
+        yield ref;
       }
     },
     extract: async (ref, ctx) => {
@@ -220,6 +255,11 @@ export function createToutiaoSource(
       // M11: 包入 withRecycleLock 串行化，避免并发 extract 时 recycle 的 close/launch
       // 杀掉其他在飞 page（共享 context）。
       return withRecycleLock(async () => {
+        // 兜底：recycle 中 launch 失败会丢失 context，而 launch() 只在 prepare()
+        // 调一次；此处懒恢复让下一次 extract 自愈，而非永久失败 'not launched'。
+        if (!session!.launched) {
+          await session!.launch();
+        }
         // 定期重启浏览器上下文释放内存（防止 Playwright 累积 OOM）
         extractCount++;
         if (extractCount > RECYCLE_THRESHOLD) {
@@ -251,35 +291,45 @@ export function createToutiaoSource(
       if (url === undefined) {
         return { resolvable: false, availability: 'unknown' as const };
       }
-      const page = await session.newPage();
-      try {
-        const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-        const status = resp?.status() ?? 0;
-        if (status === 404 || status === 410) {
-          return { resolvable: false, availability: 'deleted' as const };
+      return withSessionPage(async (page) => {
+        try {
+          const resp = await page.goto(url, {
+            waitUntil: 'domcontentloaded',
+            timeout: browserConfig!.navigationTimeoutMs ?? DEFAULT_NAVIGATION_TIMEOUT_MS,
+          });
+          const status = resp?.status() ?? 0;
+          if (status === 404 || status === 410) {
+            return { resolvable: false, availability: 'deleted' as const };
+          }
+          // 403/429/5xx 或无响应（status 0）：页面并未真正加载，
+          // 不能只因未命中登录/删除标记就谎报 available
+          if (status === 0 || status >= 400) {
+            return { resolvable: false, availability: 'unknown' as const };
+          }
+          // 检查是否被重定向到登录页
+          const currentUrl = page.url().toLowerCase();
+          if (currentUrl.includes('login') || currentUrl.includes('passport')) {
+            return { resolvable: false, availability: 'login_required' as const };
+          }
+          // 检查删除标记（L8: 用全部选择器 join，而非仅 [0]，与 unfavorite-driver 一致）
+          const hasDeletedMarker = await page
+            .locator(SPECIAL_PAGE_SELECTORS.contentDeleted.join(', '))
+            .count()
+            .catch(() => 0);
+          if (hasDeletedMarker > 0) {
+            return { resolvable: false, availability: 'deleted' as const };
+          }
+          return { resolvable: true, availability: 'available' as const };
+        } catch {
+          return { resolvable: false, availability: 'unknown' as const };
         }
-        // 检查是否被重定向到登录页
-        const currentUrl = page.url().toLowerCase();
-        if (currentUrl.includes('login') || currentUrl.includes('passport')) {
-          return { resolvable: false, availability: 'login_required' as const };
-        }
-        // 检查删除标记（L8: 用全部选择器 join，而非仅 [0]，与 unfavorite-driver 一致）
-        const hasDeletedMarker = await page
-          .locator(SPECIAL_PAGE_SELECTORS.contentDeleted.join(', '))
-          .count()
-          .catch(() => 0);
-        if (hasDeletedMarker > 0) {
-          return { resolvable: false, availability: 'deleted' as const };
-        }
-        return { resolvable: true, availability: 'available' as const };
-      } catch {
-        return { resolvable: false, availability: 'unknown' as const };
-      } finally {
-        await page.close();
-      }
+      });
     },
     close: async () => {
       if (session !== undefined) {
+        // 先等在飞操作（extract/scan/cleanup）完成再关 session，
+        // 避免 close 杀掉仍在执行的 page
+        await recycleChain;
         await session.close();
       }
     },

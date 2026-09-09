@@ -12,6 +12,14 @@ const AUTH_URL_PATTERNS = ['login', 'passport', 'sso', 'account'];
 /** §12.2 无 favoritesUrl 时用首页检测登录态。 */
 const TOUTIAO_HOME = 'https://www.toutiao.com/';
 
+/** 单轮 header DOM 检测结果（runLoginFlow 轮询内 page.evaluate 的返回形状）。 */
+interface LoginHeaderCheck {
+  hasAvatar: boolean;
+  hasName: boolean;
+  hasLoginButton: boolean;
+  headerRendered: boolean;
+}
+
 export interface LoginFlowOptions {
   session: ToutiaoBrowserSession;
   /** 收藏列表 URL。未传时导航到首页。 */
@@ -68,10 +76,6 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginFlowRes
 
     // auth.login 的目的是让用户手动登录，不做首轮自动检测。
     // 等待用户在浏览器中完成登录，轮询检测登录态。
-    let signals: Partial<LoginSignals> = {};
-    let state: LoginState = 'auth-state-unknown';
-
-    // 等待用户手动登录
     const timeoutMs = opts.loginTimeoutMs ?? 300_000;
     const pollMs = opts.pollIntervalMs ?? 2000;
     const deadline = Date.now() + timeoutMs;
@@ -86,43 +90,73 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginFlowRes
     let isFirstRound = true;
     // 记录首轮是否见到登录按钮——用于判断"按钮消失"是登录成功还是页面根本没渲染
     let firstRoundHadLoginButton: boolean | null = null;
+
+    /** 单轮 DOM 检测：header 是否渲染 + 头像/用户名/登录按钮是否存在。 */
+    const evaluateLoginCheck = (): Promise<LoginHeaderCheck> =>
+      page
+        .evaluate(() => {
+          // 未登录时 header 是 <a class="login-button">；登录后头像在 .user-icon > a > img
+          const hasLoginButton = document.querySelector('.login-button') !== null;
+          const profile = document.querySelector(
+            '.ttp-header-profile img, .header-profile-wrapper img, .user-icon img',
+          );
+          const hasAvatar = profile !== null;
+          // 头条改版后用户名不在 .name 元素里，而在头像链接的 aria-label 属性
+          const userIcon = document.querySelector(
+            '.ttp-header-profile .user-icon, .header-profile-wrapper .user-icon',
+          );
+          const nameFromLabel = userIcon?.querySelector('a')?.getAttribute('aria-label')?.trim();
+          const hasName = (nameFromLabel?.length ?? 0) > 0;
+          // header 区是否已渲染（避免对空白页误判）
+          const headerRendered =
+            document.querySelector('.ttp-header-profile, .ttp-site-header, header') !== null;
+          return { hasAvatar, hasName, hasLoginButton, headerRendered };
+        })
+        .catch(() => ({
+          hasAvatar: false,
+          hasName: false,
+          hasLoginButton: true,
+          headerRendered: false,
+        }));
+
+    /**
+     * 命中判定（两个独立条件，任一满足）：
+     *   A. 正向：头像 + 用户名都存在（aria-label 命中）
+     *   B. 负向：首轮见过登录按钮、之后消失（真·登录态翻转）
+     * 两个条件都要求 headerRendered：SPA 局部重渲染导致 header 短暂卸载时，
+     * .login-button 查询不到，不能据此判定"按钮消失 = 已登录"。
+     */
+    const isLoginConfirmed = (check: LoginHeaderCheck): boolean => {
+      if (!check.headerRendered) return false;
+      const positive = check.hasAvatar && check.hasName;
+      const loginButtonGone =
+        firstRoundHadLoginButton === true && !check.hasLoginButton;
+      return positive || loginButtonGone;
+    };
+
+    /**
+     * 成功出口：收集信号并用 detectLoginState 交叉校验（与超时出口同一标准）。
+     * DOM 判定与 URL/遮罩信号矛盾（如 URL 仍停在登录页、登录遮罩仍在）时降级为
+     * auth-state-unknown，不直接宣布 logged-in。
+     */
+    const finishLoggedIn = async (): Promise<LoginFlowResult> => {
+      const signals = await collectLoginSignals(page, targetUrl);
+      const state: LoginState =
+        detectLoginState(signals) === 'not-logged-in' ? 'auth-state-unknown' : 'logged-in';
+      // 登录成功后从页面提取收藏页 URL
+      const favUrl = await extractFavoritesUrl(page);
+      return { state, signals, ...(favUrl !== undefined ? { favoritesUrl: favUrl } : {}) };
+    };
+
     while (Date.now() < deadline) {
-      const loginCheck = await page.evaluate(() => {
-        // 未登录时 header 是 <a class="login-button">；登录后头像在 .user-icon > a > img
-        const hasLoginButton = document.querySelector('.login-button') !== null;
-        const profile = document.querySelector(
-          '.ttp-header-profile img, .header-profile-wrapper img, .user-icon img',
-        );
-        const hasAvatar = profile !== null;
-        // 头条改版后用户名不在 .name 元素里，而在头像链接的 aria-label 属性
-        const userIcon = document.querySelector(
-          '.ttp-header-profile .user-icon, .header-profile-wrapper .user-icon',
-        );
-        const nameFromLabel = userIcon?.querySelector('a')?.getAttribute('aria-label')?.trim();
-        const hasName = (nameFromLabel?.length ?? 0) > 0;
-        // header 区是否已渲染（避免对空白页误判）
-        const headerRendered =
-          document.querySelector('.ttp-header-profile, .ttp-site-header, header') !== null;
-        return { hasAvatar, hasName, hasLoginButton, headerRendered };
-      }).catch(() => ({ hasAvatar: false, hasName: false, hasLoginButton: true, headerRendered: false }));
+      const loginCheck = await evaluateLoginCheck();
 
       if (firstRoundHadLoginButton === null && loginCheck.headerRendered) {
         firstRoundHadLoginButton = loginCheck.hasLoginButton;
       }
 
-      // 登录判定（两个独立条件，任一满足）：
-      //   A. 正向：头像 + 用户名都存在（aria-label 命中）
-      //   B. 负向：首轮见过登录按钮、之后消失（真·登录态翻转）
-      // 注意 B 必须确认首轮有按钮，否则空白页/未渲染页会被误判登录
-      const positive = loginCheck.hasAvatar && loginCheck.hasName;
-      const loginButtonGone =
-        firstRoundHadLoginButton === true && !loginCheck.hasLoginButton;
-      if (positive || loginButtonGone) {
-        signals = await collectLoginSignals(page, targetUrl);
-        state = 'logged-in';
-        // 登录成功后从页面提取收藏页 URL
-        const favUrl = await extractFavoritesUrl(page);
-        return { state, signals, ...(favUrl !== undefined ? { favoritesUrl: favUrl } : {}) };
+      if (isLoginConfirmed(loginCheck)) {
+        return await finishLoggedIn();
       }
 
       // 首轮不等 pollMs（已登录时 waitForSelector 后立即检测），后续轮询等待
@@ -130,6 +164,14 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginFlowRes
         await new Promise((resolve) => setTimeout(resolve, pollMs));
       }
       isFirstRound = false;
+    }
+
+    // 超时前最后做一次 DOM 检测：用户在 deadline 附近完成登录时，最后一轮轮询
+    // 可能刚好错过，直接走 detectLoginState 会因 URL 尚未跳转等瞬时负向信号
+    // 误判为 not-logged-in——等价于"再多跑一轮"的判定。
+    const finalCheck = await evaluateLoginCheck();
+    if (isLoginConfirmed(finalCheck)) {
+      return await finishLoggedIn();
     }
 
     // 超时：返回最终状态
@@ -199,13 +241,24 @@ async function collectLoginSignals(
     // URL 解析失败，不设置该信号
   }
 
-  // cookieExists: 检查常见认证 Cookie（仅辅助信号）
-  const cookies = await page.context().cookies();
-  const hasSessionCookie = cookies.some(
-    (c) => c.name.includes('session') || c.name.includes('token') || c.name.includes('sid'),
-  );
-  if (hasSessionCookie) {
-    signals.cookieExists = true;
+  // cookieExists: 检查头条会话 Cookie（仅辅助信号）。
+  // cookies() 可能抛错（如用户手动关闭浏览器导致 context 销毁）——cookie 只是
+  // 辅助信号，失败时跳过即可，不能让用户已完成的手动登录以异常收场。
+  try {
+    const cookies = await page.context().cookies();
+    // 精确匹配头条会话 Cookie 名：includes('token') 之类子串匹配会命中 msToken
+    // 等 SDK 给每个访客都种的 cookie，使该信号沦为无信息量的噪声
+    const SESSION_COOKIE_NAMES = new Set([
+      'sessionid',
+      'sessionid_ss',
+      'sid_guard',
+      'sid_tt',
+    ]);
+    if (cookies.some((c) => SESSION_COOKIE_NAMES.has(c.name))) {
+      signals.cookieExists = true;
+    }
+  } catch {
+    // 忽略：cookie 仅为辅助信号
   }
 
   return signals;
@@ -214,11 +267,12 @@ async function collectLoginSignals(
 /**
  * 从头条页面提取收藏页 URL。
  * 用户下拉菜单中有「我的收藏」链接，href 含 tab=fav。
- * 链接可能需要等待页面完全渲染后才出现，最多等待 5 秒。
+ * 链接可能需要等待页面完全渲染后才出现：首轮 hover 最多约 2.3s，
+ * 随后 6 轮 × 300ms 轮询，总预算约 4 秒。
  */
 async function extractFavoritesUrl(page: Page): Promise<string | undefined> {
   try {
-    // 轮询等待收藏链接出现（最多 3 秒）
+    // 轮询等待收藏链接出现（6 轮 × 300ms，含首轮 hover 总预算约 4 秒）
     for (let attempt = 0; attempt < 6; attempt++) {
       const href = await page.evaluate(() => {
         const links = Array.from(document.querySelectorAll('a[href]'));
@@ -231,9 +285,11 @@ async function extractFavoritesUrl(page: Page): Promise<string | undefined> {
       });
 
       if (href !== null) {
-        // 相对路径转绝对路径
-        if (href.startsWith('http')) return href;
-        return `https://www.toutiao.com${href}`;
+        // 相对路径转绝对路径：交给 URL 解析处理无前导斜杠（'u/123?tab=fav'）、
+        // 协议相对（'//host/…'）等形态，裸拼接会产生 'https://www.toutiao.comu/…'
+        // 之类的畸形 URL
+        if (href.startsWith('http://') || href.startsWith('https://')) return href;
+        return new URL(href, TOUTIAO_HOME).href;
       }
 
       // 还没找到，hover 用户头像区域展开下拉菜单（收藏链接在 .user-list 下拉里）

@@ -36,12 +36,9 @@ export function resolveLazyLoadAndUrls(
   html: string,
   baseUrl: string,
 ): LazyLoadResult {
-  const dom = new JSDOM(html, {
-    url: baseUrl,
-    // §12.9 stage 1：所有 jsdom 实例必须显式禁用脚本执行。
-    runScripts: 'outside-only',
-    resources: undefined,
-  });
+  // §12.9 stage 1：不设置 runScripts（jsdom 默认）即完全禁用脚本执行；
+  // 'outside-only' 仍会在 window 上安装 eval，处理不可信 HTML 时不应保留。
+  const dom = new JSDOM(html, { url: baseUrl });
   const doc = dom.window.document;
   const images: string[] = [];
   const lazyLoadImages: string[] = [];

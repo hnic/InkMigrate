@@ -34,12 +34,10 @@ export interface DetailResult {
  * 性能优化：只解析一次 JSDOM，detectSpecialPage/extractAuthor/extractTime 复用。
  */
 export function extractDetail(i: DetailInput): DetailResult {
-  // 解析一次 JSDOM，后续复用 document 对象
-  const dom = new JSDOM(i.html, {
-    url: i.canonicalUrl,
-    runScripts: 'outside-only',
-    resources: undefined,
-  });
+  // 解析一次 JSDOM，后续复用 document 对象。
+  // §12.9 stage 1：不设置 runScripts（jsdom 默认）即完全禁用脚本执行；
+  // 'outside-only' 仍会在 window 上安装 eval，解析不可信页面 HTML 时不应保留。
+  const dom = new JSDOM(i.html, { url: i.canonicalUrl });
   const doc = dom.window.document;
 
   // 先检测特殊情况：删除/登录/验证码

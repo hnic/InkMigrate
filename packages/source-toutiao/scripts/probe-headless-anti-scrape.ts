@@ -14,7 +14,8 @@
  *   - 有头：67KB 完整 SPA（24 个 script）；
  *   - headless Chromium + headless 系统 Chrome：均 39 字节空 HTML 骨架（0 script）。
  *   已排除 cookie 与 Chromium 指纹两个混淆变量。头条首页在 headless 下可正常访问，
- *   拦截只发生在收藏这类高价值端点。反爬判定信号用"原始 HTML 字节数"（39B vs >10KB），
+ *   拦截只发生在收藏这类高价值端点。反爬判定信号用"序列化 DOM 长度"
+ *   （outerHTML 字符数，非 HTTP 响应字节数；39B vs >10KB 两个数量级足以区分），
  *   不依赖具体收藏条目数（条目数受登录态强弱影响）。
  *
  * 用法：
@@ -36,12 +37,23 @@ import { driveScanFavorites } from '../src/browser/scan-driver.js';
 const args = process.argv.slice(2);
 const parsed: Record<string, string> = {};
 for (let i = 0; i < args.length; i++) {
-  if (args[i]?.startsWith('--')) parsed[args[i]!.slice(2)] = args[++i] ?? '';
+  const flag = args[i];
+  if (flag === undefined || !flag.startsWith('--')) continue;
+  const value = args[i + 1];
+  if (value === undefined || value.startsWith('--')) {
+    console.error(`参数 ${flag} 缺少取值`);
+    process.exit(1);
+  }
+  parsed[flag.slice(2)] = value;
+  i++;
 }
 const stateDir = parsed['state-dir'];
 const source = parsed['source'] ?? 'toutiao-main';
 const url = parsed['url'];
-const configFilter = parsed['config']?.split(',').map((s) => s.trim());
+const configFilter = parsed['config']
+  ?.split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
 if (!stateDir || !url) {
   console.error('用法: --state-dir <path> --source <id> --url <收藏页URL>');
   process.exit(1);
@@ -117,8 +129,10 @@ async function runOne(cfg: ProbeConfig): Promise<ProbeResult> {
     const finalUrl = page.url();
     const title = await page.title().catch(() => '(无标题)');
 
-    // 关键诊断：原始 HTML 字节数 + script 数，区分"空骨架被拦"vs"正常 SPA"
-    // （扫到 0 可能是反爬空壳，也可能是登录后真空；html 字节数最可靠）
+    // 关键诊断：序列化 DOM 长度 + script 数，区分"空骨架被拦"vs"正常 SPA"。
+    // 注意这是解析/hydration 后的 documentElement.outerHTML 字符数（非 HTTP 响应
+    // 字节数），但足以区分 39B 空骨架与 >10KB 完整 SPA 两个数量级。
+    // （扫到 0 可能是反爬空壳，也可能是登录后真空；该指标最可靠）
     const diag = await page
       .evaluate(() => ({
         rawHtmlLen: document.documentElement?.outerHTML.length ?? 0,
@@ -131,6 +145,7 @@ async function runOne(cfg: ProbeConfig): Promise<ProbeResult> {
       itemCount: refs.length,
       finalUrl,
       title,
+      loggedOut: /passport|login/i.test(finalUrl),
       terminatedBy: scanResult.terminationReason,
       rawHtmlLen: diag.rawHtmlLen,
       scriptCount: diag.scriptCount,
@@ -142,6 +157,7 @@ async function runOne(cfg: ProbeConfig): Promise<ProbeResult> {
       itemCount: 0,
       finalUrl: '(异常)',
       title: '',
+      loggedOut: false,
       terminatedBy: 'error',
       rawHtmlLen: 0,
       scriptCount: 0,
@@ -149,7 +165,15 @@ async function runOne(cfg: ProbeConfig): Promise<ProbeResult> {
       durationMs: Date.now() - start,
     };
   } finally {
-    if (context !== undefined) await context.close().catch(() => {});
+    if (context !== undefined) {
+      await context.close().catch((e) => {
+        // 三组配置共用同一 profile，close 失败意味着锁未释放，会连累下一组
+        // launch 失败（并被误读为"被拦"），必须显式暴露。
+        console.error(
+          `⚠️ [${cfg.label}] context.close 失败：${e instanceof Error ? e.message : String(e)}（profile 可能仍被锁定，将影响后续配置）`,
+        );
+      });
+    }
   }
 }
 
@@ -160,8 +184,14 @@ for (const cfg of configs) {
   results.push(r);
   console.log(
     `扫到 ${r.itemCount} 条 | HTML ${r.rawHtmlLen}B/script${r.scriptCount} | ${r.durationMs}ms` +
+      ` | ${r.finalUrl} | ${r.title}` +
+      (r.loggedOut ? ' | 🚪被踢到登录页' : '') +
       (r.error ? ` | ❌${r.error.slice(0, 80)}` : ''),
   );
+}
+// 任一组异常退出码置 1，避免 CI 把崩溃的探针当成有效实验
+if (results.some((r) => r.error !== undefined)) {
+  process.exitCode = 1;
 }
 
 console.log('\n========== 对照结果 ==========\n');
@@ -185,14 +215,18 @@ for (const r of results) {
 console.log();
 
 // 决定性判读：用 rawHtmlLen 区分"空骨架被拦(<200B)"vs"正常 SPA(>10KB)"
+// 39B 空骨架 vs >10KB 完整 SPA 的分界阈值（三处判读共用，勿各自硬编码）
+const EMPTY_SKELETON_MAX_BYTES = 200;
 const baseline = results.find((r) => r.label === '有头(基线)');
 const headless = results.find((r) => r.label === 'headless(现状)');
 const chromeHeadless = results.find((r) => r.label === 'headless+chrome');
 
 console.log('========== 判读 ==========');
 if (baseline && headless) {
-  const baselineBlocked = baseline.rawHtmlLen < 200;
-  const headlessBlocked = headless.rawHtmlLen < 200;
+  // 异常退出（profile 锁/浏览器缺失等）的 rawHtmlLen=0 不算"被拦"，否则崩溃会被
+  // 误读成"✅ 反爬成立"的结论。
+  const baselineBlocked = baseline.error === undefined && baseline.rawHtmlLen < EMPTY_SKELETON_MAX_BYTES;
+  const headlessBlocked = headless.error === undefined && headless.rawHtmlLen < EMPTY_SKELETON_MAX_BYTES;
   if (baselineBlocked && headlessBlocked) {
     console.log('⚠️ 有头和 headless 都拿到空骨架 → 登录态未生效，本轮无法判定反爬（需先解决登录态）。');
   } else if (!baselineBlocked && headlessBlocked) {
@@ -207,7 +241,9 @@ if (baseline && headless) {
   }
 }
 if (chromeHeadless) {
-  const blocked = chromeHeadless.rawHtmlLen < 200;
+  const blocked =
+    chromeHeadless.error === undefined &&
+    chromeHeadless.rawHtmlLen < EMPTY_SKELETON_MAX_BYTES;
   console.log(
     blocked
       ? '❌ headless + 系统 Chrome 仍被拦(' + chromeHeadless.rawHtmlLen + 'B)。'
