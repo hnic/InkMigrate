@@ -435,3 +435,48 @@ describe('collectEnexFiles 的 Stack 目录约定（evernote-backup 导出）', 
     }
   });
 });
+
+describe('游标续读多块回归（真实 70MB 文件暴露的 bug：单块 fixture 测不出）', () => {
+  it('多块文件的顺序游标提取与全量一致（首个 note 关闭后仍能续读后续笔记）', async () => {
+    // 构造 >64KB×若干 的多笔记文件：每条笔记正文填充 ~100KB
+    const d = tmp();
+    try {
+      const filler = 'x'.repeat(100 * 1024);
+      const parts: string[] = [];
+      for (let i = 1; i <= 6; i++) {
+        parts.push(`  <note>\n    <title>多块笔记${String(i).padStart(2, '0')}</title>\n    <content><![CDATA[<en-note><div>${filler}</div></en-note>]]></content>\n    <created>2024010${i}T000000Z</created>\n  </note>`);
+      }
+      const enex =
+        `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE en-export SYSTEM "http://xml.evernote.com/pub/evernote-export3.dtd">\n<en-export>\n${parts.join('\n')}\n</en-export>\n`;
+      const p = join(d, 'multichunk.enex');
+      writeFileSync(p, enex, 'utf8');
+      expect(enex.length).toBeGreaterThan(600 * 1024); // 确实是多块
+
+      const all: RawNote[] = [];
+      await streamNotes(p, { onNote: (n) => all.push(n) });
+      expect(all).toHaveLength(6);
+
+      let cursor = { ordinal: 0, offset: 0 };
+      for (let target = 1; target <= 6; target++) {
+        let got: RawNote | null = null;
+        const out = await streamNotes(p, {
+          startOffset: cursor.offset,
+          ordinalBase: cursor.ordinal,
+          stopAfterOrdinal: target,
+          onNote: (n) => { if (n.ordinal === target) got = n; },
+        });
+        if (out.cursor && out.cursor.ordinal >= cursor.ordinal && out.cursor.offset >= cursor.offset) {
+          cursor = out.cursor;
+        }
+        expect(got, `第 ${target} 条`).not.toBeNull();
+        expect((got as RawNote).title).toBe(all[target - 1]!.title);
+        expect((got as RawNote).content?.length).toBe(all[target - 1]!.content?.length);
+      }
+      // 游标确实在笔记间推进（不是停在 0）
+      expect(cursor.ordinal).toBeGreaterThan(0);
+      expect(cursor.offset).toBeGreaterThan(0);
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+});

@@ -83,7 +83,7 @@ export interface StreamNotesOptions {
   onIssue?: (message: string) => void;
 }
 
-/** 顺序提取游标：某文件已完整解析到的（换行对齐）字节边界与笔记数。 */
+/** 顺序提取游标：某文件的安全续读字节边界（恰在某个 `</note>` 之后）与已解析笔记数。 */
 export interface StreamCursor {
   ordinal: number;
   offset: number;
@@ -109,9 +109,10 @@ export interface StreamOutcome {
   /** SAX/IO 错误；已产出的笔记仍然有效（§15.3 损坏隔离）。 */
   error?: Error;
   /**
-   * 游标（安全续读边界）：已完整解析到的换行对齐字节偏移与累计笔记数。
-   * stopAfterOrdinal 提前停止时停留在包含目标笔记的块之前的边界——
-   * 下一次顺序提取从这里续读，代价仅为多解析一个块内的少量笔记。
+   * 游标（安全续读边界）：恰在最后一个已喂字节中最后一个 `</note>` 之后。
+   * 在原始字节层搜索（ASCII，不怕多字节切分）；`</note>` 跨块时该块不推进
+   * （下一块的重叠窗口会补上）。stopAfterOrdinal 提前停止时停留在包含目标
+   * 笔记的块之前的边界——下一次顺序提取从这里续读，代价仅为重解析一个块。
    */
   cursor?: StreamCursor;
 }
@@ -343,32 +344,34 @@ export function streamNotes(path: string, opts: StreamNotesOptions): Promise<Str
       if (settled) done();
     });
 
-    // ── 手动泵送（换行对齐字节计数，§15.3 大文件游标续读）──
-    // 只把累积缓冲喂到最后一个换行：换行是 ASCII，不会切断多字节 UTF-8 序列，
-    // 因此块边界可作为下次 startOffset 的安全续读点。
+    // ── 手动泵送（字节级 `</note>` 边界游标，§15.3 大文件顺序提取）──
+    // 每块直接喂给解析器（StringDecoder 处理多字节切分）；写完后在
+    // 「上一块残留+本块」原始字节里找最后一个 `</note>`，若其后（跳过空白）
+    // 是 `<`（下一标签）则视为可信边界，推进游标 {ordinal(已含本块 close), 偏移}。
+    // CDATA 内伪 `</note>`（后随普通文本）不满足信任条件，不推进——安全保守。
+    // stopAfterOrdinal 在写入中途 settle 时不推进（游标停留在更早的边界）。
+    const NOTE_CLOSE = Buffer.from('</note>');
     const decoder = new StringDecoder('utf8');
-    let tail = Buffer.alloc(0);
+    let residual = Buffer.alloc(0); // 上一块尾部 ≤7 字节（跨块 </note> 检测窗口）
     let fedBytes = 0; // 自 startOffset 起已喂给解析器的字节数
-    // 游标仅在整块喂完且未提前停止时推进（含目标笔记的块不计入，
-    // 保证下次顺序提取不会跳过未解析笔记）
     let cursor: StreamCursor = { ordinal: ordinalBase, offset: startOffset };
     let paused = false;
     let finished = false;
     outcome.cursor = cursor;
 
+    /** 候选 `</note>` 之后（跳过空白）是否为下一标签 `<`；窗口耗尽视为不可信。 */
+    const trustedBoundary = (win: Buffer, from: number): boolean => {
+      for (let i = from; i < win.length; i++) {
+        const b = win[i]!;
+        if (b === 0x20 || b === 0x09 || b === 0x0a || b === 0x0d) continue;
+        return b === 0x3c; // '<'
+      }
+      return false; // 窗口内无后续字节：留给下一块验证
+    };
+
     const finish = (): void => {
       if (finished) return;
       finished = true;
-      if (tail.length > 0) {
-        const text = decoder.write(tail) + decoder.end();
-        fedBytes += tail.length;
-        tail = Buffer.alloc(0);
-        if (text.length > 0) saxStream.write(text);
-        if (!settled) {
-          cursor = { ordinal, offset: startOffset + fedBytes };
-          outcome.cursor = cursor;
-        }
-      }
       saxStream.end();
     };
     inputStream.on('end', finish);
@@ -388,16 +391,16 @@ export function streamNotes(path: string, opts: StreamNotesOptions): Promise<Str
       while (!paused && !settled && !finished) {
         const chunk = inputStream.read();
         if (chunk === null) return; // 等待下一个 readable/end 事件
-        const buffer = tail.length === 0 ? (chunk as Buffer) : Buffer.concat([tail, chunk as Buffer]);
-        const lastNl = buffer.lastIndexOf(0x0a);
-        if (lastNl < 0) {
-          tail = Buffer.from(buffer);
-          continue;
-        }
-        const feed = buffer.subarray(0, lastNl + 1);
-        tail = Buffer.from(buffer.subarray(lastNl + 1));
-        const text = decoder.write(feed);
-        fedBytes += feed.length;
+        const buf = chunk as Buffer;
+        const chunkStart = startOffset + fedBytes; // 本块在文件中的绝对起点
+        const window = residual.length === 0 ? buf : Buffer.concat([residual, buf]);
+        const windowStart = chunkStart - residual.length;
+        residual =
+          buf.length >= NOTE_CLOSE.length
+            ? Buffer.from(buf.subarray(buf.length - NOTE_CLOSE.length))
+            : Buffer.from(buf);
+        const text = decoder.write(buf);
+        fedBytes += buf.length;
         if (text.length > 0) {
           const ok = saxStream.write(text);
           if (!ok) {
@@ -409,13 +412,23 @@ export function streamNotes(path: string, opts: StreamNotesOptions): Promise<Str
             return;
           }
         }
+        // 写入完成后推进游标（ordinal 已包含本块内全部 note close）
         if (!settled) {
-          cursor = { ordinal, offset: startOffset + fedBytes };
-          outcome.cursor = cursor;
+          const idx = window.lastIndexOf(NOTE_CLOSE);
+          if (idx >= 0 && trustedBoundary(window, idx + NOTE_CLOSE.length)) {
+            cursor = { ordinal, offset: windowStart + idx + NOTE_CLOSE.length };
+            outcome.cursor = cursor;
+          }
         }
       }
     };
     inputStream.on('readable', pump);
+    if (resuming) {
+      // 续读从中段开始：注入合成根元素，避免首个 <note> 被 sax 当作文档根、
+      // 其关闭后整份文档被视为结束而吞掉后续输入（真实 70MB 文件复现确认）。
+      // 合成标签不计入 fedBytes（游标偏移只对应真实文件字节）。
+      saxStream.write('<en-export>');
+    }
     pump();
   });
 }
