@@ -7,8 +7,6 @@ Uses web scraping (no API key required) or WebFetch tool integration.
 
 import json
 import csv
-import re
-import sys
 from pathlib import Path
 
 # Project root relative to this script
@@ -103,8 +101,9 @@ def load_brand_colors():
             'accent': accent_color or '#10B981',
             'background': background,
         }
-    except (FileNotFoundError, KeyError, TypeError):
-        # Fallback defaults
+    except (FileNotFoundError, ValueError, KeyError, TypeError, AttributeError):
+        # Fallback defaults (ValueError includes json.JSONDecodeError for
+        # malformed JSON; AttributeError covers malformed node shapes)
         return {
             'primary': '#3B82F6',
             'secondary': '#F59E0B',
@@ -213,25 +212,16 @@ def get_background_image(slide_type: str) -> dict:
         keywords = slide_config.get('search_keywords', slide_config.get('image_category', slide_type))
         overlay_style = slide_config.get('overlay_style', 'gradient-dark')
 
-    # Get curated images
+    # Get curated images (get_curated_images always returns a non-empty
+    # list: unknown types fall back to the 'hero' entries)
     urls = get_curated_images(slide_type)
-    if urls:
-        return {
-            'url': urls[0],
-            'all_urls': urls,
-            'overlay': get_overlay_css(overlay_style, brand_colors),
-            'attribution': 'Photo from Pexels (free to use)',
-            'source': 'pexels-curated',
-            'search_url': get_pexels_search_url(keywords),
-        }
-
-    # Fallback: provide search URL for manual selection
     return {
-        'url': None,
+        'url': urls[0],
+        'all_urls': urls,
         'overlay': get_overlay_css(overlay_style, brand_colors),
-        'keywords': keywords,
+        'attribution': 'Photo from Pexels (free to use)',
+        'source': 'pexels-curated',
         'search_url': get_pexels_search_url(keywords),
-        'available_types': list(CURATED_IMAGES.keys()),
     }
 
 

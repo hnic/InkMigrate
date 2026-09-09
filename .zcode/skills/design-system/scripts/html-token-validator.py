@@ -13,14 +13,12 @@ Usage:
 """
 
 import re
-import json
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List
 
 # Project root relative to this script
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.parent
-TOKENS_JSON_PATH = PROJECT_ROOT / 'assets' / 'design-tokens.json'
 TOKENS_CSS_PATH = PROJECT_ROOT / 'assets' / 'design-tokens.css'
 
 # Asset directories to validate
@@ -35,8 +33,9 @@ FORBIDDEN_PATTERNS = [
     (r'rgb\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)', 'rgb color'),
     (r'rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*[\d.]+\s*\)', 'rgba color'),
     (r'hsl\([^)]+\)', 'hsl color'),
-    (r"font-family:\s*'[^v][^a][^r][^']*',", 'hardcoded font'),  # Exclude var()
-    (r'font-family:\s*"[^v][^a][^r][^"]*",', 'hardcoded font'),
+    (r"font-family:\s*'(?!var\()[^']+'\s*[;,]", 'hardcoded font'),  # Exclude var()
+    (r'font-family:\s*"(?!var\()[^"]+"\s*[;,]', 'hardcoded font'),
+    (r'font-family:\s*(?!var\()[A-Za-z][\w-]*\s*[,;]', 'hardcoded font (unquoted)'),
 ]
 
 # Allowed rgba patterns (brand colors with transparency - CSS limitation)
@@ -94,22 +93,20 @@ def is_inside_block(content: str, match_pos: int, open_tag: str, close_tag: str)
     return tag_open > tag_close
 
 
-def is_allowed_exception(context: str) -> bool:
-    """Check if the hardcoded value is in an allowed exception context."""
-    context_lower = context.lower()
-    return any(exc in context_lower for exc in ALLOWED_EXCEPTIONS)
+def is_allowed_exception(content: str, match_pos: int) -> bool:
+    """Skip only when the match itself sits inside an external URL value
+    (inside url(...) or a src/href attribute), not merely near one."""
+    prefix = content[max(0, match_pos - 300):match_pos]
+    opener = re.search(r'(url\(|(?:src|href)\s*=\s*["\'])[^"\')]*$', prefix)
+    if not opener:
+        return False
+    value = (opener.group(0) + content[match_pos:match_pos + 200]).lower()
+    return any(exc in value for exc in ALLOWED_EXCEPTIONS)
 
 
 def is_allowed_rgba(match_text: str) -> bool:
     """Check if rgba pattern uses brand colors (allowed for transparency)."""
     return any(re.match(pattern, match_text) for pattern in ALLOWED_RGBA_PATTERNS)
-
-
-def get_context(content: str, pos: int, chars: int = 100) -> str:
-    """Get surrounding context for a match position."""
-    start = max(0, pos - chars)
-    end = min(len(content), pos + chars)
-    return content[start:end]
 
 
 def validate_html(content: str, file_path: Path, verbose: bool = False) -> ValidationResult:
@@ -133,7 +130,6 @@ def validate_html(content: str, file_path: Path, verbose: bool = False) -> Valid
         for match in re.finditer(pattern, content):
             match_text = match.group()
             match_pos = match.start()
-            context = get_context(content, match_pos)
 
             # Skip if in <script> block (Chart.js allowed)
             if is_inside_block(content, match_pos, '<script', '</script>'):
@@ -142,7 +138,7 @@ def validate_html(content: str, file_path: Path, verbose: bool = False) -> Valid
                 continue
 
             # Skip if in allowed exception context (external URLs)
-            if is_allowed_exception(context):
+            if is_allowed_exception(content, match_pos):
                 if verbose:
                     result.add_warning(f"Allowed external: {match_text}")
                 continue
@@ -153,18 +149,20 @@ def validate_html(content: str, file_path: Path, verbose: bool = False) -> Valid
                     result.add_warning(f"Allowed brand rgba: {match_text}")
                 continue
 
-            # Skip if part of var() reference (false positive)
-            if 'var(' in context and match_text in context:
-                # Check if it's a fallback value in var()
-                var_pattern = rf'var\([^)]*{re.escape(match_text)}[^)]*\)'
-                if re.search(var_pattern, context):
+            # Skip only if this occurrence itself sits inside a var(...) fallback
+            last_var = content.rfind('var(', 0, match_pos)
+            if last_var != -1:
+                close_paren = content.find(')', last_var)
+                if close_paren != -1 and match_pos < close_paren:
                     continue
 
             # Error if in <style> or inline style
             if is_inside_block(content, match_pos, '<style', '</style>'):
                 result.add_error(f"Hardcoded {description} in <style>: {match_text}")
-            elif 'style="' in context:
-                result.add_error(f"Hardcoded {description} in inline style: {match_text}")
+            else:
+                style_open = content.rfind('style="', 0, match_pos)
+                if style_open != -1 and '"' not in content[style_open + 7:match_pos]:
+                    result.add_error(f"Hardcoded {description} in inline style: {match_text}")
 
     # 3. Check for required var() usage indicators
     token_patterns = [
@@ -248,6 +246,10 @@ def print_summary(all_results: Dict[str, List[ValidationResult]]):
                 print_result(result)
 
     print("\n" + "-" * 60)
+    if total_files == 0:
+        print("✗ NO FILES VALIDATED: asset directories missing or empty (check PROJECT_ROOT)")
+        print("-" * 60)
+        return False
     if total_errors == 0:
         print(f"✓ ALL PASSED: {total_passed}/{total_files} files valid")
     else:
@@ -281,6 +283,9 @@ Examples:
     parser.add_argument('--fix', action='store_true', help='Auto-fix issues (experimental)')
 
     args = parser.parse_args()
+
+    if args.fix:
+        print('Note: --fix is not implemented yet; running validation only.')
 
     # Show colors mode
     if args.colors:

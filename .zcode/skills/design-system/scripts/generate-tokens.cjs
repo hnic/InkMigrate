@@ -24,10 +24,23 @@ function parseArgs() {
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--config' || args[i] === '-c') {
       options.config = args[++i];
+      if (options.config === undefined) {
+        console.error('Error: --config requires a file path value');
+        process.exit(1);
+      }
     } else if (args[i] === '--output' || args[i] === '-o') {
       options.output = args[++i];
+      if (options.output === undefined) {
+        console.error('Error: --output requires a file path value');
+        process.exit(1);
+      }
     } else if (args[i] === '--format' || args[i] === '-f') {
-      options.format = args[++i];
+      const format = args[++i];
+      if (!['css', 'tailwind'].includes(format)) {
+        console.error(`Error: --format must be "css" or "tailwind", got "${format}"`);
+        process.exit(1);
+      }
+      options.format = format;
     } else if (args[i] === '--help' || args[i] === '-h') {
       console.log(`
 Usage: node generate-tokens.cjs [options]
@@ -48,30 +61,45 @@ Options:
 /**
  * Resolve token references like {primitive.color.blue.600}
  */
-function resolveReference(value, tokens) {
+function resolveReference(value, tokens, seen = new Set()) {
   if (typeof value !== 'string' || !value.startsWith('{')) {
     return value;
   }
+  if (!value.endsWith('}')) {
+    console.warn(`Warning: malformed token reference "${value}"`);
+    return value;
+  }
 
-  const path = value.slice(1, -1).split('.');
+  const refPath = value.slice(1, -1).split('.');
   let result = tokens;
 
-  for (const key of path) {
+  for (const key of refPath) {
     result = result?.[key];
   }
 
-  if (result?.$value) {
-    return resolveReference(result.$value, tokens);
+  if (result === undefined || result === null) {
+    console.warn(`Warning: unresolved token reference "${value}"`);
+    return value;
   }
-
-  return result || value;
+  if (typeof result === 'object') {
+    if (result.$value === undefined) {
+      console.warn(`Warning: reference "${value}" points to a group, not a token`);
+      return value;
+    }
+    if (seen.has(value)) {
+      throw new Error(`Circular token reference detected: ${value}`);
+    }
+    seen.add(value);
+    return resolveReference(result.$value, tokens, seen);
+  }
+  return result; // preserves valid falsy values like 0 or ''
 }
 
 /**
  * Convert token name to CSS variable name
  */
-function toCssVarName(path) {
-  return '--' + path.join('-').replace(/\./g, '-');
+function toCssVarName(segments) {
+  return '--' + segments.join('-');
 }
 
 /**
@@ -142,12 +170,13 @@ ${Object.entries(darkSemantic).map(([k, v]) => `  ${k}: ${v};`).join('\n')}
  */
 function generateTailwind(tokens) {
   const semantic = flattenTokens(tokens.semantic || {}, tokens, []);
+  const COLOR_PREFIX = '--color-';
 
   // Extract colors for Tailwind
   const colors = {};
   for (const [key, value] of Object.entries(semantic)) {
-    if (key.includes('color')) {
-      const name = key.replace('--color-', '').replace(/-/g, '.');
+    if (key.startsWith(COLOR_PREFIX)) {
+      const name = key.slice(COLOR_PREFIX.length).replace(/-/g, '.');
       colors[name] = `var(${key})`;
     }
   }
@@ -156,7 +185,7 @@ function generateTailwind(tokens) {
 // Add to tailwind.config.ts theme.extend.colors
 
 module.exports = {
-  colors: ${JSON.stringify(colors, null, 2).replace(/"/g, "'")}
+  colors: ${JSON.stringify(colors, null, 2)}
 };
 `;
 }
@@ -181,7 +210,14 @@ function main() {
   }
 
   // Read and parse tokens
-  const tokens = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+  let tokens;
+  try {
+    tokens = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+  } catch (err) {
+    console.error(`Error: Failed to parse config file as JSON: ${configPath}`);
+    console.error(`  ${err.message}`);
+    process.exit(1);
+  }
 
   // Generate output
   let output;

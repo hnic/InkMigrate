@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).resolve().parent.parent / "validate-tokens.cjs"
+assert SCRIPT.is_file(), f"validator script not found at {SCRIPT}"
 
 
 def _run(tmp_path: Path, css: str) -> subprocess.CompletedProcess:
@@ -25,6 +26,9 @@ def _run(tmp_path: Path, css: str) -> subprocess.CompletedProcess:
         [node, str(SCRIPT), "--dir", str(tmp_path)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
     )
 
 
@@ -34,8 +38,8 @@ def test_flags_hardcoded_hex_sharing_line_with_token(tmp_path):
         tmp_path,
         ".btn { background: #FF6B6B; color: var(--color-primary); }\n",
     )
-    assert "#FF6B6B" in result.stdout, result.stdout
-    assert result.returncode == 1
+    assert "#FF6B6B" in result.stdout, result.stdout + result.stderr
+    assert result.returncode == 1, result.stdout + result.stderr
 
 
 def test_token_only_line_reports_no_violation(tmp_path):
@@ -44,5 +48,25 @@ def test_token_only_line_reports_no_violation(tmp_path):
         tmp_path,
         ".btn { background: var(--color-bg); color: var(--color-primary); }\n",
     )
-    assert "No token violations" in result.stdout, result.stdout
-    assert result.returncode == 0
+    assert "No token violations" in result.stdout, result.stdout + result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_flags_multiple_violations_in_minified_one_line_css(tmp_path):
+    """Minified one-line CSS: every hardcoded value on the line is reported."""
+    result = _run(
+        tmp_path,
+        ".a{color:#FF6B6B;margin:12px}.b{color:var(--color-bg);padding:8px}\n",
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert result.stdout.count("Line 1:") >= 3, result.stdout + result.stderr
+
+
+def test_recurses_into_nested_subdirectories(tmp_path):
+    """Violations in nested subdirectories are found."""
+    nested = tmp_path / "components"
+    nested.mkdir()
+    (nested / "sample.css").write_text(".a { color: #ABC; }\n")
+    result = _run(tmp_path, "")  # root file stays clean
+    assert "#ABC" in result.stdout, result.stdout + result.stderr
+    assert result.returncode == 1, result.stdout + result.stderr

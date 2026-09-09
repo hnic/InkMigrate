@@ -85,6 +85,7 @@
     "color": {
       "background": { "$value": "{primitive.color.gray.50}", "$type": "color" },
       "foreground": { "$value": "{primitive.color.gray.900}", "$type": "color" },
+      "card": { "$value": "{primitive.color.white}", "$type": "color" },
       "primary": { "$value": "{primitive.color.blue.600}", "$type": "color" },
       "primary-hover": { "$value": "{primitive.color.blue.700}", "$type": "color" },
       "primary-foreground": { "$value": "{primitive.color.white}", "$type": "color" },
@@ -121,7 +122,7 @@
       "radius": { "$value": "{primitive.radius.md}", "$type": "dimension" }
     },
     "card": {
-      "bg": { "$value": "{primitive.color.white}", "$type": "color" },
+      "bg": { "$value": "{semantic.color.card}", "$type": "color" },
       "border": { "$value": "{semantic.color.border}", "$type": "color" },
       "shadow": { "$value": "{primitive.shadow.default}", "$type": "shadow" },
       "padding": { "$value": "{primitive.spacing.6}", "$type": "dimension" },
@@ -133,7 +134,9 @@
       "color": {
         "background": { "$value": "{primitive.color.gray.950}", "$type": "color" },
         "foreground": { "$value": "{primitive.color.gray.50}", "$type": "color" },
+        "card": { "$value": "{primitive.color.gray.900}", "$type": "color" },
         "secondary": { "$value": "{primitive.color.gray.800}", "$type": "color" },
+        "secondary-foreground": { "$value": "{primitive.color.gray.50}", "$type": "color" },
         "muted": { "$value": "{primitive.color.gray.800}", "$type": "color" },
         "muted-foreground": { "$value": "{primitive.color.gray.400}", "$type": "color" },
         "border": { "$value": "{primitive.color.gray.800}", "$type": "color" }

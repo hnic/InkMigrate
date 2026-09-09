@@ -5,7 +5,6 @@
  *
  * Usage:
  *   node validate-tokens.cjs --dir src/
- *   node validate-tokens.cjs --dir src/ --fix
  */
 
 const fs = require('fs');
@@ -18,24 +17,29 @@ function parseArgs() {
   const args = process.argv.slice(2);
   const options = {
     dir: null,
-    fix: false,
     ignore: ['node_modules', '.git', 'dist', 'build', '.next']
   };
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--dir' || args[i] === '-d') {
       options.dir = args[++i];
-    } else if (args[i] === '--fix') {
-      options.fix = true;
+      if (typeof options.dir !== 'string') {
+        console.error('Error: --dir requires a path argument');
+        process.exit(1);
+      }
     } else if (args[i] === '--ignore' || args[i] === '-i') {
-      options.ignore.push(args[++i]);
+      const ignoreDir = args[++i];
+      if (typeof ignoreDir !== 'string') {
+        console.error('Error: --ignore requires a directory argument');
+        process.exit(1);
+      }
+      options.ignore.push(ignoreDir);
     } else if (args[i] === '--help' || args[i] === '-h') {
       console.log(`
 Usage: node validate-tokens.cjs [options]
 
 Options:
   -d, --dir <path>      Directory to scan (required)
-  --fix                 Show suggested fixes (no auto-fix)
   -i, --ignore <dir>    Additional directories to ignore
   -h, --help            Show this help
 
@@ -56,26 +60,36 @@ Checks for:
  */
 const patterns = {
   hexColor: {
-    regex: /#([0-9A-Fa-f]{3}){1,2}\b/g,
+    // (?![\w-]) avoids matching inside longer identifiers
+    regex: /#([0-9A-Fa-f]{3}){1,2}(?![\w-])/g,
     message: 'Hardcoded hex color',
     suggestion: 'Use var(--color-*) token'
   },
   rgbColor: {
-    regex: /rgb\s*\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)/gi,
+    // Covers rgb()/rgba(), comma and space separated, with percentages and alpha
+    regex: /rgba?\(\s*[\d.]+%?\s*[ ,]\s*[\d.]+%?\s*[ ,]\s*[\d.]+%?\s*(?:[,/]\s*[\d.]+%?\s*)?\)/gi,
     message: 'Hardcoded RGB color',
     suggestion: 'Use var(--color-*) token'
   },
   pixelValue: {
-    regex: /:\s*(\d{2,})px/g, // 2+ digit px values
+    // Allow optional quote (inline styles), sign, and decimals; 0/1px are
+    // exempted in the exception check below
+    regex: /:\s*['"]?(-?\d+\.?\d*)px['"]?/g,
     message: 'Hardcoded pixel value',
     suggestion: 'Use var(--space-*) or var(--radius-*) token'
   },
   remValue: {
-    regex: /:\s*\d+\.?\d*rem(?![^{]*\$value)/g, // rem not in token definition
+    regex: /:\s*['"]?-?\d+\.?\d*rem['"]?/g,
     message: 'Hardcoded rem value',
     suggestion: 'Use var(--space-*) or var(--font-size-*) token'
   }
 };
+
+// Hex colors that are often intentional (pure black/white)
+const HEX_COLOR_WHITELIST = ['#000', '#FFF', '#000000', '#FFFFFF'];
+
+// URL fragments/anchors (href="#...", url(#...)) are not colors
+const ANCHOR_REF_LINE = /(?:href|url|xlink:href)\s*[=(]\s*['"]?#/;
 
 /**
  * File extensions to scan
@@ -83,20 +97,26 @@ const patterns = {
 const extensions = ['.css', '.scss', '.tsx', '.jsx', '.ts', '.js', '.vue', '.svelte'];
 
 /**
- * Files/patterns to skip
+ * Basenames of files to skip (token definitions, generated/minified files)
  */
 const skipPatterns = [
   /\.min\.(css|js)$/,
-  /tailwind\.config/,
-  /globals\.css/, // Token definitions
-  /tokens\.(css|json)/
+  /^tailwind\.config\./,
+  /^globals\.css$/, // Token definitions
+  /^tokens\.(css|json|js|ts|scss)$/
 ];
 
 /**
  * Get all files recursively
  */
 function getFiles(dir, ignore, files = []) {
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (err) {
+    console.warn(`Warning: skipping unreadable directory ${dir}: ${err.message}`);
+    return files;
+  }
 
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name);
@@ -117,39 +137,68 @@ function getFiles(dir, ignore, files = []) {
 }
 
 /**
- * Check if file should be skipped
+ * Check if file should be skipped (by basename, so e.g. /globals\.css/
+ * cannot exempt arbitrary paths that merely contain the substring)
  */
 function shouldSkip(filePath) {
-  return skipPatterns.some(pattern => pattern.test(filePath));
+  const base = path.basename(filePath);
+  return skipPatterns.some(pattern => pattern.test(base));
 }
 
 /**
  * Scan file for violations
  */
 function scanFile(filePath) {
-  const content = fs.readFileSync(filePath, 'utf-8');
+  let content;
+  try {
+    content = fs.readFileSync(filePath, 'utf-8');
+  } catch (err) {
+    console.warn(`Warning: skipping unreadable file ${filePath}: ${err.message}`);
+    return [];
+  }
   const lines = content.split('\n');
   const violations = [];
 
-  lines.forEach((line, index) => {
-    // Skip comments
-    if (line.trim().startsWith('//') || line.trim().startsWith('/*')) {
-      return;
+  let inBlockComment = false;
+  lines.forEach((rawLine, index) => {
+    // Strip comments: track block-comment state across lines and remove
+    // inline comments so commented-out values are not reported.
+    let line = rawLine;
+    if (inBlockComment) {
+      const end = line.indexOf('*/');
+      if (end === -1) return;
+      inBlockComment = false;
+      line = line.slice(end + 2);
     }
+    line = line.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/, '');
+    const open = line.indexOf('/*');
+    if (open !== -1) {
+      inBlockComment = true;
+      line = line.slice(0, open);
+    }
+    if (!line.trim()) return;
+
+    // Skip anchor/URL fragment references like href="#fff" or url(#gradient)
+    if (ANCHOR_REF_LINE.test(line)) return;
 
     for (const [name, pattern] of Object.entries(patterns)) {
       const matches = line.match(pattern.regex);
       if (matches) {
         matches.forEach(match => {
           // Skip common exceptions
-          if (name === 'hexColor' && ['#000', '#fff', '#FFF', '#000000', '#FFFFFF'].includes(match.toUpperCase())) {
+          if (name === 'hexColor' && HEX_COLOR_WHITELIST.includes(match.toUpperCase())) {
             return; // Skip black/white, often intentional
+          }
+          if (name === 'pixelValue') {
+            const px = parseFloat(match.replace(/[^-\d.]/g, ''));
+            if (px === 0 || px === 1) {
+              return; // Skip 0/1px, often intentional
+            }
           }
 
           violations.push({
             file: filePath,
             line: index + 1,
-            column: line.indexOf(match) + 1,
             value: match,
             type: name,
             message: pattern.message,

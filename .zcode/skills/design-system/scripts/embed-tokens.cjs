@@ -15,8 +15,9 @@ const path = require('path');
 
 // Find project root (look for assets/design-tokens.css)
 function findProjectRoot(startDir) {
-  let dir = startDir;
-  while (dir !== '/') {
+  let dir = path.resolve(startDir);
+  const { root } = path.parse(dir);
+  while (dir !== root) {
     if (fs.existsSync(path.join(dir, 'assets', 'design-tokens.css'))) {
       return dir;
     }
@@ -54,21 +55,60 @@ const MINIMAL_TOKENS = [
   '--card-',
 ];
 
+// Split on a separator, ignoring separators inside quotes or parentheses
+// (e.g. data URIs like url("data:image/svg+xml;utf8,..."))
+function splitTopLevel(text, separator) {
+  const parts = [];
+  let current = '';
+  let quote = null;
+  let depth = 0;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      current += ch;
+      if (ch === quote && text[i - 1] !== '\\') quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === '(') {
+      depth++;
+    } else if (ch === ')') {
+      depth--;
+    } else if (ch === separator && depth === 0) {
+      parts.push(current);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  parts.push(current);
+  return parts;
+}
+
 function extractTokens(css, minimal = false) {
   // Extract :root block
   const rootMatch = css.match(/:root\s*\{([^}]+)\}/g);
-  if (!rootMatch) return '';
+  if (!rootMatch) {
+    throw new Error(`No :root block found in ${tokensPath}`);
+  }
 
   let allVars = [];
   for (const block of rootMatch) {
-    const vars = block.match(/--[\w-]+:\s*[^;]+;/g) || [];
+    const body = block.replace(/^:root\s*\{/, '').replace(/\}\s*$/, '');
+    const vars = splitTopLevel(body, ';')
+      .map(d => d.trim())
+      .filter(d => /^--[\w-]+\s*:/.test(d))
+      .map(d => (d.endsWith(';') ? d : d + ';'));
     allVars = allVars.concat(vars);
   }
 
   if (minimal) {
-    allVars = allVars.filter(v =>
-      MINIMAL_TOKENS.some(token => v.includes(token))
-    );
+    allVars = allVars.filter(v => {
+      const name = v.slice(0, v.indexOf(':'));
+      return MINIMAL_TOKENS.some(token => name.startsWith(token));
+    });
   }
 
   // Dedupe
@@ -87,7 +127,8 @@ try {
   let output = extractTokens(css, minimal);
 
   if (wrapStyle) {
-    output = `<style>\n/* Design Tokens (embedded for standalone HTML) */\n${output}\n</style>`;
+    const safeCss = output.replace(/<\/style/gi, '<\\/style');
+    output = `<style>\n/* Design Tokens (embedded for standalone HTML) */\n${safeCss}\n</style>`;
   } else {
     output = `/* Design Tokens (embedded for standalone HTML) */\n${output}`;
   }

@@ -24,9 +24,9 @@ const GENERATE_TOKENS_SCRIPT = '.claude/skills/design-system/scripts/generate-to
  */
 function extractColorsFromMarkdown(content) {
   const colors = {
-    primary: { name: 'primary', shades: {} },
-    secondary: { name: 'secondary', shades: {} },
-    accent: { name: 'accent', shades: {} }
+    primary: { name: 'primary' },
+    secondary: { name: 'secondary' },
+    accent: { name: 'accent' }
   };
 
   // Match a "| Label | #hex |" markdown table row. Bold around the label
@@ -101,9 +101,14 @@ function generateColorScale(baseHex, darkHex, lightHex) {
 function adjustBrightness(hex, percent) {
   if (typeof hex !== 'string') return '#000000';
   const num = parseInt(hex.replace('#', ''), 16);
-  const r = Math.min(255, Math.max(0, (num >> 16) + Math.round(255 * percent)));
-  const g = Math.min(255, Math.max(0, ((num >> 8) & 0x00FF) + Math.round(255 * percent)));
-  const b = Math.min(255, Math.max(0, (num & 0x0000FF) + Math.round(255 * percent)));
+  // Blend proportionally toward white/black instead of adding a fixed
+  // absolute offset, so light shades don't all clamp to #FFFFFF.
+  const mix = (c) => percent >= 0
+    ? Math.round(c + (255 - c) * percent)
+    : Math.round(c * (1 + percent));
+  const r = Math.min(255, Math.max(0, mix(num >> 16)));
+  const g = Math.min(255, Math.max(0, mix((num >> 8) & 0x00FF)));
+  const b = Math.min(255, Math.max(0, mix(num & 0x000000FF)));
   return `#${((r << 16) | (g << 8) | b).toString(16).padStart(6, '0').toUpperCase()}`;
 }
 
@@ -111,10 +116,6 @@ function adjustBrightness(hex, percent) {
  * Update design tokens JSON
  */
 function updateDesignTokens(tokens, colors) {
-  // Update brand name
-  const brandName = `ClaudeKit Marketing - ${colors.primary.name.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')}`;
-  tokens.brand = brandName;
-
   // Update primitive colors with new names
   tokens.primitive = tokens.primitive || {};
   const primitiveColors = tokens.primitive.color || {};
@@ -207,11 +208,24 @@ function main() {
   console.log(`   Secondary: ${colors.secondary.name} (${colors.secondary.base})`);
   console.log(`   Accent: ${colors.accent.name} (${colors.accent.base})\n`);
 
+  // Fail fast if any role lacks a base hex — writing semantic references to
+  // primitives that were skipped would produce dangling token references.
+  const missingRoles = ['primary', 'secondary', 'accent'].filter((role) => !colors[role].base);
+  if (missingRoles.length) {
+    console.error(`❌ No base hex found for: ${missingRoles.join(', ')} — aborting before writing tokens.`);
+    process.exit(1);
+  }
+
   // Read existing tokens
   const tokensPath = path.resolve(process.cwd(), DESIGN_TOKENS_JSON);
   let tokens = {};
   if (fs.existsSync(tokensPath)) {
-    tokens = JSON.parse(fs.readFileSync(tokensPath, 'utf-8'));
+    try {
+      tokens = JSON.parse(fs.readFileSync(tokensPath, 'utf-8'));
+    } catch (e) {
+      console.error(`❌ Failed to parse ${DESIGN_TOKENS_JSON}: ${e.message}`);
+      process.exit(1);
+    }
   }
 
   // Update tokens
@@ -238,8 +252,12 @@ function main() {
       });
       console.log(`✅ Regenerated: ${DESIGN_TOKENS_CSS}`);
     } catch (e) {
-      console.error('⚠️  Failed to regenerate CSS:', e.message);
+      console.error(`❌ Failed to regenerate CSS: ${e.message} — ${DESIGN_TOKENS_JSON} and ${DESIGN_TOKENS_CSS} are now out of sync.`);
+      process.exitCode = 1;
+      return;
     }
+  } else {
+    console.warn(`⚠️  ${GENERATE_TOKENS_SCRIPT} not found — CSS was not regenerated.`);
   }
 
   console.log('\n✨ Brand sync complete!');

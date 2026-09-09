@@ -24,12 +24,31 @@ const path = require("path");
 // Default brand guidelines path
 const DEFAULT_GUIDELINES_PATH = "docs/brand-guidelines.md";
 
+// Brand compliance distance threshold (out of max ~441 for RGB)
+const BRAND_DISTANCE_THRESHOLD = 50;
+
 /**
- * Extract hex colors from markdown content
+ * Extract hex colors from markdown content.
+ * Handles 3-digit shorthand (#FFF), 6-digit (#FFFFFF) and 8-digit
+ * with alpha (#RRGGBBAA); shorthand is expanded and alpha is dropped
+ * so hexToRgb/colorDistance can compare them.
  */
 function extractHexColors(text) {
-  const hexPattern = /#[0-9A-Fa-f]{6}\b/g;
-  return [...new Set(text.match(hexPattern) || [])];
+  const hexPattern = /#(?:[0-9A-Fa-f]{8}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{3})\b/g;
+  const normalize = (hex) => {
+    if (hex.length === 4) {
+      // Expand shorthand: #abc -> #aabbcc
+      return "#" + hex
+        .slice(1)
+        .split("")
+        .map((c) => c + c)
+        .join("")
+        .toUpperCase();
+    }
+    // 8-digit form carries alpha; keep the RGB channels
+    return "#" + hex.slice(1, 7).toUpperCase();
+  };
+  return [...new Set((text.match(hexPattern) || []).map(normalize))];
 }
 
 /**
@@ -44,7 +63,13 @@ function parseBrandColors(guidelinesPath) {
     return null;
   }
 
-  const content = fs.readFileSync(resolvedPath, "utf-8");
+  let content;
+  try {
+    content = fs.readFileSync(resolvedPath, "utf-8");
+  } catch (err) {
+    console.error(`Failed to read brand guidelines: ${resolvedPath} (${err.message})`);
+    return null;
+  }
 
   const palette = {
     primary: [],
@@ -143,10 +168,14 @@ function findNearestBrandColor(color, brandColors) {
 
 /**
  * Calculate brand compliance percentage
- * Distance threshold: 50 (out of max ~441 for RGB)
  */
-function calculateCompliance(extractedColors, brandColors, threshold = 50) {
-  if (!extractedColors || extractedColors.length === 0) return 100;
+function calculateCompliance(
+  extractedColors,
+  brandColors,
+  threshold = BRAND_DISTANCE_THRESHOLD
+) {
+  // No extracted colors means no data — report 0 rather than perfect compliance
+  if (!extractedColors || extractedColors.length === 0) return 0;
   if (!brandColors || brandColors.length === 0) return 0;
 
   let matchCount = 0;
@@ -162,10 +191,19 @@ function calculateCompliance(extractedColors, brandColors, threshold = 50) {
 }
 
 /**
+ * Escape a value for safe interpolation into a double-quoted shell string
+ */
+function escapeShellDoubleQuoted(value) {
+  return String(value).replace(/[\\"`$!]/g, "\\$&");
+}
+
+/**
  * Generate ImageMagick command for color extraction
  */
 function generateImageMagickCommand(imagePath, numColors = 10) {
-  return `magick "${imagePath}" -colors ${numColors} -depth 8 -format "%c" histogram:info:`;
+  const colors = Number.parseInt(numColors, 10);
+  const safeColors = Number.isInteger(colors) ? colors : 10;
+  return `magick "${escapeShellDoubleQuoted(imagePath)}" -colors ${safeColors} -depth 8 -format "%c" histogram:info:`;
 }
 
 /**
@@ -177,13 +215,16 @@ function parseImageMagickOutput(output) {
 
   lines.forEach((line) => {
     // Match pattern like: 12345: (255,128,64) #FF8040 srgb(255,128,64)
-    const hexMatch = line.match(/#([0-9A-Fa-f]{6})/);
-    const countMatch = line.match(/^\s*(\d+):/);
+    // ImageMagick emits #RRGGBBAA for images with alpha and may print
+    // large counts with thousands separators (e.g. "1,234,567:").
+    const hexMatch = line.match(/#([0-9A-Fa-f]{6,8})(?![0-9A-Fa-f])/);
+    const countMatch = line.match(/^\s*([\d,]+):/);
 
     if (hexMatch) {
       colors.push({
-        hex: "#" + hexMatch[1].toUpperCase(),
-        count: countMatch ? parseInt(countMatch[1]) : 0,
+        // Use only the RGB channels if an alpha channel is present
+        hex: "#" + hexMatch[1].slice(0, 6).toUpperCase(),
+        count: countMatch ? parseInt(countMatch[1].replace(/,/g, ""), 10) : 0,
       });
     }
   });
@@ -235,9 +276,17 @@ function main() {
   const jsonOutput = args.includes("--json");
   const showPalette = args.includes("--palette");
   const brandFileIdx = args.indexOf("--brand-file");
-  const brandFile =
-    brandFileIdx !== -1 ? args[brandFileIdx + 1] : DEFAULT_GUIDELINES_PATH;
-  const brandFileValue = brandFileIdx !== -1 ? args[brandFileIdx + 1] : null;
+  let brandFile = DEFAULT_GUIDELINES_PATH;
+  let brandFileValue = null;
+  if (brandFileIdx !== -1) {
+    const value = args[brandFileIdx + 1];
+    if (!value || value.startsWith("--")) {
+      console.error("Error: --brand-file requires a path argument");
+      process.exit(1);
+    }
+    brandFile = value;
+    brandFileValue = value;
+  }
   const imagePath = args.find(
     (a) => !a.startsWith("--") && a !== brandFileValue
   );
@@ -279,13 +328,14 @@ function main() {
   }
 
   // Generate extraction instructions
+  const extractionCommand = generateImageMagickCommand(resolvedPath);
   const result = {
     image: resolvedPath,
     brandPalette: brandPalette,
-    extractionCommand: generateImageMagickCommand(resolvedPath),
+    extractionCommand,
     instructions: [
       "1. Run the ImageMagick command to extract colors:",
-      `   ${generateImageMagickCommand(resolvedPath)}`,
+      `   ${extractionCommand}`,
       "",
       "2. Or use the ai-multimodal skill:",
       `   python .claude/skills/ai-multimodal/scripts/gemini_batch_process.py \\`,
@@ -296,9 +346,8 @@ function main() {
       "3. Then compare extracted colors against brand palette",
     ],
     complianceCheck: {
-      threshold: 50,
-      description:
-        "Colors within distance 50 (RGB space) are considered brand-compliant",
+      threshold: BRAND_DISTANCE_THRESHOLD,
+      description: `Colors within distance ${BRAND_DISTANCE_THRESHOLD} (RGB space) are considered brand-compliant`,
       brandColors: brandPalette.all,
     },
   };

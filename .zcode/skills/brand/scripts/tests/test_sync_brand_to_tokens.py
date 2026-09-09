@@ -29,6 +29,9 @@ def test_sync_parses_bundled_starter_template(tmp_path):
     if not node:
         pytest.skip("node not available")
 
+    for fixture in (SCRIPT, BRAND_STARTER, TOKENS_STARTER):
+        assert fixture.exists(), f"Missing test fixture: {fixture}"
+
     (tmp_path / "docs").mkdir()
     (tmp_path / "assets").mkdir()
     shutil.copy(BRAND_STARTER, tmp_path / "docs" / "brand-guidelines.md")
@@ -39,14 +42,18 @@ def test_sync_parses_bundled_starter_template(tmp_path):
         cwd=tmp_path,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
     )
 
-    # Must not crash (the bug raised an unhandled TypeError).
-    assert "TypeError" not in result.stderr, result.stderr
+    # Must not crash (an unhandled exception in Node exits non-zero).
     assert result.returncode == 0, result.stderr + result.stdout
 
     tokens = json.loads((tmp_path / "assets" / "design-tokens.json").read_text())
     primitive = tokens["primitive"]["color"]
+    # Expected values mirror templates/brand-guidelines-starter.md — update
+    # both together if the starter's brand colors change.
     assert primitive["primary"]["500"]["$value"] == "#2563EB"
     assert primitive["secondary"]["500"]["$value"] == "#8B5CF6"
     assert primitive["accent"]["500"]["$value"] == "#10B981"
