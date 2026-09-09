@@ -3,10 +3,9 @@ import type { SourceCapabilities } from '@inkmigrate/core';
 /**
  * §15.1 Evernote 来源适配器能力。
  *
- * 能力只反映已实现并通过测试的功能（§8.1）：
- * - 仅 ENEX；HTML 导出解析为后续增量（PRD §15.12）。
+ * 能力只反映已实现并通过测试的功能（§8.1）：ENEX + HTML 导出（§15.12）。
  * - supportsInternalLinks=true：内部链接以原始 evernote:// 链接保留并记录
- *   （ENEX 不含 GUID 映射，跨笔记重写需 HTML 导出或 API 数据，暂不实现）。
+ *   （ENEX 不含 GUID 映射，跨笔记重写需 API 数据，暂不实现）。
  */
 export const EVERNOTE_CAPABILITIES: SourceCapabilities = {
   authMode: 'file',
@@ -16,7 +15,7 @@ export const EVERNOTE_CAPABILITIES: SourceCapabilities = {
   supportsInternalLinks: true,
   supportsSourceCleanup: false,
   cleanupActions: [],
-  supportedInputFormats: ['enex'],
+  supportedInputFormats: ['enex', 'html'],
 };
 
 export const SOURCE_EVERNOTE_KIND = 'evernote' as const;

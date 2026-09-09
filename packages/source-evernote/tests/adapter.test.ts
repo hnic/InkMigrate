@@ -229,4 +229,55 @@ describe('createEvernoteSource', () => {
       rmSync(input, { recursive: true, force: true });
     }
   });
+
+  it('HTML 导出：scan 产出 html ref，extract 产出带资源的 SourceItem（§15.12）', async () => {
+    // 拷贝 html-export 子树（FIXTURES 根目录含 .notes 会被显式拒绝）
+    const dir = tmpDir();
+    mkdirSync(join(dir, 'html-export'), { recursive: true });
+    for (const f of ['剪藏.html', '工作笔记本/会议记录.html', '工作笔记本/随笔.html']) {
+      const src = join(FIXTURES, 'html-export', f);
+      const dst = join(dir, 'html-export', f);
+      mkdirSync(dirname(dst), { recursive: true });
+      copyFileSync(src, dst);
+    }
+    // resources 目录带附件
+    const resSrc = join(FIXTURES, 'html-export', '工作笔记本', '会议记录.resources');
+    const resDst = join(dir, 'html-export', '工作笔记本', '会议记录.resources');
+    mkdirSync(resDst, { recursive: true });
+    for (const f of ['白板照片.png', '议程.pdf']) copyFileSync(join(resSrc, f), join(resDst, f));
+
+    try {
+      const adapter = createEvernoteSource({
+        sourceInstanceId: 'evernote-archive',
+        inputPaths: [join(dir, 'html-export')],
+        formats: ['html'],
+      });
+      const ctx = { config: {}, workspaceDir: dir };
+      const refs = [];
+      for await (const ref of adapter.scan(ctx)) refs.push(ref);
+
+      expect(refs.map((r) => r.title).sort()).toEqual(['会议记录', '剪藏', '随笔']);
+      const meetingRef = refs.find((r) => r.title === '会议记录')!;
+      const meta = (meetingRef.sourceMetadata as { html: { notebook: string } }).html;
+      expect(meta.notebook).toBe('工作笔记本');
+
+      const meeting = await adapter.extract(meetingRef, ctx);
+      expect(meeting.extractionMethod).toBe('evernote-html-export-v1');
+      expect(meeting.collections).toEqual(['工作笔记本']);
+      expect(meeting.assets.map((a) => a.fileName).sort()).toEqual(['白板照片.png', '议程.pdf']);
+      expect(meeting.bodyHtml).toContain('evernote-resource://');
+      expect(meeting.bodyHtml).toContain('📎 附件：议程.pdf');
+      expect(meeting.quality).toBe('full');
+
+      // 缺失资源引用 → degraded + 对账计数
+      const clipRef = refs.find((r) => r.title === '剪藏')!;
+      const clip = await adapter.extract(clipRef, ctx);
+      expect(clip.quality).toBe('degraded');
+      expect(clip.degradations.map((d) => d.code)).toContain('asset-incomplete');
+      expect(clip.extractionWarnings.join('\n')).toContain('缺失 1');
+      await adapter.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

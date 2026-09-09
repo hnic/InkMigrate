@@ -12,21 +12,9 @@ export const EvernoteSourceConfigSchema = z
     /** 相对路径相对 workspaceDir 解析；支持文件或目录（目录递归收集 .enex）。 */
     inputPaths: z.array(z.string().min(1)).min(1),
     formats: z
-      .array(z.string())
+      .array(z.enum(['enex', 'html']))
       .min(1)
-      .default(['enex'])
-      .superRefine((v, ctx) => {
-        const unsupported = v.filter((f) => f !== 'enex');
-        if (unsupported.length > 0) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message:
-              `formats 仅支持 enex（当前不支持：${unsupported.join(', ')}）。` +
-              'HTML 导出解析为后续版本增量；印象笔记（中国版）请先用新版客户端导出 HTML 并等待支持，' +
-              '或使用 evernote-backup --backend china 导出 ENEX（见 PRD §15.2.1）。',
-          });
-        }
-      }),
+      .default(['enex']),
     /** §15.5 `Stack@@@Notebook.enex` 命名约定的分隔符。 */
     stackSeparator: z.string().min(1).default('@@@'),
     assets: z

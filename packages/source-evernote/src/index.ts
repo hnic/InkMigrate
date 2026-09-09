@@ -36,4 +36,13 @@ export {
   extForMime,
   enexResourceUri,
 } from './resources/process-resources.js';
-export { enmlToHtml, type ResourceRefInfo, type EnmlTransformResult } from './enml/enml-to-html.js';
+export { enmlToHtml, sanitizeNoteHtml, type ResourceRefInfo, type EnmlTransformResult } from './enml/enml-to-html.js';
+export {
+  scanHtmlNote,
+  extractHtmlNote,
+  extractTitleFromHtml,
+  evernoteResourceUri,
+  type HtmlNoteHeader,
+  type HtmlExtractResult,
+} from './html/html-export.js';
+export type { HtmlRefMetadata } from './adapters/adapter.js';

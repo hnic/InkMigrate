@@ -171,4 +171,103 @@ describe('evernote e2e migrate', () => {
       rmSync(w.vaultDir, { recursive: true, force: true });
     }
   });
+
+  it('HTML 导出迁移（§15.12）：笔记/图片/附件落盘且对账通过', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'inkmigrate-evernote-e2e-html-'));
+    const dbDir = join(root, 'state');
+    const vaultDir = join(root, 'vault');
+    const inputDir = join(root, 'html-export');
+    mkdirSync(dbDir, { recursive: true });
+    mkdirSync(vaultDir, { recursive: true });
+    mkdirSync(inputDir, { recursive: true });
+    copyFileSync(join(FIXTURES, 'html-export', '剪藏.html'), join(inputDir, '剪藏.html'));
+    const { cpSync } = await import('node:fs');
+    cpSync(join(FIXTURES, 'html-export', '工作笔记本'), join(inputDir, '工作笔记本'), { recursive: true });
+    try {
+      const db: DB = openDatabase({ path: join(dbDir, 'inkmigrate.sqlite') });
+      new SourceInstances(db).create({
+        id: 'evernote-archive',
+        adapterKind: 'evernote',
+        adapterVersion: '0.1.0',
+        adapterApiVersion: '1.0.0',
+        configHash: 'h',
+        createdAt: 't',
+        updatedAt: 't',
+      });
+      new TargetInstances(db).create({
+        id: 'personal-vault',
+        adapterKind: 'obsidian',
+        adapterVersion: '1.0.0',
+        adapterApiVersion: '1.0.0',
+        configHash: 'h',
+        createdAt: 't',
+        updatedAt: 't',
+      });
+      new MigrationJobs(db).create({
+        id: 'j-html-1',
+        sourceInstanceId: 'evernote-archive',
+        targetInstanceId: 'personal-vault',
+        status: 'created',
+        currentStage: 'preflight',
+        createdAt: 't',
+        updatedAt: 't',
+      });
+      const result = await runMigrationJob({
+        db,
+        jobId: 'j-html-1',
+        sourceAdapter: createEvernoteSource({
+          sourceInstanceId: 'evernote-archive',
+          inputPaths: [inputDir],
+          formats: ['html'],
+        }),
+        targetAdapter: createObsidianTarget(),
+        sourceInstanceId: 'evernote-archive',
+        targetInstanceId: 'personal-vault',
+        targetContext: {
+          config: {},
+          workspaceDir: dbDir,
+          vaultPath: vaultDir,
+          targetConfig: {
+            vaultPath: vaultDir,
+            importSubdir: 'Imports/InkMigrate',
+            attachmentsSubdir: 'Attachments/InkMigrate',
+            linkStyle: 'wikilink',
+            overwritePolicy: 'preserve',
+            collectionMapping: { toTags: false, toFolders: false },
+            maxFilenameLength: 100,
+          } as Record<string, unknown>,
+        },
+        workspaceDir: dbDir,
+        reportsDir: join(dbDir, 'reports'),
+      });
+      expect(result.status).toBe('completed');
+      expect(result.scanCount).toBe(3);
+      expect(result.reconciliationOk).toBe(true);
+
+      const notesDir = join(vaultDir, 'Imports/InkMigrate/evernote-archive/笔记');
+      const contents = readdirSync(notesDir).map((f) => readFileSync(join(notesDir, f), 'utf8'));
+      const meeting = contents.find((c) => c.includes('会议记录'))!;
+      expect(meeting).toBeDefined();
+      // 图片内嵌 wikilink（原文件名）+ PDF 进附件区，脚本被清洗
+      expect(meeting).toContain('![[Attachments/InkMigrate/evernote-archive/im-');
+      expect(meeting).toContain('白板照片.png]]');
+      expect(meeting).toContain('## 附件');
+      expect(meeting).toContain('议程.pdf');
+      expect(meeting).not.toContain('<script');
+      const attachDir = join(vaultDir, 'Attachments/InkMigrate/evernote-archive');
+      const files: string[] = [];
+      const walk = (d: string) => {
+        for (const e of readdirSync(d, { withFileTypes: true })) {
+          const full = join(d, e.name);
+          if (e.isDirectory()) walk(full);
+          else files.push(e.name);
+        }
+      };
+      walk(attachDir);
+      expect(files).toContain('白板照片.png');
+      expect(files).toContain('议程.pdf');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

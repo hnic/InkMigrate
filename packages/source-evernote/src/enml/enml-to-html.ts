@@ -32,7 +32,7 @@ const SANITIZE_CONFIG = {
   ],
   // §15.10：保留 evernote:// 内部链接（默认白名单会剥掉该 scheme）
   ALLOWED_URI_REGEXP:
-    /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|evernote):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
+    /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|evernote|evernote-resource|enex-resource):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
 };
 
 export interface ResourceRefInfo {
@@ -56,6 +56,14 @@ export interface EnmlTransformResult {
 }
 
 const MD5_HEX = /^[0-9a-f]{32}$/i;
+
+/**
+ * §15.12 共享的正文清洗（HTML 导出解析复用）：DOMPurify 允许列表 +
+ * evernote: scheme 放行 + data-* 保留（资源重写标记依赖）。
+ */
+export function sanitizeNoteHtml(html: string): string {
+  return DOMPurify.sanitize(html, SANITIZE_CONFIG);
+}
 
 /** §15.6 ENML → 清洗后 HTML。resourceByMd5 为空 Map 时全部 en-media 视为缺失。 */
 export function enmlToHtml(

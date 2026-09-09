@@ -49,12 +49,26 @@ export interface EnexFileInfo {
 
 export interface CollectInputResult {
   files: EnexFileInfo[];
-  /** 跳过的非 .enex 文件（.html 等），供报告提示。 */
+  /** §15.12 HTML 导出文件（绝对路径；仅 includeHtml 时收集，供报告提示）。 */
+  htmlFiles: string[];
+  /** 跳过的其余文件（不支持的格式），供报告提示。 */
   skipped: string[];
 }
 
-/** 递归收集 .enex/.notes 文件；符号链接一律跳过（防路径逃逸）。 */
-function walk(root: string, enex: string[], notes: string[], skipped: string[]): void {
+/** `.resources`/`_resources` 是 §15.12 笔记附属资源目录，不作为笔记来源递归。 */
+function isResourcesDir(name: string): boolean {
+  return name.endsWith('.resources') || name === '_resources';
+}
+
+/** 递归收集 .enex/.notes/.html 文件；符号链接一律跳过（防路径逃逸）。 */
+function walk(
+  root: string,
+  enex: string[],
+  notes: string[],
+  html: string[],
+  skipped: string[],
+  includeHtml: boolean,
+): void {
   let entries;
   try {
     entries = readdirSync(root, { withFileTypes: true });
@@ -72,13 +86,15 @@ function walk(root: string, enex: string[], notes: string[], skipped: string[]):
       continue;
     }
     if (e.isDirectory()) {
-      walk(full, enex, notes, skipped);
+      if (isResourcesDir(e.name)) continue;
+      walk(full, enex, notes, html, skipped, includeHtml);
       continue;
     }
     if (!e.isFile()) continue;
     const ext = extname(e.name).toLowerCase();
     if (ext === '.enex') enex.push(full);
     else if (ext === '.notes') notes.push(full);
+    else if (ext === '.html' && includeHtml) html.push(full);
     else skipped.push(full);
   }
 }
@@ -101,9 +117,12 @@ async function sha256File(path: string): Promise<string> {
 export async function collectEnexFiles(
   inputPaths: readonly string[],
   stackSeparator: string,
+  opts: { includeHtml?: boolean } = {},
 ): Promise<CollectInputResult> {
+  const includeHtml = opts.includeHtml ?? false;
   const enexPaths: string[] = [];
   const notesPaths: string[] = [];
+  const htmlPaths: string[] = [];
   const skipped: string[] = [];
 
   for (const p of inputPaths) {
@@ -120,11 +139,12 @@ export async function collectEnexFiles(
       continue;
     }
     if (st.isDirectory()) {
-      walk(p, enexPaths, notesPaths, skipped);
+      walk(p, enexPaths, notesPaths, htmlPaths, skipped, includeHtml);
     } else if (st.isFile()) {
       const ext = extname(p).toLowerCase();
       if (ext === '.enex') enexPaths.push(p);
       else if (ext === '.notes') notesPaths.push(p);
+      else if (ext === '.html' && includeHtml) htmlPaths.push(p);
       else skipped.push(p);
     } else {
       skipped.push(`${p} (非普通文件)`);
@@ -155,7 +175,7 @@ export async function collectEnexFiles(
       mtimeMs: st.mtimeMs,
     });
   }
-  return { files, skipped };
+  return { files, htmlFiles: htmlPaths.sort((a, b) => a.localeCompare(b, 'en')), skipped };
 }
 
 /** §15.5 文件名 → Stack/笔记本；无分隔符时整体作为笔记本名。 */

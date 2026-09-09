@@ -1,0 +1,273 @@
+import { createHash } from 'node:crypto';
+import { lstatSync, readFileSync } from 'node:fs';
+import { basename, dirname, extname, relative, resolve } from 'node:path';
+import { JSDOM } from 'jsdom';
+import {
+  assertSymlinkSafe,
+  isPathInside,
+  sanitizeFilename,
+  type SourceAsset,
+  type SourceLink,
+} from '@inkmigrate/core';
+import { assetKindOf, sniffMime } from '../resources/process-resources.js';
+import { sanitizeNoteHtml } from '../enml/enml-to-html.js';
+
+/**
+ * §15.12 HTML 导出解析（印象笔记中国版用户的一等输入路径）。
+ *
+ * 典型结构：每条笔记一个 `.html` + 同名 `.resources/`（或 `_resources`）子目录，
+ * 多笔记本导出时按笔记本分目录；结构随客户端版本有差异——不依赖固定命名，
+ * 资源以 HTML 内的相对引用定位（§15.12）。
+ *
+ * 安全：jsdom 以 outside-only 解析（不执行脚本）；HTML 经 DOMPurify 清洗；
+ * 资源引用只允许解析到导出根内（拒 traversal 与符号链接）。
+ * 本地资源以 `evernote-resource://<sha256前16位>` 合成 URI 进正文与
+ * asset.originalUrl——与 ENEX 的 enex-resource:// 同机制复用目标端本地化。
+ */
+
+/** HTML 资源合成 URI 前缀（区别于 ENEX 资源，便于诊断区分来源）。 */
+export const evernoteResourceUri = (sha256Hex: string): string =>
+  `evernote-resource://${sha256Hex.slice(0, 16)}`;
+
+const EXT_MIME: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.pdf': 'application/pdf',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.mp4': 'video/mp4',
+  '.mov': 'video/quicktime',
+  '.doc': 'application/msword',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xls': 'application/vnd.ms-excel',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.zip': 'application/zip',
+};
+
+export interface HtmlNoteHeader {
+  /** 绝对路径。 */
+  path: string;
+  /** 相对导出根的路径（externalId 组成部分，搬移目录不影响已入库身份）。 */
+  relPath: string;
+  fileSha256: string;
+  title: string;
+  /** §15.12 由目录结构推断：父目录名（非 resources 目录）；根层级回退导出根目录名。 */
+  notebook: string;
+  /** 同名 .resources/ 子目录（存在时）。 */
+  resourcesDir?: string | undefined;
+}
+
+/** 从 HTML 文本提取标题：<title> → h1 → 空串（调用方回退文件名）。 */
+export function extractTitleFromHtml(html: string): string {
+  const dom = new JSDOM(html, { runScripts: 'outside-only' });
+  const t = dom.window.document.querySelector('title')?.textContent?.trim();
+  if (t !== undefined && t.length > 0) return t;
+  const h1 = dom.window.document.querySelector('h1')?.textContent?.trim();
+  return h1 ?? '';
+}
+
+/** 轻量头信息：标题 + 笔记本推断 + resources 目录探测 + 文件哈希。 */
+export function scanHtmlNote(
+  path: string,
+  exportRoot: string,
+): HtmlNoteHeader {
+  const html = readFileSync(path, 'utf8');
+  const fileSha256 = createHash('sha256').update(html, 'utf8').digest('hex');
+  const base = basename(path, '.html');
+  const dir = dirname(path);
+  const parentName = basename(dir);
+  const notebook = isResourcesDirName(parentName)
+    ? basename(exportRoot)
+    : parentName;
+  const resourcesDir = detectResourcesDir(dir, base);
+  return {
+    path,
+    relPath: relative(exportRoot, path) || base,
+    fileSha256,
+    title: extractTitleFromHtml(html) || base,
+    notebook,
+    resourcesDir,
+  };
+}
+
+function isResourcesDirName(name: string): boolean {
+  return name.endsWith('.resources') || name === '_resources';
+}
+
+function detectResourcesDir(dir: string, noteBase: string): string | undefined {
+  for (const candidate of [`${noteBase}.resources`, `${noteBase}_resources`, '_resources']) {
+    const p = resolve(dir, candidate);
+    try {
+      if (lstatSync(p).isDirectory()) return p;
+    } catch {
+      // 不存在，继续探测
+    }
+  }
+  return undefined;
+}
+
+export interface HtmlExtractResult {
+  bodyHtml: string;
+  assets: SourceAsset[];
+  links: SourceLink[];
+  /** 解析到导出根内并成功读取的本地资源数。 */
+  resolvedResources: number;
+  /** 引用了但文件不存在/在导出根外的资源数（进降级）。 */
+  missingResources: number;
+  externalLinksCount: number;
+  /** 正文中的远程 <img>（http/https；§15.6 下载管线，未启用时保留远程链接）。 */
+  remoteImages: Array<{ url: string; alt?: string | undefined }>;
+}
+
+/**
+ * 完整解析一条 HTML 笔记：正文清洗 + 本地资源字节化 + 链接收集。
+ * exportRoot 用于资源边界校验（引用逃逸或符号链接一律按缺失处理，§15.12）。
+ */
+export function extractHtmlNote(path: string, exportRoot: string): HtmlExtractResult {
+  const html = readFileSync(path, 'utf8');
+  const dom = new JSDOM(html, { runScripts: 'outside-only', resources: undefined });
+  const doc = dom.window.document;
+  const noteDir = dirname(path);
+
+  const result: HtmlExtractResult = {
+    bodyHtml: '',
+    assets: [],
+    links: [],
+    resolvedResources: 0,
+    missingResources: 0,
+    externalLinksCount: 0,
+    remoteImages: [],
+  };
+  const seenSha = new Set<string>();
+  const seenNames = new Set<string>();
+  const markAttr = 'data-ink-resource';
+
+  /** 尝试把相对引用解析为导出根内的真实文件；失败返回 null。 */
+  const resolveLocal = (ref: string): string | null => {
+    if (ref.startsWith('http://') || ref.startsWith('https://') || ref.startsWith('evernote://') || ref.startsWith('#')) {
+      return null;
+    }
+    const abs = resolve(noteDir, decodeURIComponent(ref.split('#')[0] ?? ref));
+    if (!isPathInside(abs, exportRoot)) return null;
+    try {
+      const st = lstatSync(abs);
+      if (!st.isFile() || st.isSymbolicLink()) return null;
+      assertSymlinkSafe(exportRoot, abs);
+      return abs;
+    } catch {
+      return null;
+    }
+  };
+
+  const buildAsset = (abs: string): { asset: SourceAsset; uri: string } => {
+    const bytes = readFileSync(abs);
+    const sha256Hex = createHash('sha256').update(bytes).digest('hex');
+    const sniffed = sniffMime(new Uint8Array(bytes));
+    const ext = extname(abs).toLowerCase();
+    const mime = sniffed ?? EXT_MIME[ext] ?? 'application/octet-stream';
+    let fileName = sanitizeFilename(basename(abs), { maxLength: 120 });
+    if (seenNames.has(fileName.toLowerCase())) {
+      const stem = fileName.replace(/\.[^.]+$/, '');
+      fileName = `${stem}-${sha256Hex.slice(0, 8)}${ext}`;
+    }
+    seenNames.add(fileName.toLowerCase());
+    return {
+      asset: {
+        externalId: sha256Hex.slice(0, 32),
+        originalUrl: evernoteResourceUri(sha256Hex),
+        mimeType: mime,
+        byteSize: bytes.length,
+        sha256: `sha256:${sha256Hex}`,
+        kind: assetKindOf(mime),
+        fileName,
+        data: new Uint8Array(bytes),
+      },
+      uri: evernoteResourceUri(sha256Hex),
+    };
+  };
+
+  // PASS 1（未清洗 DOM）：定位本地资源引用并标记，收集外链
+  for (const img of [...doc.querySelectorAll('img')]) {
+    const src = img.getAttribute('src');
+    if (src === null) continue;
+    if (/^https?:\/\//i.test(src)) {
+      result.remoteImages.push({ url: src, alt: img.getAttribute('alt') ?? undefined });
+      continue; // 远程图片保留原链接（§15.6 下载管线）
+    }
+    const abs = resolveLocal(src);
+    if (abs === null) {
+      result.missingResources += 1;
+      img.setAttribute(markAttr, 'missing');
+      continue;
+    }
+    const { asset, uri } = buildAsset(abs);
+    if (seenSha.has(asset.sha256!)) continue; // 同内容去重（引用走同一 URI）
+    seenSha.add(asset.sha256!);
+    result.assets.push(asset);
+    result.resolvedResources += 1;
+    img.setAttribute(markAttr, uri);
+  }
+
+  for (const a of [...doc.querySelectorAll('a')]) {
+    const href = a.getAttribute('href');
+    if (href === null) continue;
+    if (/^https?:\/\//i.test(href)) {
+      result.links.push({ url: href, text: (a.textContent ?? '').trim(), kind: 'external' });
+      result.externalLinksCount += 1;
+      continue;
+    }
+    if (href.startsWith('evernote://')) {
+      result.links.push({ url: href, text: (a.textContent ?? '').trim(), kind: 'internal' });
+      continue;
+    }
+    const abs = resolveLocal(href);
+    if (abs === null) continue; // 锚点等非资源引用不动
+    const { asset } = buildAsset(abs);
+    if (!seenSha.has(asset.sha256!)) {
+      seenSha.add(asset.sha256!);
+      result.assets.push(asset);
+      result.resolvedResources += 1;
+    }
+    // §15.7.5：附件不改写正文位置 → 标记为附件引用占位
+    a.setAttribute(markAttr, `attachment:${asset.fileName}`);
+  }
+
+  // PASS 2：按标记重写（在清洗前的 DOM 上做，清洗保留 data-* 属性）
+  for (const img of [...doc.querySelectorAll(`img[${markAttr}]`)]) {
+    const mark = img.getAttribute(markAttr)!;
+    if (mark === 'missing') {
+      const span = doc.createElement('span');
+      span.className = 'en-media-missing';
+      span.textContent = '⚠️ 资源缺失（HTML 导出中未找到引用文件）';
+      img.replaceWith(span);
+    } else {
+      img.setAttribute('src', mark);
+    }
+    img.removeAttribute(markAttr);
+  }
+  for (const a of [...doc.querySelectorAll(`a[${markAttr}]`)]) {
+    const mark = a.getAttribute(markAttr)!;
+    if (mark.startsWith('attachment:')) {
+      const span = doc.createElement('span');
+      span.className = 'en-attachment-ref';
+      span.textContent = `📎 附件：${mark.slice('attachment:'.length)}（见文末附件区）`;
+      a.replaceWith(span);
+    }
+    a.removeAttribute(markAttr);
+  }
+
+  const body = doc.body;
+  const titleEl = doc.querySelector('title');
+  const h1 = doc.querySelector('h1');
+  // 标题节点不重复进正文（文件名 <title> 与 h1 与正文头重复）
+  if (titleEl !== null) titleEl.remove();
+  if (h1 !== null && (h1.textContent ?? '').trim() === extractTitleFromHtml(html)) {
+    h1.remove();
+  }
+
+  result.bodyHtml = sanitizeNoteHtml(body.innerHTML);
+  return result;
+}

@@ -242,16 +242,20 @@ describe('EvernoteSourceConfigSchema（§15.1）', () => {
     expect(cfg.assets.downloadImages).toBe(false);
   });
 
-  it('formats 出现 html 时给出明确未实现报错', () => {
+  it('formats 接受 enex 与 html，拒绝未知格式', () => {
+    expect(
+      EvernoteSourceConfigSchema.safeParse({
+        sourceInstanceId: 'x',
+        inputPaths: ['a'],
+        formats: ['enex', 'html'],
+      }).success,
+    ).toBe(true);
     const r = EvernoteSourceConfigSchema.safeParse({
       sourceInstanceId: 'x',
       inputPaths: ['a'],
-      formats: ['enex', 'html'],
+      formats: ['pdf'],
     });
     expect(r.success).toBe(false);
-    if (!r.success) {
-      expect(r.error.issues[0]!.message).toContain('仅支持 enex');
-    }
   });
 
   it('未知字段被拒绝（strict）', () => {

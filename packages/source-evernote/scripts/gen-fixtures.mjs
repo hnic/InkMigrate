@@ -211,4 +211,54 @@ writeFileSync(
 // ─── yinxiang-export.notes：印象笔记专有加密格式构造样本（用于拒绝测试）───
 writeFileSync(join(OUT, 'yinxiang-export.notes'), '构造样本（非真实数据）：印象笔记 base64:aes 加密导出\n');
 
+// ─── html-export/：§15.12 HTML 导出目录 fixture ───
+// 结构：每条笔记一个 .html + 同名 .resources/ 子目录；笔记本由父目录名推断。
+const HTML_DIR = join(OUT, 'html-export', '工作笔记本');
+mkdirSync(join(HTML_DIR, '会议记录.resources'), { recursive: true });
+writeFileSync(join(HTML_DIR, '会议记录.resources', '白板照片.png'), PNG_RED);
+writeFileSync(join(HTML_DIR, '会议记录.resources', '议程.pdf'), PDF_MIN);
+
+writeFileSync(
+  join(HTML_DIR, '会议记录.html'),
+  `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>会议记录</title>
+</head>
+<body>
+<h1>会议记录</h1>
+<div>本周讨论了迁移方案。</div>
+<div><img src="会议记录.resources/白板照片.png" alt="白板"></div>
+<div>附件：<a href="会议记录.resources/议程.pdf">议程.pdf</a></div>
+<div>参考：<a href="https://example.com/doc">外部文档</a></div>
+<script>alert('evil')</script>
+<div onclick="evil()">不应执行的属性</div>
+</body>
+</html>
+`,
+);
+
+writeFileSync(
+  join(HTML_DIR, '随笔.html'),
+  `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>随笔</title></head>
+<body><div>没有附件的短笔记。</div></body></html>
+`,
+);
+
+// 根目录层级笔记：笔记本回退为导出根目录名；含缺失资源引用（对账降级）
+mkdirSync(join(OUT, 'html-export'), { recursive: true });
+writeFileSync(
+  join(OUT, 'html-export', '剪藏.html'),
+  `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>剪藏</title></head>
+<body>
+<div>剪藏正文，引用远程图与缺失本地图。</div>
+<img src="https://example.invalid/remote.png" alt="远程图">
+<img src="不存在的资源.png">
+</body></html>
+`,
+);
+
 console.log(`fixtures written to ${OUT}`);
