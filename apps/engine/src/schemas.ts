@@ -42,6 +42,7 @@ export const MigrateStartSchema = z.object({
   favoritesUrl: z.string().optional(),
   maxItems: positiveInt.optional(),
   intervalMs: positiveMs.optional(),
+  configPath: z.string().min(1).optional(),
 });
 
 export const MigrateResumeSchema = z.object({
@@ -50,6 +51,13 @@ export const MigrateResumeSchema = z.object({
   vaultPath: z.string().min(1),
   favoritesUrl: z.string().optional(),
   maxItems: positiveInt.optional(),
+  configPath: z.string().min(1).optional(),
+});
+
+export const ScanPreviewSchema = z.object({
+  source: idField,
+  stateDir: z.string().min(1),
+  configPath: z.string().min(1),
 });
 
 export const MigrateResumableSchema = z.object({

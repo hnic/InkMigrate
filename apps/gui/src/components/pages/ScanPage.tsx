@@ -14,6 +14,115 @@ interface Props {
 }
 
 export function ScanPage({ settings, update, rpcCall, addLog, activePhase, cancel }: Props) {
+  if (settings.sourceAdapter === 'evernote') {
+    return <EvernotePreview settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} />;
+  }
+  return <ToutiaoScan settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} activePhase={activePhase} cancel={cancel} />;
+}
+
+/** §15 Evernote 文件源预览：条目数 + 笔记本分布 + 问题清单（不写库）。 */
+function EvernotePreview({ settings, update, rpcCall, addLog }: Omit<Props, 'activePhase' | 'cancel'>) {
+  const [result, setResult] = useState<{
+    uniqueItems: number;
+    byNotebook: Record<string, number>;
+    issues: string[];
+  } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function handlePreview() {
+    setResult(null);
+    setError(null);
+    setBusy(true);
+    try {
+      const res = (await rpcCall('scan.preview', {
+        source: settings.source,
+        stateDir: settings.stateDir,
+        configPath: settings.configPath,
+      })) as { uniqueItems: number; byNotebook: Record<string, number>; issues: string[] };
+      setResult(res);
+      addLog('info', `预览完成：${res.uniqueItems} 条`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg);
+      addLog('error', `预览失败：${msg}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+      <h2 style={{ fontSize: '18px' }}>扫描预览（Evernote）</h2>
+
+      <ConfigPrompt
+        settings={settings}
+        update={update}
+        required={['stateDir']}
+        message="⚠️ 请先在设置页填写工作区目录与配置文件路径"
+      />
+
+      <div style={{ padding: '16px', background: 'var(--bg-panel)', borderRadius: '8px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+        <div style={{ fontSize: '13px', color: 'var(--text-dim)' }}>
+          读取配置指向的 ENEX/HTML 导出并统计条目数与笔记本分布。纯预览，不写数据库。
+        </div>
+
+        <button onClick={handlePreview} disabled={busy || !settings.stateDir || !settings.configPath}>
+          {busy ? '预览中...' : '开始预览'}
+        </button>
+
+        {!settings.configPath && (
+          <div style={{ fontSize: '13px', color: 'var(--warning)' }}>
+            ⚠️ 请先在「设置」页填写配置文件（inkmigrate.yaml）路径
+          </div>
+        )}
+
+        {error && (
+          <div style={{
+            padding: '10px 12px',
+            background: 'rgba(231, 76, 60, 0.15)',
+            borderRadius: '6px',
+            border: '1px solid rgba(231, 76, 60, 0.3)',
+            color: 'var(--error)',
+            fontSize: '13px',
+          }}>
+            ❌ {error}
+          </div>
+        )}
+
+        {result && (
+          <div style={{ marginTop: '8px', padding: '12px', background: 'var(--bg-hover)', borderRadius: '6px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <div>
+              <span style={{ fontSize: '24px', fontWeight: 700, color: 'var(--success)' }}>
+                {result.uniqueItems}
+              </span>
+              <span style={{ color: 'var(--text-dim)', fontSize: '12px' }}> 个条目</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '13px' }}>
+              {Object.entries(result.byNotebook)
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([nb, count]) => (
+                  <div key={nb} style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span>📁 {nb}</span>
+                    <span style={{ color: 'var(--text-dim)' }}>{count} 条</span>
+                  </div>
+                ))}
+            </div>
+            {result.issues.length > 0 && (
+              <div style={{ fontSize: '12px', color: 'var(--warning)', whiteSpace: 'pre-wrap' }}>
+                ⚠️ {result.issues.length} 条注意事项：
+                {'\n'}
+                {result.issues.slice(0, 5).join('\n')}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ToutiaoScan({ settings, update, rpcCall, addLog, activePhase, cancel }: Props) {
   const scanning = activePhase === 'scanning';
   const [result, setResult] = useState<{ uniqueItems: number; terminationReason: string } | null>(null);
   const [error, setError] = useState<string | null>(null);

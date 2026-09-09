@@ -88,6 +88,11 @@ export interface MigrateStartParams {
   favoritesUrl?: string;
   maxItems?: number;
   intervalMs?: number;
+  /**
+   * §10.2 inkmigrate.yaml 路径（Evernote 等文件源）：engine 按 source id 与
+   * 配置中的 adapter 分派来源类型。可选——未传时维持 toutiao 行为（向后兼容）。
+   */
+  configPath?: string;
 }
 
 export interface MigrateResumeParams {
@@ -96,6 +101,8 @@ export interface MigrateResumeParams {
   vaultPath: string;
   favoritesUrl?: string;
   maxItems?: number;
+  /** 同 MigrateStartParams.configPath。 */
+  configPath?: string;
 }
 
 export interface MigrateResumableParams {
@@ -158,6 +165,24 @@ export interface StatusQueryResult {
   skippedCount: number;
 }
 
+/** §15 Evernote 等文件源的预览扫描（不写库、不启动浏览器）。 */
+export interface ScanPreviewParams {
+  source: string;
+  stateDir: string;
+  configPath: string;
+}
+
+export interface ScanPreviewResult {
+  sourceInstanceId: string;
+  uniqueItems: number;
+  /** Stack/笔记本 → 条目数（无 Stack 时仅笔记本名）。 */
+  byNotebook: Record<string, number>;
+  /** 非致命问题（损坏文件、.notes 拒绝前的提示等）。 */
+  issues: string[];
+  /** 跳过的输入文件（非 .enex/.html）。 */
+  skipped: string[];
+}
+
 // ─── 通知类型（GUI 监听 sidecar 事件用） ───
 
 export interface ProgressNotification {
@@ -198,6 +223,7 @@ export interface RpcMethodMap {
   'auth.status': { params: AuthStatusParams; result: AuthStatusResult };
   'auth.clear': { params: AuthStatusParams; result: { cleared: boolean } };
   'scan.start': { params: ScanStartParams; result: ScanStartResult };
+  'scan.preview': { params: ScanPreviewParams; result: ScanPreviewResult };
   'migrate.start': { params: MigrateStartParams; result: MigrateResult };
   'migrate.resume': { params: MigrateResumeParams; result: MigrateResult };
   'migrate.resumable': { params: MigrateResumableParams; result: MigrateResumableResult };

@@ -21,12 +21,29 @@ const TOOLS: NavItem[] = [
   { id: 'settings', label: '设置', icon: '⚙️' },
 ];
 
-export function Sidebar({ current, onSelect }: { current: PageId; onSelect: (p: PageId) => void }) {
+export function Sidebar({
+  current,
+  onSelect,
+  sourceAdapter,
+}: {
+  current: PageId;
+  onSelect: (p: PageId) => void;
+  /** evernote 文件源无登录/清理步骤，隐藏对应导航项。 */
+  sourceAdapter?: 'toutiao' | 'evernote';
+}) {
+  // evernote 工作流：扫描 → 迁移（无登录、无源端清理），序号重排
+  const workflow =
+    sourceAdapter === 'evernote'
+      ? [
+          { id: 'scan' as PageId, label: '扫描预览', icon: '🔍', step: 1 },
+          { id: 'migrate' as PageId, label: '迁移', icon: '📦', step: 2 },
+        ]
+      : WORKFLOW;
   return (
     <nav style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
       {/* 工作流步骤 */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-        {WORKFLOW.map((item) => (
+        {workflow.map((item) => (
           <NavButton key={item.id} item={item} current={current} onSelect={onSelect} />
         ))}
       </div>

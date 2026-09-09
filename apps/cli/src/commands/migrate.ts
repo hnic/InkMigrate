@@ -23,7 +23,7 @@ import { createObsidianTarget } from '@inkmigrate/target-obsidian';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parsePositiveInt } from '../util.js';
-import { buildToutiaoSource, resolveEvernoteSource, resolveTargetConfig } from '../source-wiring.js';
+import { buildToutiaoSource, resolveEvernoteSource, resolveTargetConfig } from '@inkmigrate/wiring';
 
 /**
  * §22 `inkmigrate migrate` 命令。

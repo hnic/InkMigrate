@@ -24,6 +24,8 @@ import {
   runCleanupUnfavorite,
   type ToutiaoBrowserAdapterConfig,
 } from '@inkmigrate/source-toutiao';
+import { lastScanIssues } from '@inkmigrate/source-evernote';
+import { resolveEvernoteSource, resolveSourceWiring, resolveTargetConfig } from '@inkmigrate/wiring';
 import { createObsidianTarget } from '@inkmigrate/target-obsidian';
 import { rmSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -32,6 +34,7 @@ import {
   AuthLoginSchema,
   AuthStatusSchema,
   ScanStartSchema,
+  ScanPreviewSchema,
   MigrateStartSchema,
   MigrateResumeSchema,
   MigrateResumableSchema,
@@ -51,6 +54,8 @@ import type {
   AuthStatusResult,
   ScanStartParams,
   ScanStartResult,
+  ScanPreviewParams,
+  ScanPreviewResult,
   MigrateStartParams,
   MigrateResumeParams,
   MigrateResumableParams,
@@ -153,6 +158,7 @@ export function registerAllHandlers(): void {
   registerMethod('auth.status', (p) => handleAuthStatus(expandPaths(p as unknown as AuthStatusParams, ['stateDir'])), AuthStatusSchema);
   registerMethod('auth.clear', (p) => handleAuthClear(expandPaths(p as unknown as AuthStatusParams, ['stateDir'])), AuthStatusSchema);
   registerMethod('scan.start', (p) => handleScanStart(expandPaths(p as unknown as ScanStartParams, ['stateDir'])), ScanStartSchema);
+  registerMethod('scan.preview', (p) => handleScanPreview(expandPaths(p as unknown as ScanPreviewParams, ['stateDir', 'configPath'])), ScanPreviewSchema);
   registerMethod('migrate.start', (p) => handleMigrateStart(expandPaths(p as unknown as MigrateStartParams, ['stateDir', 'vaultPath'])), MigrateStartSchema);
   registerMethod('migrate.resume', (p) => handleMigrateResume(expandPaths(p as unknown as MigrateResumeParams, ['stateDir', 'vaultPath'])), MigrateResumeSchema);
   registerMethod('migrate.resumable', (p) => handleMigrateResumable(expandPaths(p as unknown as MigrateResumableParams, ['stateDir'])), MigrateResumableSchema);
@@ -251,6 +257,36 @@ async function handleAuthClear(params: AuthStatusParams | undefined): Promise<{ 
 }
 
 // ─── scan ───
+
+/**
+ * §15 Evernote 文件源预览扫描：条目数 + Stack/笔记本分布 + 问题清单。
+ * 不写库、不启动浏览器、不占用长任务槽位（纯读，秒级完成）。
+ */
+async function handleScanPreview(params: ScanPreviewParams | undefined): Promise<ScanPreviewResult> {
+  if (params === undefined) throw new Error('missing params');
+  requireStateDir(params.stateDir);
+  requireId(params.source, 'source');
+  const wiring = resolveEvernoteSource({
+    config: params.configPath,
+    sourceId: params.source,
+  });
+  if (wiring === undefined) {
+    throw new Error(
+      `配置 ${params.configPath} 中未找到启用的 evernote 来源：${params.source}（来源不存在、未启用或 adapter 不是 evernote）`,
+    );
+  }
+  const byNotebook: Record<string, number> = {};
+  let count = 0;
+  for await (const ref of wiring.adapter.scan({ config: {}, workspaceDir: params.stateDir })) {
+    count += 1;
+    const meta = ref.sourceMetadata as { enex?: { notebook?: string | undefined; stack?: string | undefined } };
+    const key = [meta.enex?.stack, meta.enex?.notebook].filter(Boolean).join('/') || '(未知)';
+    byNotebook[key] = (byNotebook[key] ?? 0) + 1;
+  }
+  const issues = [...lastScanIssues(wiring.adapter)];
+  await wiring.adapter.close();
+  return { sourceInstanceId: params.source, uniqueItems: count, byNotebook, issues, skipped: [] };
+}
 
 async function handleScanStart(params: ScanStartParams | undefined): Promise<ScanStartResult> {
   if (params === undefined) throw new Error('missing params');
@@ -475,25 +511,44 @@ async function runMigrateJob(
     requirePositiveIntIfDefined(params.maxItems, 'maxItems');
 
     // 构造 source adapter（profileDir 在 ensureInstance 之前计算，用于 config_hash）
-    const profileDir = profilePath(params.stateDir, sourceInstanceId);
-    if (!profileExists(params.stateDir, sourceInstanceId)) {
-      throw new Error(`Profile 不存在：${profileDir}，请先 auth.login`);
+    // §10.2 配置驱动分派（与 CLI 同一接线，见 @inkmigrate/wiring）：
+    // configPath 命中 adapter: evernote → 文件源（无需 Profile）；否则 toutiao。
+    const wiring =
+      params.configPath !== undefined
+        ? resolveSourceWiring({
+            config: params.configPath,
+            sourceId: sourceInstanceId,
+            stateDir: params.stateDir,
+          })
+        : undefined;
+
+    if (wiring === undefined || wiring.kind === 'toutiao') {
+      const profileDir = profilePath(params.stateDir, sourceInstanceId);
+      if (!profileExists(params.stateDir, sourceInstanceId)) {
+        throw new Error(`Profile 不存在：${profileDir}，请先 auth.login`);
+      }
     }
 
     // 确保实例存在（FK 约束要求）。config_hash 反映各实例配置指纹。
-    const sourceConfig: Record<string, unknown> = { sourceInstanceId, profileDir, headless: false };
+    const sourceConfig: Record<string, unknown> =
+      wiring !== undefined
+        ? wiring.instanceConfig
+        : { sourceInstanceId, profileDir: profilePath(params.stateDir, sourceInstanceId), headless: false };
     // R4-M7: targetConfig 用与 CLI 一致的完整 7 键（原只传 vaultPath，hash 与 CLI 不同
-    // → 每次跨工具运行触发虚假 UPDATE）。
-    const targetConfig: Record<string, unknown> = {
-      vaultPath: params.vaultPath,
-      importSubdir: '',
-      attachmentsSubdir: 'Attachments',
-      linkStyle: 'wikilink',
-      overwritePolicy: 'preserve',
-      collectionMapping: { toTags: false, toFolders: false },
-      maxFilenameLength: 100,
-    };
-    ensureInstance(db, sourceInstanceId, 'toutiao', 'source', sourceConfig);
+    // → 每次跨工具运行触发虚假 UPDATE）。configPath 存在时经 yaml target（schema 默认值）。
+    const targetConfig: Record<string, unknown> =
+      params.configPath !== undefined
+        ? resolveTargetConfig(params.configPath, targetInstanceId, params.vaultPath)
+        : {
+            vaultPath: params.vaultPath,
+            importSubdir: '',
+            attachmentsSubdir: 'Attachments',
+            linkStyle: 'wikilink',
+            overwritePolicy: 'preserve',
+            collectionMapping: { toTags: false, toFolders: false },
+            maxFilenameLength: 100,
+          };
+    ensureInstance(db, sourceInstanceId, wiring?.kind ?? 'toutiao', 'source', sourceConfig);
     ensureInstance(db, targetInstanceId, 'obsidian', 'target', targetConfig);
 
     sendNotification('log', { level: 'info', message: isResume ? `续跑 Job ${(params as MigrateResumeParams).job}...` : '正在创建迁移任务...' });
@@ -511,21 +566,27 @@ async function runMigrateJob(
       updatedAt: now,
     });
 
-    // 构造 source adapter（adapterConfig 用已计算的 profileDir）
-    const adapterConfig: ToutiaoBrowserAdapterConfig = {
-      sourceInstanceId,
-      profileDir,
-      // 有头模式：头条反爬会拦截 headless（返回空壳），迁移必须用有头
-      headless: false,
-    };
+    // 构造 source adapter：wiring 命中（evernote/toutiao）用其适配器；
+    // 无 configPath 时维持 toutiao 浏览器（adapterConfig 用已计算的 profileDir）
     const startParams = params as MigrateStartParams;
-    if (startParams.favoritesUrl !== undefined) {
-      adapterConfig.favoritesUrl = startParams.favoritesUrl;
+    let sourceAdapter;
+    if (wiring !== undefined) {
+      sourceAdapter = wiring.adapter;
+    } else {
+      const adapterConfig: ToutiaoBrowserAdapterConfig = {
+        sourceInstanceId,
+        profileDir: profilePath(params.stateDir, sourceInstanceId),
+        // 有头模式：头条反爬会拦截 headless（返回空壳），迁移必须用有头
+        headless: false,
+      };
+      if (startParams.favoritesUrl !== undefined) {
+        adapterConfig.favoritesUrl = startParams.favoritesUrl;
+      }
+      if (startParams.maxItems !== undefined) {
+        adapterConfig.maxScanItems = startParams.maxItems;
+      }
+      sourceAdapter = createToutiaoSource(adapterConfig);
     }
-    if (startParams.maxItems !== undefined) {
-      adapterConfig.maxScanItems = startParams.maxItems;
-    }
-    const sourceAdapter = createToutiaoSource(adapterConfig);
 
     // 构造 target。intervalMs 不能放 targetConfig（ObsidianTargetConfigSchema strict
     // 会拒绝），现作为 runMigrationJob 的一级字段传入（类型化契约，不再塞 config bag）。
@@ -534,15 +595,7 @@ async function runMigrateJob(
       config: {},
       workspaceDir: params.stateDir,
       vaultPath: params.vaultPath,
-      targetConfig: {
-        vaultPath: params.vaultPath,
-        importSubdir: '',
-        attachmentsSubdir: 'Attachments',
-        linkStyle: 'wikilink',
-        overwritePolicy: 'preserve',
-        collectionMapping: { toTags: false, toFolders: false },
-        maxFilenameLength: 100,
-      } as Record<string, unknown>,
+      targetConfig: targetConfig,
     };
 
     // 进度通过 onProgress 回调实时推送（见下方 runMigrationJob 调用）

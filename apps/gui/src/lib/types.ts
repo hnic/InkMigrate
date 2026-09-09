@@ -27,6 +27,10 @@ export interface AppSettings {
   target: string;
   /** 登录状态（由 LoginPage 检测后写入） */
   loggedIn?: boolean;
+  /** 来源类型：toutiao（浏览器收藏）| evernote（ENEX/HTML 导出文件，无需登录）。 */
+  sourceAdapter?: 'toutiao' | 'evernote';
+  /** inkmigrate.yaml 路径（evernote 来源必填；含 inputPaths/formats 等定义）。 */
+  configPath?: string;
 }
 
 export type PageId = 'login' | 'scan' | 'migrate' | 'cleanup' | 'report' | 'settings';

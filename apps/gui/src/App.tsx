@@ -18,6 +18,10 @@ export default function App() {
   const { settings, update } = useSettings();
   const { rpcCall, progress, logs, busy, activePhase, healthDegraded, addLog, cancel } = useSidecar();
   const { refresh: refreshLogin } = useLoginStatus({ settings, update });
+  // Evernote 文件源无登录步骤：默认页与 login 页重定向到扫描
+  const isEvernote = settings.sourceAdapter === 'evernote';
+  const effectivePage: PageId =
+    isEvernote && (page === 'login' || page === 'cleanup') ? 'scan' : page;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
@@ -52,7 +56,7 @@ export default function App() {
           background: 'var(--bg-panel)',
           borderRight: '1px solid var(--border)',
         }}>
-          <Sidebar current={page} onSelect={setPage} />
+          <Sidebar current={effectivePage} onSelect={setPage} sourceAdapter={settings.sourceAdapter} />
         </aside>
 
         {/* 内容区 */}
@@ -85,12 +89,12 @@ export default function App() {
 
           {/* 当前页面 */}
           <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
-            {page === 'login' && <LoginPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} refreshLogin={refreshLogin} />}
-            {page === 'scan' && <ScanPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} activePhase={activePhase} cancel={cancel} />}
-            {page === 'migrate' && <MigratePage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} activePhase={activePhase} cancel={cancel} />}
-            {page === 'cleanup' && <CleanupPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} busy={busy} activePhase={activePhase} cancel={cancel} />}
-            {page === 'report' && <ReportPage settings={settings} rpcCall={rpcCall} />}
-            {page === 'settings' && <SettingsPage settings={settings} update={update} />}
+            {effectivePage === 'login' && <LoginPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} refreshLogin={refreshLogin} />}
+            {effectivePage === 'scan' && <ScanPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} activePhase={activePhase} cancel={cancel} />}
+            {effectivePage === 'migrate' && <MigratePage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} activePhase={activePhase} cancel={cancel} />}
+            {effectivePage === 'cleanup' && <CleanupPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} busy={busy} activePhase={activePhase} cancel={cancel} />}
+            {effectivePage === 'report' && <ReportPage settings={settings} rpcCall={rpcCall} />}
+            {effectivePage === 'settings' && <SettingsPage settings={settings} update={update} />}
           </div>
 
           {/* 日志面板（始终显示在底部） */}

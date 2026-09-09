@@ -9,7 +9,7 @@ import {
 import { createObsidianTarget } from '@inkmigrate/target-obsidian';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { resolveSourceWiring, resolveTargetConfig } from '../source-wiring.js';
+import { resolveSourceWiring, resolveTargetConfig } from '@inkmigrate/wiring';
 
 /**
  * §22 `inkmigrate resume` 命令。

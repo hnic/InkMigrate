@@ -9,6 +9,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   favoritesUrl: '',
   source: 'toutiao-main',
   target: 'obsidian-main',
+  sourceAdapter: 'toutiao',
+  configPath: '',
 };
 
 /** 设置持久化 hook，存到 localStorage。 */

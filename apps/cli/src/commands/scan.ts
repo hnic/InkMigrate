@@ -9,7 +9,7 @@ import {
 import { join, resolve } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { parsePositiveInt } from '../util.js';
-import { resolveEvernoteSource, type SourceWiring } from '../source-wiring.js';
+import { resolveEvernoteSource, type SourceWiring } from '@inkmigrate/wiring';
 import { lastScanIssues } from '@inkmigrate/source-evernote';
 
 /**

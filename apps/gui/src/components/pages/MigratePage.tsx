@@ -67,6 +67,8 @@ export function MigratePage({ settings, update, rpcCall, addLog, activePhase, ca
       if (settings.favoritesUrl) params.favoritesUrl = settings.favoritesUrl;
       if (maxItems) params.maxItems = parseInt(maxItems, 10);
       if (interval) params.intervalMs = parseInt(interval, 10);
+      // §10.2 配置驱动的来源分派（Evernote 文件源）
+      if (settings.configPath) params.configPath = settings.configPath;
 
       const res = await rpcCall('migrate.start', params) as MigrateResult;
       setResult(res);
@@ -92,6 +94,7 @@ export function MigratePage({ settings, update, rpcCall, addLog, activePhase, ca
       };
       if (settings.favoritesUrl) params.favoritesUrl = settings.favoritesUrl;
       if (maxItems) params.maxItems = parseInt(maxItems, 10);
+      if (settings.configPath) params.configPath = settings.configPath;
 
       const res = await rpcCall('migrate.resume', params) as MigrateResult;
       setResult(res);
