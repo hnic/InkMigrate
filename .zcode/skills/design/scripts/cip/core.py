@@ -59,6 +59,9 @@ class BM25:
 
     def fit(self, documents):
         """Build BM25 index from documents"""
+        # Reset state so re-fitting an instance doesn't merge stale stats
+        self.doc_freqs = defaultdict(int)
+        self.idf = {}
         self.corpus = [self.tokenize(doc) for doc in documents]
         self.N = len(self.corpus)
         if self.N == 0:
@@ -144,7 +147,9 @@ def detect_domain(query):
         "mockup": ["mockup", "scene", "context", "photo", "shot", "lighting", "background", "studio", "lifestyle"]
     }
 
-    scores = {domain: sum(1 for kw in keywords if kw in query_lower) for domain, keywords in domain_keywords.items()}
+    # Word-boundary matching so short keywords ("car", "van", "cap", "photo")
+    # don't match inside unrelated words ("carry", "avant-garde", "capsule")
+    scores = {domain: sum(1 for kw in keywords if re.search(rf"\b{re.escape(kw)}\b", query_lower)) for domain, keywords in domain_keywords.items()}
     best = max(scores, key=scores.get)
     return best if scores[best] > 0 else "deliverable"
 
@@ -185,20 +190,21 @@ def get_cip_brief(brand_name, industry_query, style_query=None):
     """Generate a comprehensive CIP brief for a brand"""
     # Search industry
     industry_results = search(industry_query, "industry", 1)
-    industry = industry_results.get("results", [{}])[0] if industry_results.get("results") else {}
+    if "error" in industry_results:
+        return {"error": industry_results["error"], "brand_name": brand_name}
+    industry = industry_results["results"][0] if industry_results.get("results") else {}
 
     # Search style (use industry style if not specified)
     style_query = style_query or industry.get("CIP Style", "corporate minimal")
     style_results = search(style_query, "style", 1)
-    style = style_results.get("results", [{}])[0] if style_results.get("results") else {}
+    if "error" in style_results:
+        return {"error": style_results["error"], "brand_name": brand_name}
+    style = style_results["results"][0] if style_results.get("results") else {}
 
     # Get recommended deliverables for the industry
-    key_deliverables = industry.get("Key Deliverables", "").split()
-    deliverable_results = []
-    for d in key_deliverables[:5]:
-        result = search(d, "deliverable", 1)
-        if result.get("results"):
-            deliverable_results.append(result["results"][0])
+    # (search the full list as one multi-term BM25 query instead of shredding
+    # multi-word items like "business cards" into fragments)
+    deliverable_results = search(industry.get("Key Deliverables", ""), "deliverable", 5).get("results", [])
 
     return {
         "brand_name": brand_name,

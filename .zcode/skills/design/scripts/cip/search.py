@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from core import search, search_all, get_cip_brief, CSV_CONFIG
 
 
-def format_results(results, domain):
+def format_results(results):
     """Format search results for display"""
     if not results:
         return "No results found."
@@ -99,6 +99,9 @@ Examples:
 
     if args.cip_brief:
         brief = get_cip_brief(args.brand, args.query, args.style)
+        if "error" in brief:
+            print(f"Error: {brief['error']}", file=sys.stderr)
+            sys.exit(1)
         if args.json:
             print(json.dumps(brief, indent=2))
         else:
@@ -111,16 +114,19 @@ Examples:
             for domain, items in results.items():
                 print(f"\n{'#'*60}")
                 print(f"# {domain.upper()}")
-                print(format_results(items, domain))
+                print(format_results(items))
     else:
         result = search(args.query, args.domain, args.max)
+        if "error" in result:
+            print(f"Error: {result['error']}", file=sys.stderr)
+            sys.exit(1)
         if args.json:
             print(json.dumps(result, indent=2))
         else:
             print(f"\nDomain: {result['domain']}")
             print(f"Query: {result['query']}")
             print(f"Results: {result['count']}")
-            print(format_results(result.get("results", []), result["domain"]))
+            print(format_results(result.get("results", [])))
 
 
 if __name__ == "__main__":

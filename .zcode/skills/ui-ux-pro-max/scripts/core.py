@@ -176,8 +176,9 @@ class BM25:
 
 # ============ SEARCH FUNCTIONS ============
 def _load_csv(filepath):
-    """Load CSV and return list of dicts"""
-    with open(filepath, 'r', encoding='utf-8') as f:
+    """Load CSV and return list of dicts (utf-8-sig tolerates a BOM, which
+    would otherwise corrupt the first header name)"""
+    with open(filepath, 'r', encoding='utf-8-sig') as f:
         return list(csv.DictReader(f))
 
 
@@ -201,9 +202,21 @@ def _search_csv(filepath, search_cols, output_cols, query, max_results):
     for idx, score in ranked[:max_results]:
         if score > 0:
             row = data[idx]
-            results.append({col: row.get(col, "") for col in output_cols if col in row})
+            # row.get(col) or "" also coerces the None values DictReader
+            # produces for short rows, and keeps schema drift visible as an
+            # empty string instead of silently dropping the field
+            results.append({col: row.get(col) or "" for col in output_cols})
 
     return results
+
+
+def _keyword_matches(keyword, text):
+    """Word-boundary keyword match. Keywords that start/end with non-word
+    characters (e.g. '#', 'next.js') fall back to a plain substring check,
+    since \\b cannot anchor next to them."""
+    if re.search(r'^\W|\W$', keyword):
+        return keyword in text
+    return re.search(r'\b' + re.escape(keyword) + r'\b', text) is not None
 
 
 def detect_domain(query):
@@ -225,7 +238,7 @@ def detect_domain(query):
         "web": ["aria", "focus", "outline", "semantic", "virtualize", "autocomplete", "form", "input type", "preconnect"]
     }
 
-    scores = {domain: sum(1 for kw in keywords if re.search(r'\b' + re.escape(kw) + r'\b', query_lower)) for domain, keywords in domain_keywords.items()}
+    scores = {domain: sum(1 for kw in keywords if _keyword_matches(kw, query_lower)) for domain, keywords in domain_keywords.items()}
     best = max(scores, key=scores.get)
     return best if scores[best] > 0 else "style"
 
@@ -235,7 +248,9 @@ def search(query, domain=None, max_results=MAX_RESULTS):
     if domain is None:
         domain = detect_domain(query)
 
-    config = CSV_CONFIG.get(domain, CSV_CONFIG["style"])
+    if domain not in CSV_CONFIG:
+        return {"error": f"Unknown domain: {domain}. Available: {', '.join(CSV_CONFIG.keys())}"}
+    config = CSV_CONFIG[domain]
     filepath = DATA_DIR / config["file"]
 
     if not filepath.exists():

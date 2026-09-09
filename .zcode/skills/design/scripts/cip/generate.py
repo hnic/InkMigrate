@@ -17,6 +17,7 @@ Image Editing (text-and-image-to-image):
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -24,6 +25,11 @@ from datetime import datetime
 # Add parent directory for imports
 sys.path.insert(0, str(Path(__file__).parent))
 from core import search, get_cip_brief
+
+
+def slugify(text, fallback="brand"):
+    """Sanitize text for use in a filename (prevents path traversal)."""
+    return re.sub(r"[^a-z0-9-]+", "-", text.lower()).strip("-") or fallback
 
 # Model options
 MODELS = {
@@ -50,13 +56,13 @@ def load_logo_image(logo_path):
     try:
         img = Image.open(logo_path)
         # Convert to RGB if necessary (Gemini works best with RGB)
-        if img.mode in ('RGBA', 'P'):
+        if img.mode in ('RGBA', 'P', 'LA'):
             # Create white background for transparent images
+            # (convert palette/LA images to RGBA so transparency is honored)
+            if img.mode != 'RGBA':
+                img = img.convert('RGBA')
             background = Image.new('RGB', img.size, (255, 255, 255))
-            if img.mode == 'RGBA':
-                background.paste(img, mask=img.split()[3])  # Use alpha channel as mask
-            else:
-                background.paste(img)
+            background.paste(img, mask=img.split()[3])  # Use alpha channel as mask
             img = background
         elif img.mode != 'RGB':
             img = img.convert('RGB')
@@ -254,8 +260,12 @@ def generate_with_nano_banana(prompt_data, output_dir=None, model_key="flash", a
         )
 
         # Extract image from response
-        if response.candidates and response.candidates[0].content.parts:
-            for part in response.candidates[0].content.parts:
+        # (guard content/parts: safety-blocked or empty responses can have
+        # candidates whose content is None)
+        candidate = response.candidates[0] if response.candidates else None
+        parts = candidate.content.parts if candidate and candidate.content else None
+        if parts:
+            for part in parts:
                 if hasattr(part, 'inline_data') and part.inline_data:
                     # Save image
                     output_dir = output_dir or Path.cwd()
@@ -263,8 +273,8 @@ def generate_with_nano_banana(prompt_data, output_dir=None, model_key="flash", a
                     output_dir.mkdir(parents=True, exist_ok=True)
 
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    brand_slug = prompt_data["brand"].lower().replace(" ", "-")
-                    deliverable_slug = prompt_data["deliverable"].lower().replace(" ", "-")
+                    brand_slug = slugify(prompt_data["brand"])
+                    deliverable_slug = slugify(prompt_data["deliverable"], "deliverable")
                     filename = f"{brand_slug}-{deliverable_slug}-{timestamp}.png"
                     filepath = output_dir / filename
 
@@ -363,8 +373,10 @@ def check_logo_required(brand_name, skip_prompt=False):
         elif choice == '3':
             return 'exit'
         return 'continue'
-    except (EOFError, KeyboardInterrupt):
+    except EOFError:
         return 'continue'
+    except KeyboardInterrupt:
+        raise  # Ctrl+C is an explicit abort, don't swallow it
 
 
 def main():
@@ -439,7 +451,7 @@ Image Editing Mode:
 
     if args.set or args.deliverables:
         # Generate multiple deliverables
-        deliverables = args.deliverables.split(",") if args.deliverables else None
+        deliverables = [d.strip() for d in args.deliverables.split(",") if d.strip()] if args.deliverables else None
 
         if args.prompt_only:
             results = []
@@ -460,7 +472,9 @@ Image Editing Mode:
             if args.json:
                 print(json.dumps(results, indent=2))
             else:
-                print(f"\n✅ Generated {len(results)} CIP mockups")
+                print(f"\n✅ Generated {len(results)} CIP mockups" if results else "\n❌ No CIP mockups were generated")
+            if not results:
+                sys.exit(1)
     else:
         # Generate single deliverable
         deliverable = args.deliverable or "business card"
@@ -478,6 +492,8 @@ Image Editing Mode:
             )
             if args.json:
                 print(json.dumps({"filepath": filepath, **prompt_data}, indent=2))
+            if not filepath:
+                sys.exit(1)
 
 
 if __name__ == "__main__":

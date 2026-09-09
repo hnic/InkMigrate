@@ -8,6 +8,7 @@ Wraps shadcn CLI for programmatic component installation.
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -52,9 +53,9 @@ class ShadcnInstaller:
             with open(self.components_json) as f:
                 config = json.load(f)
 
-            components_dir = self.project_root / config.get("aliases", {}).get(
-                "components", "components"
-            ).replace("@/", "")
+            components_dir = self._resolve_alias(
+                config.get("aliases", {}).get("components", "components")
+            )
             ui_dir = components_dir / "ui"
 
             if not ui_dir.exists():
@@ -63,6 +64,40 @@ class ShadcnInstaller:
             return [f.stem for f in ui_dir.glob("*.tsx") if f.is_file()]
         except (json.JSONDecodeError, KeyError, OSError):
             return []
+
+    def _resolve_alias(self, alias: str) -> Path:
+        """
+        Resolve a components.json alias (e.g. '@/components') to a directory.
+
+        Stripping the '@/' prefix alone is wrong for the common setup where
+        tsconfig.json maps '@/*' onto a subdirectory, e.g.
+        "paths": {"@/*": ["./src/*"]} places components in src/components/ui.
+        Consults tsconfig.json path mappings before falling back to the
+        project root.
+
+        Returns:
+            Path to the alias target, relative paths resolved against project root
+        """
+        if not alias.startswith("@/"):
+            return self.project_root / alias
+
+        prefix, _, rest = alias.partition("/")
+        base = ""
+        tsconfig = self.project_root / "tsconfig.json"
+        if tsconfig.exists():
+            try:
+                ts = json.loads(tsconfig.read_text())
+                paths = ts.get("compilerOptions", {}).get("paths", {})
+                for pattern, targets in paths.items():
+                    if pattern == f"{prefix}/*" and targets:
+                        target = str(targets[0])
+                        # './src/*' -> './src'; non-wildcard targets map directly
+                        base = target[:-2] if target.endswith("/*") else target
+                        break
+            except (json.JSONDecodeError, OSError, TypeError):
+                pass
+
+        return self.project_root / base / rest
 
     def _get_shadcn_version(self) -> str:
         """Read shadcn version from project package.json; fall back to a pinned default."""
@@ -77,6 +112,30 @@ class ShadcnInstaller:
             except (json.JSONDecodeError, KeyError):
                 pass
         return "2.3.0"  # pinned fallback; update when newer stable release is needed
+
+    def _run_shadcn(self, cmd: List[str]) -> subprocess.CompletedProcess:
+        """
+        Run an npx command non-interactively.
+
+        Resolves the npx executable via PATH (on Windows subprocess can't run
+        'npx' directly — it needs npx.cmd, which shutil.which finds), closes
+        stdin, and applies a timeout so a confirmation prompt (from npx or the
+        shadcn CLI) fails fast instead of hanging an unattended run.
+
+        Raises:
+            subprocess.CalledProcessError, subprocess.TimeoutExpired,
+            FileNotFoundError (npx missing)
+        """
+        npx = shutil.which(cmd[0]) or cmd[0]
+        return subprocess.run(
+            [npx] + cmd[1:],
+            cwd=self.project_root,
+            capture_output=True,
+            text=True,
+            check=True,
+            stdin=subprocess.DEVNULL,
+            timeout=600,
+        )
 
     def add_components(
         self, components: List[str], overwrite: bool = False
@@ -113,7 +172,7 @@ class ShadcnInstaller:
 
         # Build command
         shadcn_version = self._get_shadcn_version()
-        cmd = ["npx", f"shadcn@{shadcn_version}", "add"] + components
+        cmd = ["npx", f"shadcn@{shadcn_version}", "add", "--yes"] + components
 
         if overwrite:
             cmd.append("--overwrite")
@@ -123,13 +182,7 @@ class ShadcnInstaller:
 
         # Execute command
         try:
-            result = subprocess.run(
-                cmd,
-                cwd=self.project_root,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
+            result = self._run_shadcn(cmd)
 
             success_msg = f"Successfully added components: {', '.join(components)}"
             if result.stdout:
@@ -140,6 +193,8 @@ class ShadcnInstaller:
         except subprocess.CalledProcessError as e:
             error_msg = f"Failed to add components: {e.stderr or e.stdout or str(e)}"
             return False, error_msg
+        except subprocess.TimeoutExpired:
+            return False, "Failed to add components: timed out after 600 seconds"
         except FileNotFoundError:
             return False, "npx not found. Ensure Node.js is installed"
 
@@ -160,7 +215,7 @@ class ShadcnInstaller:
             )
 
         shadcn_version = self._get_shadcn_version()
-        cmd = ["npx", f"shadcn@{shadcn_version}", "add", "--all"]
+        cmd = ["npx", f"shadcn@{shadcn_version}", "add", "--all", "--yes"]
 
         if overwrite:
             cmd.append("--overwrite")
@@ -169,13 +224,7 @@ class ShadcnInstaller:
             return True, f"Would run: {' '.join(cmd)}"
 
         try:
-            result = subprocess.run(
-                cmd,
-                cwd=self.project_root,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
+            result = self._run_shadcn(cmd)
 
             success_msg = "Successfully added all components"
             if result.stdout:
@@ -186,6 +235,8 @@ class ShadcnInstaller:
         except subprocess.CalledProcessError as e:
             error_msg = f"Failed to add all components: {e.stderr or e.stdout or str(e)}"
             return False, error_msg
+        except subprocess.TimeoutExpired:
+            return False, "Failed to add all components: timed out after 600 seconds"
         except FileNotFoundError:
             return False, "npx not found. Ensure Node.js is installed"
 
@@ -271,6 +322,12 @@ Examples:
     )
 
     args = parser.parse_args()
+
+    # Reject conflicting modes instead of silently discarding arguments
+    if args.list and (args.components or args.all):
+        parser.error("--list cannot be combined with component names or --all")
+    if args.all and args.components:
+        parser.error("--all cannot be combined with individual component names")
 
     # Initialize installer
     installer = ShadcnInstaller(

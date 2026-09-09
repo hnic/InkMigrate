@@ -16,7 +16,19 @@ from typing import Any, Dict, List, Optional
 # Valid npm package name pattern: optional @scope/, then package name with
 # optional subpath. Only allows alphanumeric, hyphens, dots, underscores,
 # and forward slashes — no quotes, parens, or semicolons.
-_VALID_PLUGIN_NAME = re.compile(r'^(@[a-zA-Z0-9_-]+/)?[a-zA-Z0-9_-]+(/[a-zA-Z0-9_.-]+)*$')
+# Anchored with \Z (not $): '$' also matches just before a trailing newline,
+# which would let a name like "foo\n" through and break the require() output.
+_VALID_PLUGIN_NAME = re.compile(r'^(@[a-zA-Z0-9_-]+/)?[a-zA-Z0-9_-]+(/[a-zA-Z0-9_.-]+)*\Z')
+
+
+def _validate_plugin_name(plugin: str) -> None:
+    """Raise ValueError if plugin is not a valid npm package name (CWE-94 guard)."""
+    if not _VALID_PLUGIN_NAME.match(plugin):
+        raise ValueError(
+            f"Invalid plugin name: {plugin!r}. "
+            "Plugin names must be valid npm package names "
+            "(e.g. '@tailwindcss/typography')."
+        )
 
 
 class TailwindConfigGenerator:
@@ -93,13 +105,15 @@ class TailwindConfigGenerator:
 
         self.config["theme"]["extend"]["colors"].update(colors)
 
-    def add_color_palette(self, name: str, base_color: str) -> None:
+    def add_color_palette(self, name: str) -> None:
         """
-        Add full color palette (50-950 shades) for a base color.
+        Add a CSS-variable-backed color palette (50-950 shades) for a name.
+
+        The palette references --color-{name}-* CSS variables, which must be
+        defined by the user's CSS (no shades are derived here).
 
         Args:
             name: Color name (e.g., 'brand', 'primary')
-            base_color: Base color in oklch format or hex
         """
         # For simplicity, use CSS variable approach
         if "colors" not in self.config["theme"]["extend"]:
@@ -165,8 +179,13 @@ class TailwindConfigGenerator:
         Args:
             plugins: List of plugin names
                     e.g., ['@tailwindcss/typography', '@tailwindcss/forms']
+
+        Raises:
+            ValueError: If a plugin name is not a valid npm package name
         """
         for plugin in plugins:
+            # Fail fast on invalid names instead of at generation time
+            _validate_plugin_name(plugin)
             if plugin not in self.config["plugins"]:
                 self.config["plugins"].append(plugin)
 
@@ -202,8 +221,6 @@ class TailwindConfigGenerator:
     def _generate_typescript(self) -> str:
         """Generate TypeScript configuration."""
         plugins_str = self._format_plugins()
-
-        config_json = json.dumps(self.config, indent=2)
 
         # Remove plugin array from JSON (we'll add it with require())
         config_obj = self.config.copy()
@@ -247,12 +264,7 @@ module.exports = {{
 
         plugin_requires = []
         for plugin in self.config["plugins"]:
-            if not _VALID_PLUGIN_NAME.match(plugin):
-                raise ValueError(
-                    f"Invalid plugin name: {plugin!r}. "
-                    "Plugin names must be valid npm package names "
-                    "(e.g. '@tailwindcss/typography')."
-                )
+            _validate_plugin_name(plugin)
             plugin_requires.append(f"require('{plugin}')")
         return ", ".join(plugin_requires)
 
@@ -274,10 +286,12 @@ module.exports = {{
         try:
             config_content = self.generate_config_string()
 
-            self.output_path.write_text(config_content)
+            self.output_path.write_text(config_content, encoding="utf-8")
 
             return True, f"Configuration written to {self.output_path}"
 
+        except ValueError as e:
+            return False, f"Failed to generate config: {e}"
         except OSError as e:
             return False, f"Failed to write config: {e}"
 

@@ -1,14 +1,11 @@
 """Tests for tailwind_config_gen.py"""
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
-
-# Add parent directory to path for imports
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tailwind_config_gen import TailwindConfigGenerator
 
@@ -82,7 +79,7 @@ class TestTailwindConfigGenerator:
         generator = TailwindConfigGenerator(framework="vue")
         paths = generator.config["content"]
 
-        assert any("vue" in p for p in paths)
+        assert "./src/**/*.{vue,js,ts,jsx,tsx}" in paths
 
     def test_add_colors(self):
         """Test adding custom colors."""
@@ -111,7 +108,7 @@ class TestTailwindConfigGenerator:
     def test_add_color_palette(self):
         """Test adding full color palette."""
         generator = TailwindConfigGenerator()
-        generator.add_color_palette("brand", "#3b82f6")
+        generator.add_color_palette("brand")
 
         brand = generator.config["theme"]["extend"]["colors"]["brand"]
 
@@ -278,9 +275,12 @@ class TestTailwindConfigGenerator:
         assert "import type { Config }" in content
         assert "brand" in content
 
-    def test_write_config_invalid_path(self):
-        """Test writing config to invalid path."""
-        generator = TailwindConfigGenerator(output_path=Path("/invalid/path/config.ts"))
+    def test_write_config_invalid_path(self, tmp_path):
+        """Test writing config to invalid path (a regular file used as a
+        parent directory, so it fails on every platform and privilege level)."""
+        blocker = tmp_path / "blocker"
+        blocker.write_text("a regular file, not a directory")
+        generator = TailwindConfigGenerator(output_path=blocker / "config.ts")
 
         success, message = generator.write_config()
 
@@ -340,17 +340,19 @@ class TestTailwindConfigGenerator:
 
 def _strip_to_object(config_str: str) -> str:
     """Reduce a generated TS/JS config to a bare assignable object so it can be
-    handed to `node --check` without a TypeScript loader."""
-    lines = []
-    for line in config_str.splitlines():
-        if line.startswith("import type"):
-            continue
-        if line.strip() == "export default config":
-            continue
-        line = line.replace("const config: Config =", "const config =")
-        line = line.replace("module.exports =", "const config =")
-        lines.append(line)
-    return "\n".join(lines)
+    handed to `node --check` without a TypeScript loader.
+
+    Tolerant regexes instead of exact-substring surgery, plus post-condition
+    asserts so the helper fails loudly if the generator's formatting drifts
+    (instead of silently validating the wrong string)."""
+    s = re.sub(r"^import type .*\n?", "", config_str, flags=re.MULTILINE)
+    s = re.sub(r"^export default config;?\n?", "", s, flags=re.MULTILINE)
+    s = re.sub(r"const config\s*:\s*Config\s*=", "const config =", s)
+    s = re.sub(r"module\.exports\s*=", "const config =", s)
+    assert "module.exports" not in s, "module.exports was not stripped"
+    assert "export default" not in s, "export default was not stripped"
+    assert ": Config" not in s, "TypeScript annotation was not stripped"
+    return s
 
 
 class TestGeneratedConfigIsValidJs:

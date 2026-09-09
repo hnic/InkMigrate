@@ -18,16 +18,28 @@ import json
 import os
 import re
 import sys
-import io
 from datetime import datetime
 from pathlib import Path
 from core import search, DATA_DIR
 
-# Force UTF-8 for stdout/stderr to handle emojis/box-drawing chars on Windows (cp1252 default)
-if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-if sys.stderr.encoding and sys.stderr.encoding.lower() != 'utf-8':
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
+def _force_utf8(stream):
+    """Best-effort in-place UTF-8 reconfigure so emojis/box-drawing chars
+    survive Windows cp1252 consoles. Safe for None/already-replaced streams."""
+    if stream is None or not hasattr(stream, "reconfigure"):
+        return stream
+    try:
+        if (stream.encoding or "").lower() != "utf-8":
+            stream.reconfigure(encoding="utf-8")
+    except (ValueError, OSError, AttributeError):
+        pass
+    return stream
+
+
+# Force UTF-8 for stdout/stderr (reconfigure keeps the original buffering
+# config, unlike rewrapping sys.stdout.buffer in a new TextIOWrapper)
+sys.stdout = _force_utf8(sys.stdout)
+sys.stderr = _force_utf8(sys.stderr)
 
 
 # ============ CONFIGURATION ============
@@ -90,10 +102,12 @@ class DesignSystemGenerator:
         with open(filepath, 'r', encoding='utf-8') as f:
             return list(csv.DictReader(f))
 
-    def _multi_domain_search(self, query: str, style_priority: list = None) -> dict:
+    def _multi_domain_search(self, query: str, style_priority: list = None, skip_domains: set = None) -> dict:
         """Execute searches across multiple domains."""
         results = {}
         for domain, config in SEARCH_CONFIG.items():
+            if skip_domains and domain in skip_domains:
+                continue
             if domain == "style" and style_priority:
                 # For style, also search with priority keywords
                 priority_query = " ".join(style_priority[:2]) if style_priority else query
@@ -109,26 +123,27 @@ class DesignSystemGenerator:
 
         # Try exact match first
         for rule in self.reasoning_data:
-            if rule.get("UI_Category", "").lower() == category_lower:
+            if (rule.get("UI_Category") or "").lower() == category_lower:
                 return rule
 
-        # Try partial match
+        # Try partial match (skip blank categories: '' is "in" every string
+        # and would shadow every later, more specific rule)
         for rule in self.reasoning_data:
-            ui_cat = rule.get("UI_Category", "").lower()
-            if ui_cat in category_lower or category_lower in ui_cat:
+            ui_cat = (rule.get("UI_Category") or "").strip().lower()
+            if ui_cat and (ui_cat in category_lower or category_lower in ui_cat):
                 return rule
 
         # Try keyword match
         for rule in self.reasoning_data:
-            ui_cat = rule.get("UI_Category", "").lower()
+            ui_cat = (rule.get("UI_Category") or "").strip().lower()
             keywords = ui_cat.replace("/", " ").replace("-", " ").split()
             if any(kw in category_lower for kw in keywords):
                 return rule
 
         return {}
 
-    def _apply_reasoning(self, category: str, search_results: dict) -> dict:
-        """Apply reasoning rules to search results."""
+    def _apply_reasoning(self, category: str) -> dict:
+        """Apply reasoning rules for a category."""
         rule = self._find_reasoning_rule(category)
 
         if not rule:
@@ -152,7 +167,9 @@ class DesignSystemGenerator:
 
         return {
             "pattern": rule.get("Recommended_Pattern", ""),
-            "style_priority": [s.strip() for s in rule.get("Style_Priority", "").split("+")],
+            # Filter empties: ''.split('+') yields [''], which is truthy and
+            # pollutes queries/matching below
+            "style_priority": [s.strip() for s in (rule.get("Style_Priority") or "").split("+") if s.strip()],
             "color_mood": rule.get("Color_Mood", ""),
             "typography_mood": rule.get("Typography_Mood", ""),
             "key_effects": rule.get("Key_Effects", ""),
@@ -222,7 +239,7 @@ class DesignSystemGenerator:
             category = product_results[0].get("Product Type", "General")
 
         # Step 2: Get reasoning rules for this category
-        reasoning = self._apply_reasoning(category, {})
+        reasoning = self._apply_reasoning(category)
         style_priority = reasoning.get("style_priority", [])
 
         # DESIGN_VARIANCE dial: bias style retrieval/selection toward
@@ -232,7 +249,9 @@ class DesignSystemGenerator:
             effective_style_priority = variance_info["style_keywords"] + style_priority
 
         # Step 3: Multi-domain search with style priority hints
-        search_results = self._multi_domain_search(query, effective_style_priority)
+        # ('product' is skipped and reused from Step 1, so the CSV isn't
+        # scanned twice per generate() call)
+        search_results = self._multi_domain_search(query, effective_style_priority, skip_domains={"product"})
         search_results["product"] = product_result  # Reuse product search
 
         # Step 4: Select best matches from each domain using priority
@@ -341,7 +360,11 @@ def hex_to_ansi(hex_color: str) -> str:
     hex_color = hex_color.lstrip('#')
     if len(hex_color) != 6:
         return ""
-    r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+    try:
+        r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+    except ValueError:
+        # CSV data with invalid hex digits (e.g. '#25GZ63') — skip the swatch
+        return ""
     return f"\033[38;2;{r};{g};{b}m██\033[0m "
 
 
@@ -385,6 +408,12 @@ def format_ascii_box(design_system: dict) -> str:
             else:
                 if current_line != prefix:
                     lines.append(current_line)
+                # Hard-break tokens longer than the available width (URLs,
+                # hex strings) so they can't push past the box border
+                avail = max(1, width - 2 - len(prefix))
+                while len(word) > avail:
+                    lines.append(prefix + word[:avail])
+                    word = word[avail:]
                 current_line = prefix + word
         if current_line != prefix:
             lines.append(current_line)
@@ -477,7 +506,8 @@ def format_ascii_box(design_system: dict) -> str:
         for line in wrap_text(f"Best For: {typography.get('best_for', '')}", "│     ", BOX_WIDTH):
             lines.append(line.ljust(BOX_WIDTH) + "│")
     if typography.get("google_fonts_url"):
-        lines.append(f"│     Google Fonts: {typography.get('google_fonts_url', '')}".ljust(BOX_WIDTH) + "│")
+        for line in wrap_text(f"Google Fonts: {typography.get('google_fonts_url', '')}", "│     ", BOX_WIDTH):
+            lines.append(line.ljust(BOX_WIDTH) + "│")
     if typography.get("css_import"):
         lines.append(f"│     CSS Import: {typography.get('css_import', '')[:70]}...".ljust(BOX_WIDTH) + "│")
 
@@ -863,7 +893,9 @@ def format_master_md(design_system: dict) -> str:
     lines.append("|-------|-------|-------|")
     for token in ("xs", "sm", "md", "lg", "xl", "2xl", "3xl"):
         px_value = scale[token]
-        rem_value = f"{int(px_value.rstrip('px')) / 16:g}rem"
+        # removesuffix, not rstrip: rstrip('px') strips the character set
+        # {'p','x'} and would mangle values like "12xp"
+        rem_value = f"{int(px_value.removesuffix('px')) / 16:g}rem"
         lines.append(f"| `--space-{token}` | `{px_value}` / `{rem_value}` | {spacing_usage[token]} |")
     lines.append("")
     
@@ -1092,7 +1124,7 @@ def format_page_override_md(design_system: dict, page_name: str, page_query: str
     lines.append(f"> **Generated:** {timestamp}")
     lines.append(f"> **Page Type:** {page_overrides.get('page_type', 'General')}")
     lines.append("")
-    lines.append("> ⚠️ **IMPORTANT:** Rules in this file **override** the Master file (`design-system/MASTER.md`).")
+    lines.append("> ⚠️ **IMPORTANT:** Rules in this file **override** the Master file (`../MASTER.md`, i.e. `design-system/<project-slug>/MASTER.md`).")
     lines.append("> Only deviations from the Master are documented here. For all other rules, refer to the Master.")
     lines.append("")
     lines.append("---")

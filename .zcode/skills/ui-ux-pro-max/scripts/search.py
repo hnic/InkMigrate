@@ -16,21 +16,17 @@ Design dials (1-10, only with --design-system):
   --density    VISUAL_DENSITY: 1=spacious, 10=dense/dashboard; overrides the spacing scale
 
 Persistence (Master + Overrides pattern):
-  --persist    Save design system to design-system/MASTER.md
-  --page       Also create a page-specific override file in design-system/pages/
+  --persist    Save design system to design-system/<project-slug>/MASTER.md
+  --page       Also create a page-specific override file in design-system/<project-slug>/pages/
 """
 
 import argparse
 import sys
-import io
 from core import CSV_CONFIG, AVAILABLE_STACKS, MAX_RESULTS, search, search_stack
 from design_system import generate_design_system, persist_design_system, safe_slug
 
-# Force UTF-8 for stdout/stderr to handle emojis on Windows (cp1252 default)
-if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-if sys.stderr.encoding and sys.stderr.encoding.lower() != 'utf-8':
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+# UTF-8 stdout/stderr is forced at design_system import time above (needed for
+# the emojis/box-drawing chars this CLI prints on Windows cp1252 consoles).
 
 
 def format_output(result):
@@ -71,8 +67,8 @@ if __name__ == "__main__":
     parser.add_argument("--project-name", "-p", type=str, default=None, help="Project name for design system output")
     parser.add_argument("--format", "-f", choices=["ascii", "markdown"], default="ascii", help="Output format for design system")
     # Persistence (Master + Overrides pattern)
-    parser.add_argument("--persist", action="store_true", help="Save design system to design-system/MASTER.md (creates hierarchical structure)")
-    parser.add_argument("--page", type=str, default=None, help="Create page-specific override file in design-system/pages/")
+    parser.add_argument("--persist", action="store_true", help="Save design system to design-system/<project-slug>/MASTER.md (creates hierarchical structure)")
+    parser.add_argument("--page", type=str, default=None, help="Create page-specific override file in design-system/<project-slug>/pages/")
     parser.add_argument("--output-dir", "-o", type=str, default=None, help="Output directory for persisted files (default: current directory)")
     # Design dials (1-10), only applied with --design-system
     parser.add_argument("--variance", type=int, choices=range(1, 11), metavar="1-10", help="DESIGN_VARIANCE dial: 1=centered/minimal, 10=bold/asymmetric (only with --design-system)")
@@ -80,6 +76,19 @@ if __name__ == "__main__":
     parser.add_argument("--density", type=int, choices=range(1, 11), metavar="1-10", help="VISUAL_DENSITY dial: 1=spacious, 10=dense/dashboard; overrides the spacing scale (only with --design-system)")
 
     args = parser.parse_args()
+
+    # Reject invalid flag combinations instead of silently ignoring them
+    if not args.design_system:
+        if args.persist:
+            parser.error("--persist requires --design-system")
+        for dial in ("variance", "motion", "density"):
+            if getattr(args, dial) is not None:
+                parser.error(f"--{dial} requires --design-system")
+    if not args.persist:
+        if args.page:
+            parser.error("--page requires --persist")
+        if args.output_dir:
+            parser.error("--output-dir requires --persist")
 
     # Design system takes priority
     if args.design_system:
@@ -95,23 +104,27 @@ if __name__ == "__main__":
             density=args.density
         )
         print(result)
-        
+
         # Print persistence confirmation
         if args.persist:
             project_slug = safe_slug(args.project_name or args.query.upper())
+            out_prefix = f"{args.output_dir.rstrip('/')}/" if args.output_dir else ""
             print("\n" + "=" * 60)
-            print(f"✅ Design system persisted to design-system/{project_slug}/")
-            print(f"   📄 design-system/{project_slug}/MASTER.md (Global Source of Truth)")
+            print(f"✅ Design system persisted to {out_prefix}design-system/{project_slug}/")
+            print(f"   📄 {out_prefix}design-system/{project_slug}/MASTER.md (Global Source of Truth)")
             if args.page:
                 page_filename = safe_slug(args.page, 'page')
-                print(f"   📄 design-system/{project_slug}/pages/{page_filename}.md (Page Overrides)")
+                print(f"   📄 {out_prefix}design-system/{project_slug}/pages/{page_filename}.md (Page Overrides)")
             print("")
-            print(f"📖 Usage: When building a page, check design-system/{project_slug}/pages/[page].md first.")
+            print(f"📖 Usage: When building a page, check {out_prefix}design-system/{project_slug}/pages/[page].md first.")
             print(f"   If exists, its rules override MASTER.md. Otherwise, use MASTER.md.")
             print("=" * 60)
     # Stack search
     elif args.stack:
         result = search_stack(args.query, args.stack, args.max_results)
+        if "error" in result:
+            print(format_output(result), file=sys.stderr)
+            sys.exit(1)
         if args.json:
             import json
             print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -120,6 +133,9 @@ if __name__ == "__main__":
     # Domain search
     else:
         result = search(args.query, args.domain, args.max_results)
+        if "error" in result:
+            print(format_output(result), file=sys.stderr)
+            sys.exit(1)
         if args.json:
             import json
             print(json.dumps(result, indent=2, ensure_ascii=False))

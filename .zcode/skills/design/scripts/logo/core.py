@@ -111,7 +111,9 @@ def _search_csv(filepath, search_cols, output_cols, query, max_results):
     data = _load_csv(filepath)
 
     # Build documents from search columns
-    documents = [" ".join(str(row.get(col, "")) for col in search_cols) for row in data]
+    # (row.get(col) or "" also coerces the None values DictReader produces
+    # for short rows, which would otherwise index a literal "None" token)
+    documents = [" ".join(str(row.get(col) or "") for col in search_cols) for row in data]
 
     # BM25 search
     bm25 = BM25()
@@ -123,7 +125,7 @@ def _search_csv(filepath, search_cols, output_cols, query, max_results):
     for idx, score in ranked[:max_results]:
         if score > 0:
             row = data[idx]
-            results.append({col: row.get(col, "") for col in output_cols if col in row})
+            results.append({col: row.get(col) or "" for col in output_cols if col in row})
 
     return results
 
@@ -138,7 +140,11 @@ def detect_domain(query):
         "industry": ["tech", "healthcare", "finance", "legal", "restaurant", "food", "fashion", "beauty", "education", "sports", "fitness", "real estate", "crypto", "gaming"]
     }
 
-    scores = {domain: sum(1 for kw in keywords if kw in query_lower) for domain, keywords in domain_keywords.items()}
+    # Word-boundary matching so keywords don't match inside unrelated words
+    # ("hex" in "hexagon", "tech" in "technique", "red" in "hundred").
+    # The lookaround form (instead of \b) still works for keywords that
+    # start/end with non-word characters like "#" or "real estate".
+    scores = {domain: sum(1 for kw in keywords if re.search(rf"(?<!\w){re.escape(kw)}(?!\w)", query_lower)) for domain, keywords in domain_keywords.items()}
     best = max(scores, key=scores.get)
     return best if scores[best] > 0 else "style"
 

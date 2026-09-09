@@ -197,10 +197,17 @@ def generate_logo(prompt, style=None, industry=None, brand_name=None,
         )
 
         # Extract image from response
+        # (guard candidates/content/parts and mime_type: safety-blocked or
+        # truncated responses can be missing any of them)
         image_data = None
-        for part in response.candidates[0].content.parts:
+        candidates = getattr(response, "candidates", None) or []
+        parts = []
+        if candidates and getattr(candidates[0], "content", None) and candidates[0].content.parts:
+            parts = candidates[0].content.parts
+        for part in parts:
             if hasattr(part, 'inline_data') and part.inline_data:
-                if part.inline_data.mime_type.startswith('image/'):
+                mime_type = part.inline_data.mime_type
+                if mime_type and mime_type.startswith('image/'):
                     image_data = part.inline_data.data
                     break
 
@@ -227,7 +234,7 @@ def generate_logo(prompt, style=None, industry=None, brand_name=None,
         return None
 
 
-def generate_batch(prompt, brand_name, count, output_dir, use_pro=False, brand_context=None, aspect_ratio=None):
+def generate_batch(prompt, brand_name, count, output_dir, use_pro=False, brand_context=None, aspect_ratio=None, industry=None):
     """Generate multiple logo variants with different styles"""
 
     # Select appropriate styles for batch generation
@@ -237,11 +244,15 @@ def generate_batch(prompt, brand_name, count, output_dir, use_pro=False, brand_c
         ("geometric", "Abstract geometric patterns, mathematical precision"),
         ("gradient", "Vibrant color transitions, modern digital feel"),
         ("abstract", "Conceptual symbolic representation"),
-        ("lettermark", "Stylized letter 'U' as monogram"),
+        ("lettermark", f"Stylized letter '{(brand_name or 'L')[0].upper()}' as monogram"),
         ("negative-space", "Clever use of negative space, hidden meaning"),
         ("lineart", "Single stroke continuous line design"),
         ("3d", "Dimensional design with depth and shadows"),
     ]
+
+    # Cap the count at the number of available styles and use the capped
+    # total consistently (header, progress, rate limiting, summary)
+    total = min(count, len(batch_styles))
 
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
@@ -254,11 +265,11 @@ def generate_batch(prompt, brand_name, count, output_dir, use_pro=False, brand_c
     print(f"  BATCH LOGO GENERATION: {brand_name}")
     print(f"  Model: Nano Banana {model_label}")
     print(f"  Aspect Ratio: {ratio}")
-    print(f"  Variants: {count}")
+    print(f"  Variants: {total}")
     print(f"  Output: {output_dir}")
     print(f"{'='*60}\n")
 
-    for i in range(min(count, len(batch_styles))):
+    for i in range(total):
         style_key, style_desc = batch_styles[i]
 
         # Build enhanced prompt with brand context
@@ -267,15 +278,15 @@ def generate_batch(prompt, brand_name, count, output_dir, use_pro=False, brand_c
             enhanced_prompt = f"{brand_context}, {enhanced_prompt}"
 
         # Generate filename
-        filename = f"{brand_name.lower().replace(' ', '_')}_{style_key}_{i+1:02d}.png"
+        filename = f"{(brand_name or 'logo').lower().replace(' ', '_')}_{style_key}_{i+1:02d}.png"
         output_path = os.path.join(output_dir, filename)
 
-        print(f"[{i+1}/{count}] Generating {style_key} variant...")
+        print(f"[{i+1}/{total}] Generating {style_key} variant...")
 
         result = generate_logo(
             prompt=enhanced_prompt,
             style=style_key,
-            industry="tech",
+            industry=industry,
             brand_name=brand_name,
             output_path=output_path,
             use_pro=use_pro,
@@ -289,11 +300,11 @@ def generate_batch(prompt, brand_name, count, output_dir, use_pro=False, brand_c
             print(f"  ✗ Failed: {style_key}\n")
 
         # Rate limiting between requests
-        if i < count - 1:
+        if i < total - 1:
             time.sleep(2)
 
     print(f"\n{'='*60}")
-    print(f"  BATCH COMPLETE: {len(results)}/{count} logos generated")
+    print(f"  BATCH COMPLETE: {len(results)}/{total} logos generated")
     print(f"{'='*60}\n")
 
     return results
@@ -336,18 +347,21 @@ def main():
 
     # Batch mode
     if args.batch:
-        output_dir = args.output_dir or f"./{args.brand.lower().replace(' ', '_')}_logos"
-        generate_batch(
+        brand_name = args.brand or "Logo"
+        output_dir = args.output_dir or f"./{brand_name.lower().replace(' ', '_')}_logos"
+        results = generate_batch(
             prompt=prompt,
-            brand_name=args.brand or "Logo",
+            brand_name=brand_name,
             count=args.batch,
             output_dir=output_dir,
             use_pro=args.pro,
             brand_context=args.brand_context,
-            aspect_ratio=args.aspect_ratio
+            aspect_ratio=args.aspect_ratio,
+            industry=args.industry
         )
+        sys.exit(0 if results else 1)
     else:
-        generate_logo(
+        result = generate_logo(
             prompt=prompt,
             style=args.style,
             industry=args.industry,
@@ -356,6 +370,7 @@ def main():
             use_pro=args.pro,
             aspect_ratio=args.aspect_ratio
         )
+        sys.exit(0 if result else 1)
 
 
 if __name__ == "__main__":

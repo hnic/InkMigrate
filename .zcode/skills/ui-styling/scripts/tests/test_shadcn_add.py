@@ -3,13 +3,9 @@
 import json
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, mock_open, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
-
-# Add parent directory to path for imports
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from shadcn_add import ShadcnInstaller
 
@@ -92,6 +88,30 @@ class TestShadcnInstaller:
         installed = installer.get_installed_components()
         assert installed == []
 
+    def test_get_installed_components_tsconfig_src_alias(self, tmp_path):
+        """Aliases mapped through tsconfig '@/*': ['./src/*'] must resolve to
+        src/components/ui, not components/ui."""
+        project_root = tmp_path / "test-project"
+        project_root.mkdir()
+
+        (project_root / "components.json").write_text(
+            json.dumps({
+                "aliases": {"components": "@/components"}
+            })
+        )
+        (project_root / "tsconfig.json").write_text(
+            json.dumps({
+                "compilerOptions": {"paths": {"@/*": ["./src/*"]}}
+            })
+        )
+
+        ui_dir = project_root / "src" / "components" / "ui"
+        ui_dir.mkdir(parents=True)
+        (ui_dir / "button.tsx").write_text("export const Button = () => {}")
+
+        installer = ShadcnInstaller(project_root=project_root)
+        assert installer.get_installed_components() == ["button"]
+
     def test_add_components_no_components(self, temp_project):
         """Test adding components with empty list."""
         installer = ShadcnInstaller(project_root=temp_project)
@@ -173,7 +193,11 @@ class TestShadcnInstaller:
         # Verify correct command was called
         mock_run.assert_called_once()
         call_args = mock_run.call_args[0][0]
-        assert call_args[:3] == ["npx", "shadcn@latest", "add"]
+        # npx is resolved via shutil.which, so it may be an absolute path
+        # (npx / npx.cmd / npx.exe depending on platform)
+        assert Path(call_args[0]).name in ("npx", "npx.cmd", "npx.exe", "npx.bat")
+        assert call_args[1].startswith("shadcn@")  # version from package.json/pinned fallback
+        assert call_args[2] == "add"
         assert "button" in call_args
         assert "card" in call_args
 

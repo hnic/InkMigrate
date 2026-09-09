@@ -8,16 +8,17 @@ with detailed descriptions, concepts, and brand guidelines.
 """
 
 import argparse
-import json
-import os
-import sys
 import base64
+import html
+import os
+import re
+import sys
 from pathlib import Path
 from datetime import datetime
 
 # Add parent directory for imports
 sys.path.insert(0, str(Path(__file__).parent))
-from core import search, get_cip_brief
+from core import get_cip_brief
 
 # Deliverable descriptions for presentation
 DELIVERABLE_INFO = {
@@ -101,7 +102,7 @@ def get_image_base64(image_path):
     try:
         with open(image_path, "rb") as f:
             return base64.b64encode(f.read()).decode('utf-8')
-    except Exception as e:
+    except OSError as e:
         print(f"Warning: Could not load image {image_path}: {e}")
         return None
 
@@ -109,8 +110,11 @@ def get_image_base64(image_path):
 def get_deliverable_info(filename):
     """Extract deliverable type from filename and get info"""
     filename_lower = filename.lower()
+    # Match whole hyphen/underscore-separated tokens so short keys like 'car'
+    # or 'van' don't match inside unrelated words ('canvas-tote', 'cards')
+    tokens = set(re.split(r"[-_]", filename_lower))
     for key, info in DELIVERABLE_INFO.items():
-        if key.replace(" ", "-") in filename_lower or key.replace(" ", "_") in filename_lower:
+        if set(key.split()) <= tokens:
             return info
     # Default info
     return {
@@ -140,13 +144,17 @@ def generate_html(brand_name, industry, images_dir, output_path=None, style=None
     style_info = brief.get("style", {})
     industry_info = brief.get("industry", {})
 
+    # Resolve output path up front (the image fallback below needs it to
+    # compute paths relative to the generated HTML file)
+    output_path = Path(output_path) if output_path else images_dir / f"{brand_name.lower().replace(' ', '-')}-cip-presentation.html"
+
     # Build HTML
     html_parts = [f'''<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{brand_name} - Corporate Identity Program</title>
+    <title>{html.escape(brand_name)} - Corporate Identity Program</title>
     <style>
         * {{
             margin: 0;
@@ -309,20 +317,20 @@ def generate_html(brand_name, industry, images_dir, output_path=None, style=None
 </head>
 <body>
     <section class="hero">
-        <h1>{brand_name}</h1>
+        <h1>{html.escape(brand_name)}</h1>
         <p class="subtitle">Corporate Identity Program</p>
         <div class="meta">
             <div class="meta-item">
                 <div class="meta-label">Industry</div>
-                <div class="meta-value">{industry_info.get("Industry", industry.title())}</div>
+                <div class="meta-value">{html.escape(industry_info.get("Industry", industry.title()))}</div>
             </div>
             <div class="meta-item">
                 <div class="meta-label">Style</div>
-                <div class="meta-value">{style_info.get("Style Name", "Corporate")}</div>
+                <div class="meta-value">{html.escape(style_info.get("Style Name", "Corporate"))}</div>
             </div>
             <div class="meta-item">
                 <div class="meta-label">Mood</div>
-                <div class="meta-value">{style_info.get("Mood", "Professional")}</div>
+                <div class="meta-value">{html.escape(style_info.get("Mood", "Professional"))}</div>
             </div>
             <div class="meta-item">
                 <div class="meta-label">Deliverables</div>
@@ -347,18 +355,19 @@ def generate_html(brand_name, industry, images_dir, output_path=None, style=None
         if img_base64:
             img_src = f"data:image/png;base64,{img_base64}"
         else:
-            img_src = str(image_path)
+            # Fallback: path relative to the generated HTML file
+            img_src = Path(os.path.relpath(image_path, output_path.parent)).as_posix()
 
         html_parts.append(f'''
         <div class="deliverable">
             <div class="deliverable-image">
-                <img src="{img_src}" alt="{info['title']}" loading="lazy">
+                <img src="{html.escape(img_src)}" alt="{html.escape(info['title'])}" loading="lazy">
             </div>
             <div class="deliverable-content">
-                <h3 class="deliverable-title">{info['title']}</h3>
-                <p class="deliverable-concept">{info['concept']}</p>
-                <p class="deliverable-purpose">{info['purpose']}</p>
-                <span class="deliverable-specs">{info['specs']}</span>
+                <h3 class="deliverable-title">{html.escape(info['title'])}</h3>
+                <p class="deliverable-concept">{html.escape(info['concept'])}</p>
+                <p class="deliverable-purpose">{html.escape(info['purpose'])}</p>
+                <span class="deliverable-specs">{html.escape(info['specs'])}</span>
             </div>
         </div>
 ''')
@@ -368,7 +377,7 @@ def generate_html(brand_name, industry, images_dir, output_path=None, style=None
     </section>
 
     <footer class="footer">
-        <p><strong>{brand_name}</strong> Corporate Identity Program</p>
+        <p><strong>{html.escape(brand_name)}</strong> Corporate Identity Program</p>
         <p>Generated on {datetime.now().strftime("%B %d, %Y")}</p>
         <p style="margin-top: 1rem; font-size: 0.8rem;">Powered by CIP Design Skill</p>
     </footer>
@@ -379,9 +388,6 @@ def generate_html(brand_name, industry, images_dir, output_path=None, style=None
     html_content = "".join(html_parts)
 
     # Save HTML
-    output_path = output_path or images_dir / f"{brand_name.lower().replace(' ', '-')}-cip-presentation.html"
-    output_path = Path(output_path)
-
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html_content)
 
@@ -411,13 +417,15 @@ Examples:
 
     args = parser.parse_args()
 
-    generate_html(
+    output = generate_html(
         brand_name=args.brand,
         industry=args.industry,
         images_dir=args.images,
         output_path=args.output,
         style=args.style
     )
+    if output is None:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
