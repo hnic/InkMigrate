@@ -7,7 +7,17 @@
 !.env.example
 *.pem
 *.key
+*.p12
+*.pfx
+*.jks
+*.crt
+*.cer
+id_rsa*
+id_ed25519*
+id_ecdsa*
+*service-account*.json
 .inkmigrate/
+# reports/logs 仅锚定仓库根；若包内也会生成同类目录，需去掉根锚定覆盖任意层级
 /reports/
 /logs/
 *.log
@@ -16,10 +26,15 @@ playwright/.auth/
 *.sqlite-shm
 *.sqlite-wal
 *.enex
-# 如需提交 .sqlite/.enex 测试 fixtures，显式取消忽略：
-# !**/tests/fixtures/**
+# 如需提交 .sqlite/.enex 测试 fixtures，显式取消忽略（精确到扩展名）：
+# 注意 git 无法重新包含父目录已被忽略（/logs/、dist/ 等）的文件
+# !**/tests/fixtures/**/*.sqlite
+# !**/tests/fixtures/**/*.enex
+# 现状：evernote fixtures 由 `pnpm --filter @inkmigrate/source-evernote gen:fixtures`
+# 本地生成、不入库，fresh clone/CI 需先运行该命令
 
-# build artifacts
+# build artifacts（dist/ 未锚定，匹配任意层级；如某包需提交 dist 产物，
+# 用 !packages/<pkg>/dist/** 显式取反）
 node_modules/
 dist/
 *.tsbuildinfo
@@ -27,4 +42,6 @@ dist/
 docs/superpowers/
 
 # § ui-ux-pro-max skill: bundled binary fonts (TTF) — keep skill, skip fonts in git
+# 字体不入库且仓库内无下载脚本：fresh clone 后 canvas-fonts/ 为空，
+# ui-styling 的 canvas 检索会降级（见 references/canvas-design-system.md）
 .zcode/skills/ui-styling/canvas-fonts/

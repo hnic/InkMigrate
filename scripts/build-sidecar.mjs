@@ -8,7 +8,7 @@
  * 产出 apps/gui/src-tauri/resources/sidecar/：
  *   sidecar/
  *     node/bin/node       平台对应 Node 二进制
- *     engine-bundle.mjs   esbuild 打包的 engine 单文件
+ *     engine-bundle.cjs   esbuild 打包的 engine 单文件
  *     native/             better_sqlite3.node 等 native 模块
  *     node_modules/       playwright + playwright-core（external 包）
  *     browsers/           Playwright chromium
@@ -16,8 +16,9 @@
  * 用法：node scripts/build-sidecar.mjs [--skip-node] [--skip-chromium]
  */
 import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, cpSync, readdirSync, lstatSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, cpSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
+import { realpathSync } from "node:fs";
 import { homedir, platform, arch } from "node:os";
 import { createHash } from "node:crypto";
 
@@ -54,7 +55,11 @@ log("  ✓ engine dist 存在");
 
 // ── 步骤 2: esbuild bundle engine ──
 log("步骤 2/5: esbuild bundle engine");
-rmSync(SIDECAR_DIR, { recursive: true, force: true });
+// 只清理本次会重建的产物；node/ 与 browsers/ 由 --skip-node/--skip-chromium 决定
+// 是否重建，整体 rmSync 会把已下载的运行时一并删掉再被 skip 跳过，产出残缺 sidecar
+for (const stale of [ENGINE_BUNDLE, NATIVE_DIR, NM_DIR, join(SIDECAR_DIR, "xhr-sync-worker.js")]) {
+  rmSync(stale, { recursive: true, force: true });
+}
 mkdirSync(SIDECAR_DIR, { recursive: true });
 
 // external 的包运行时需要 node_modules 解析，在步骤 3 单独拷贝。
@@ -85,20 +90,20 @@ const NM_DIR = join(SIDECAR_DIR, "node_modules");
 mkdirSync(NM_DIR, { recursive: true });
 for (const pkg of EXTERNALS) {
   const src = findDir(join(ROOT, "node_modules/.pnpm"), pkg);
-  if (src) {
-    const dest = join(NM_DIR, pkg);
-    cpSync(src, dest, { recursive: true });
-    log(`  ✓ ${pkg} → node_modules/${pkg} (${du(dest)})`);
-  }
+  // bundle 以 --external 引用这些包，缺失则 sidecar 运行时必然无法解析——
+  // 静默跳过只会把失败推迟到用户桌面，这里直接失败
+  if (!src) throw new Error(`external 依赖 ${pkg} 未找到，engine bundle 运行时将无法解析`);
+  const dest = join(NM_DIR, pkg);
+  cpSync(src, dest, { recursive: true });
+  log(`  ✓ ${pkg} → node_modules/${pkg} (${du(dest)})`);
 }
 
 // jsdom 被 esbuild bundle 进去了，但它用 require.resolve("./xhr-sync-worker.js")
 // 动态加载 worker 文件——esbuild 无法静态分析，需单独拷到 bundle 同目录。
 const xhrWorker = findFile(join(ROOT, "node_modules/.pnpm"), "xhr-sync-worker.js");
-if (xhrWorker) {
-  cpSync(xhrWorker, join(SIDECAR_DIR, "xhr-sync-worker.js"));
-  log(`  ✓ xhr-sync-worker.js → sidecar/`);
-}
+if (!xhrWorker) throw new Error("xhr-sync-worker.js 未找到（bundle 内 jsdom 运行时必需）");
+cpSync(xhrWorker, join(SIDECAR_DIR, "xhr-sync-worker.js"));
+log(`  ✓ xhr-sync-worker.js → sidecar/`);
 
 // ── 步骤 4: 获取 Node 二进制 ──
 if (!SKIP_NODE) {
@@ -132,15 +137,30 @@ log(`  总计:           ${du(SIDECAR_DIR)}`);
 function findFile(dir, name) {
   try {
     const out = execSync(`find "${dir}" -name "${name}" 2>/dev/null`, { encoding: "utf8" });
-    return out.trim().split("\n")[0] || null;
-  } catch { return null; }
+    const hits = out.trim().split("\n").filter(Boolean);
+    if (hits.length === 0) return null;
+    // .pnpm 可能并存多版本/多 ABI 副本（多个消费者），文件序取第一个会静默
+    // 打包错误版本——多命中时必须显式失败，由人工按 lockfile 精确选择
+    if (hits.length > 1) {
+      throw new Error(`${name} 命中多个路径，无法确定打包哪一份:\n${hits.join("\n")}`);
+    }
+    return hits[0];
+  } catch (e) {
+    if (e instanceof Error && String(e.message).includes("命中多个路径")) throw e;
+    return null;
+  }
 }
 
 function findDir(pnpmDir, pkgName) {
-  // 在 .pnpm 里找 playwright-core@xxx 或 playwright@xxx 目录
+  // 优先跟随 workspace 顶层软链（realpath）：天然选中 lockfile 解析的版本，
+  // 含 patchedDependencies 补丁实例（目录名带 patch_hash，按前缀扫描会漏选）
+  const topLevel = join(ROOT, "node_modules", pkgName);
+  if (existsSync(topLevel)) {
+    try { return realpathSync(topLevel); } catch { /* 落到 .pnpm 扫描 */ }
+  }
   try {
     const entries = readdirSync(pnpmDir);
-    const match = entries.find(e => e.startsWith(`${pkgName}@`) && !e.includes("patch_"));
+    const match = entries.find(e => e.startsWith(`${pkgName}@`));
     if (match) {
       // 真实包在 .pnpm/<pkg>@<ver>/node_modules/<pkg>/
       const pkgDir = join(pnpmDir, match, "node_modules", pkgName);
@@ -148,46 +168,6 @@ function findDir(pnpmDir, pkgName) {
     }
   } catch {}
   return null;
-}
-
-/**
- * 从 pnpm 的 .pnpm 虚拟存储拷贝一个包及其所有传递依赖到扁平 node_modules。
- * 用于处理 jsdom 这类有大量子依赖的包。
- */
-function copyPnpmDeps(nmDest, pnpmDir, pkgName) {
-  // 找 .pnpm 里这个包的目录
-  const entries = readdirSync(pnpmDir);
-  const match = entries.find(e => e.startsWith(`${pkgName}@`) && !e.includes("patch_"));
-  if (!match) return;
-  // 该包在 .pnpm/<match>/node_modules/ 下列出了所有依赖
-  const depsDir = join(pnpmDir, match, "node_modules");
-  if (!existsSync(depsDir)) return;
-  // 拷贝所有依赖（包括 scoped 包）
-  for (const scope of readdirSync(depsDir)) {
-    const scopePath = join(depsDir, scope);
-    if (lstatSync(scopePath).isDirectory()) {
-      if (scope.startsWith("@")) {
-        // scoped 包：@scope/pkg
-        const scopeDest = join(nmDest, scope);
-        mkdirSync(scopeDest, { recursive: true });
-        for (const pkg of readdirSync(scopePath)) {
-          const pkgSrc = join(scopePath, pkg);
-          const pkgDest = join(scopeDest, pkg);
-          if (!existsSync(pkgDest)) {
-            cpSync(pkgSrc, pkgDest, { recursive: true });
-          }
-        }
-      } else if (!existsSync(join(nmDest, scope))) {
-        // 普通包
-        cpSync(scopePath, join(nmDest, scope), { recursive: true });
-      }
-    }
-  }
-  // 也拷 jsdom 自己
-  const pkgSrc = join(depsDir, pkgName);
-  if (existsSync(pkgSrc) && !existsSync(join(nmDest, pkgName))) {
-    cpSync(pkgSrc, join(nmDest, pkgName), { recursive: true });
-  }
 }
 
 /**
@@ -224,7 +204,10 @@ function escapeRegex(s) {
 }
 
 function fetchNodeBinary(targetDir, plat, archName) {
-  const nodeVersion = process.version.replace("v", "");
+  // 固定 sidecar 内置 Node 版本（与 .nvmrc 同源），避免随构建机版本漂移导致
+  // 产物不可复现；SIDECAR_NODE_VERSION 可临时覆盖
+  const nodeVersion = process.env.SIDECAR_NODE_VERSION
+    ?? readFileSync(join(ROOT, ".nvmrc"), "utf8").trim();
   let platformStr, archiveName;
   if (plat === "darwin") {
     platformStr = archName === "arm64" ? "darwin-arm64" : "darwin-x64";
@@ -241,12 +224,7 @@ function fetchNodeBinary(targetDir, plat, archName) {
   log(`  下载 ${url}`);
   mkdirSync(targetDir, { recursive: true });
   const archivePath = join(targetDir, archiveName);
-
-  if (plat === "darwin") {
-    run(`curl -fSL "${url}" -o "${archivePath}"`);
-  } else if (plat === "win32") {
-    run(`curl -fSL "${url}" -o "${archivePath}"`);
-  }
+  run(`curl -fSL "${url}" -o "${archivePath}"`);
 
   // 供应链安全：用 nodejs.org 官方 SHASUMS256.txt 校验下载的 archive，
   // 防止 CDN 投毒/MITM 在打包进桌面应用前嵌入被篡改的 Node 二进制。
@@ -262,7 +240,9 @@ function fetchNodeBinary(targetDir, plat, archName) {
     rmSync(extracted, { recursive: true });
     run(`chmod +x "${join(targetDir, "bin/node")}"`);
   } else if (plat === "win32") {
-    run(`cd "${targetDir}" && unzip -o "${archiveName}"`);
+    // Windows 10+ 自带 bsdtar（tar 可直接解压 zip）；不要依赖不存在的 unzip，
+    // 也不要用 `cd && ...` 拼接（会丢弃 run() 的 cwd 选项）
+    run(`tar -xf "${archivePath}" -C "${targetDir}"`);
     rmSync(archivePath, { force: true });
     const extracted = join(targetDir, `node-v${nodeVersion}-${platformStr}`);
     cpSync(join(extracted, "node.exe"), join(targetDir, "node.exe"));
@@ -272,9 +252,15 @@ function fetchNodeBinary(targetDir, plat, archName) {
 }
 
 function fetchChromium(targetDir, plat) {
-  const cacheDir = plat === "darwin"
-    ? join(homedir(), "Library/Caches/ms-playwright")
-    : join(homedir(), ".cache/ms-playwright");
+  // Playwright 各平台浏览器缓存位置不同（win32 用 %LOCALAPPDATA%，非 ~/.cache）
+  let cacheDir;
+  if (plat === "darwin") {
+    cacheDir = join(homedir(), "Library/Caches/ms-playwright");
+  } else if (plat === "win32") {
+    cacheDir = join(homedir(), "AppData/Local/ms-playwright");
+  } else {
+    cacheDir = join(homedir(), ".cache/ms-playwright");
+  }
 
   // 从 workspace 里 playwright-core 的 browsers.json 读出期望的 chromium revision。
   // playwright 驱动运行时只认它自己 browsers.json 声明的 revision（如 chromium-1228），
@@ -283,11 +269,15 @@ function fetchChromium(targetDir, plat) {
   const pwCore = findDir(join(ROOT, "node_modules/.pnpm"), "playwright-core");
   if (!pwCore) throw new Error("playwright-core 未找到，无法确定 chromium revision");
   const browsersJson = JSON.parse(readFileSync(join(pwCore, "browsers.json"), "utf8"));
-  const expectedRev = browsersJson.browsers
-    .find(b => b.name === "chromium" && !b.name.includes("headless_shell"))?.revision;
+  const expectedRev = browsersJson.browsers.find(b => b.name === "chromium")?.revision;
   if (!expectedRev) throw new Error(`playwright-core browsers.json 未声明 chromium revision`);
   const expectedDirName = `chromium-${expectedRev}`;
   const expectedDir = join(cacheDir, expectedDirName);
+  // Playwright v1.49+ 默认 headless 启动解析 chromium_headless_shell-<rev> 而非
+  // chromium-<rev>，只带 chromium 目录会精确复现上方注释警告的
+  // "Executable doesn't exist"——两者需一起入 sidecar
+  const headlessShellDirName = `chromium_headless_shell-${expectedRev}`;
+  const headlessShellDir = join(cacheDir, headlessShellDirName);
   log(`  期望 chromium revision: ${expectedRev}（来自 ${pwCore}）`);
 
   // 缓存里恰好有匹配 revision 的目录 → 直接复用
@@ -303,4 +293,10 @@ function fetchChromium(targetDir, plat) {
   mkdirSync(targetDir, { recursive: true });
   cpSync(expectedDir, join(targetDir, expectedDirName), { recursive: true });
   log(`  ✓ chromium ${expectedDirName} 就绪 (${du(join(targetDir, expectedDirName))})`);
+  if (existsSync(headlessShellDir)) {
+    cpSync(headlessShellDir, join(targetDir, headlessShellDirName), { recursive: true });
+    log(`  ✓ ${headlessShellDirName} 就绪 (${du(join(targetDir, headlessShellDirName))})`);
+  } else {
+    log(`  ⚠ 缓存无 ${headlessShellDirName}（旧版 playwright 无此目录），headless 启动可能不可用`);
+  }
 }

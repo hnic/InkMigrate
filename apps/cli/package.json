@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=24"
+    "node": ">=24.15.0 <25"
   },
   "bin": {
     "inkmigrate": "./dist/index.js"

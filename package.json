@@ -5,7 +5,10 @@
   "description": "InkMigrate（墨迁）— 本地优先、可验证、可恢复、可审计的知识迁移工具包",
   "license": "SEE LICENSE IN LICENSE",
   "packageManager": "pnpm@11.7.0",
-  "engines": { "node": ">=24", "pnpm": ">=11" },
+  "engines": {
+    "node": ">=24.15.0 <25",
+    "pnpm": ">=11"
+  },
   "scripts": {
     "build": "pnpm -r run build",
     "typecheck": "pnpm -r run typecheck",
@@ -14,6 +17,6 @@
     "check:stdio": "node scripts/check-no-stdout-log.mjs",
     "inkmigrate": "node apps/cli/dist/index.js",
     "sidecar:build": "node scripts/build-sidecar.mjs",
-    "bundle": "node scripts/build-sidecar.mjs && cd apps/gui && pnpm tauri build"
+    "bundle": "node scripts/build-sidecar.mjs && pnpm --filter @inkmigrate/gui run tauri build"
   }
 }

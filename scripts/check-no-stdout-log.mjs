@@ -22,7 +22,7 @@ const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const SCOPES = ['apps/engine/src', 'packages/core/src'];
 /** 禁止的写 stdout 调用（console.error 走 stderr，放行）。 */
 const FORBIDDEN = /\bconsole\.(log|info|debug)\s*\(/;
-/** 整行都是注释时放行；字符串字面量里的示例仍会被拦（精确豁免需 AST）。 */
+/** 整行都是注释时放行；行尾注释与字符串字面量里的示例仍会被拦（精确豁免需 AST）。 */
 const COMMENT_LINE = /^\s*(\/\/|\/\*|\*)/;
 
 let violations = 0;
@@ -35,7 +35,7 @@ function walk(dir) {
     if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name.startsWith('.')) continue;
     const full = join(dir, entry.name);
     if (entry.isDirectory()) out.push(...walk(full));
-    else if (entry.isFile() && /\.(ts|js|mjs|cjs)$/.test(entry.name)) out.push(full);
+    else if (entry.isFile() && /\.(tsx?|jsx?|mts|cts|mjs|cjs)$/.test(entry.name)) out.push(full);
   }
   return out;
 }
@@ -47,16 +47,32 @@ for (const scope of SCOPES) {
     console.error(`✗ 配置的受限目录不存在: ${scope}`);
     process.exit(1);
   }
-  const files = walk(base);
+  let files;
+  try {
+    files = walk(base);
+  } catch (err) {
+    // 守护脚本宁可响亮失败：遍历错误（EACCES 等）给出可定位的信号而非裸堆栈
+    console.error(`✗ 无法遍历受限目录 ${scope}: ${err && err.message ? err.message : String(err)}`);
+    process.exit(1);
+  }
   for (const file of files) {
-    const lines = readFileSync(file, 'utf8').split('\n');
+    let lines;
+    try {
+      lines = readFileSync(file, 'utf8').split('\n');
+    } catch (err) {
+      console.error(`✗ 无法读取 ${relative(ROOT, file)}: ${err && err.message ? err.message : String(err)}`);
+      process.exit(1);
+    }
     lines.forEach((line, i) => {
-      if (!FORBIDDEN.test(line)) return;
-      // 跳过整行都是注释的说明（字符串字面量中的示例仍会被拦，需 AST 才能精确豁免）
+      // 单次 exec 捕获复用：不重复 test/exec；且对将来可能加的 g 标志免疫
+      //（g 标志下 exec 有状态，二次调用会返回 null）
+      const match = FORBIDDEN.exec(line);
+      if (!match) return;
+      // 跳过整行都是注释的说明（行尾注释与字符串字面量中的示例仍会被拦，需 AST 才能精确豁免）
       if (COMMENT_LINE.test(line)) return;
       const rel = relative(ROOT, file);
       console.error(
-        `${rel}:${i + 1}: 禁止 console.${FORBIDDEN.exec(line)[1]} ` +
+        `${rel}:${i + 1}: 禁止 console.${match[1]} ` +
           `（stdout 是 sidecar JSON-RPC 通道，改用 logToStderr / logger 写 stderr）\n  ${line.trim()}`,
       );
       violations++;

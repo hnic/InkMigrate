@@ -44,11 +44,8 @@ jobs:
       - name: Guard JSON-RPC stdout channel
         run: node scripts/check-no-stdout-log.mjs
 
-      - name: Build core + protocol + testkit (for downstream imports)
-        run: |
-          pnpm --filter @inkmigrate/protocol build
-          pnpm --filter @inkmigrate/core build
-          pnpm --filter @inkmigrate/testkit build
+      - name: Build workspace (topological, for downstream imports)
+        run: pnpm -r run build
 
       - name: Typecheck
         run: pnpm -r run typecheck
@@ -56,10 +53,10 @@ jobs:
       - name: Test
         run: pnpm -r run test
 
-      - name: Build all
-        run: pnpm -r run build
-
       - name: CLI smoke test
+        # shell: bash——windows-latest 默认 pwsh，多行脚本的管道/错误语义与
+        # bash 不同；三条矩阵腿统一用 bash（GH Windows runner 预装）
+        shell: bash
         run: |
           node apps/cli/dist/index.js --help
           node apps/cli/dist/index.js --version
