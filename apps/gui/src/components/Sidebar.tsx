@@ -73,12 +73,16 @@ export function Sidebar({
           step: idx + 1,
         }))
       : WORKFLOW;
+  // 防御性兜底：current 指向被隐藏页面（违反上述约定）时回退到首个工作流步骤，
+  // 避免导航零高亮的静默降级
+  const visibleIds = new Set<PageId>([...workflow, ...TOOLS].map((item) => item.id));
+  const effectiveCurrent = visibleIds.has(current) ? current : workflow[0].id;
   return (
     <nav style={navStyle}>
       {/* 工作流步骤 */}
       <div style={navGroupStyle}>
         {workflow.map((item) => (
-          <NavButton key={item.id} item={item} current={current} onSelect={onSelect} />
+          <NavButton key={item.id} item={item} current={effectiveCurrent} onSelect={onSelect} />
         ))}
       </div>
 
@@ -88,7 +92,7 @@ export function Sidebar({
       {/* 工具 */}
       <div style={navGroupStyle}>
         {TOOLS.map((item) => (
-          <NavButton key={item.id} item={item} current={current} onSelect={onSelect} />
+          <NavButton key={item.id} item={item} current={effectiveCurrent} onSelect={onSelect} />
         ))}
       </div>
     </nav>

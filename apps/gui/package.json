@@ -12,7 +12,6 @@
   "dependencies": {
     "@inkmigrate/protocol": "workspace:*",
     "@tauri-apps/api": "^2.0.0",
-    "@tauri-apps/plugin-shell": "^2.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

@@ -12,9 +12,10 @@ export function SettingsPage({ settings, update }: Props) {
 
       <div style={{ padding: '16px', background: 'var(--bg-panel)', borderRadius: '8px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
         <div>
-          <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>工作区目录 (stateDir)</label>
+          <label htmlFor="settings-stateDir" style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>工作区目录 (stateDir)</label>
           <input
-            value={settings.stateDir}
+            id="settings-stateDir"
+            value={settings.stateDir ?? ''}
             onChange={(e) => update({ stateDir: e.target.value })}
             placeholder="~/.inkmigrate"
           />
@@ -24,9 +25,10 @@ export function SettingsPage({ settings, update }: Props) {
         </div>
 
         <div>
-          <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>Obsidian Vault 路径</label>
+          <label htmlFor="settings-vaultPath" style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>Obsidian Vault 路径</label>
           <input
-            value={settings.vaultPath}
+            id="settings-vaultPath"
+            value={settings.vaultPath ?? ''}
             onChange={(e) => update({ vaultPath: e.target.value })}
             placeholder="/Users/you/Documents/Obsidian Vault"
           />
@@ -36,10 +38,16 @@ export function SettingsPage({ settings, update }: Props) {
         </div>
 
         <div>
-          <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>来源类型</label>
+          <label htmlFor="settings-sourceAdapter" style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>来源类型</label>
           <select
+            id="settings-sourceAdapter"
             value={settings.sourceAdapter ?? 'toutiao'}
-            onChange={(e) => update({ sourceAdapter: e.target.value as SourceAdapterKind })}
+            onChange={(e) => {
+              const sourceAdapter = e.target.value as SourceAdapterKind;
+              // 切回 toutiao 时清掉 evernote 的配置路径：MigratePage 对 truthy
+              // configPath 无条件转发，残留值会静默改走 evernote 分派
+              update(sourceAdapter === 'toutiao' ? { sourceAdapter, configPath: '' } : { sourceAdapter });
+            }}
             style={{ width: '200px' }}
           >
             <option value="toutiao">今日头条（浏览器收藏）</option>
@@ -52,8 +60,9 @@ export function SettingsPage({ settings, update }: Props) {
 
         {settings.sourceAdapter === 'evernote' && (
           <div>
-            <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>配置文件 (inkmigrate.yaml)</label>
+            <label htmlFor="settings-configPath" style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>配置文件 (inkmigrate.yaml)</label>
             <input
+              id="settings-configPath"
               value={settings.configPath ?? ''}
               onChange={(e) => update({ configPath: e.target.value })}
               placeholder="/path/to/inkmigrate.yaml"
@@ -65,18 +74,20 @@ export function SettingsPage({ settings, update }: Props) {
         )}
 
         <div>
-          <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>来源实例 ID</label>
+          <label htmlFor="settings-source" style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>来源实例 ID</label>
           <input
-            value={settings.source}
+            id="settings-source"
+            value={settings.source ?? ''}
             onChange={(e) => update({ source: e.target.value })}
             style={{ width: '200px' }}
           />
         </div>
 
         <div>
-          <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>目标实例 ID</label>
+          <label htmlFor="settings-target" style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>目标实例 ID</label>
           <input
-            value={settings.target}
+            id="settings-target"
+            value={settings.target ?? ''}
             onChange={(e) => update({ target: e.target.value })}
             style={{ width: '200px' }}
           />

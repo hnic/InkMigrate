@@ -2,6 +2,9 @@ import { useState } from 'react';
 import type { AppSettings } from '../../lib/types.js';
 import { ConfigPrompt } from '../ConfigPrompt.js';
 
+/** 问题清单最多展示条数（超出截断并提示剩余数量）。 */
+const MAX_ISSUES_SHOWN = 5;
+
 interface Props {
   settings: AppSettings;
   update: (partial: Partial<AppSettings>) => void;
@@ -68,7 +71,7 @@ function EvernotePreview({ settings, update, rpcCall, addLog }: Omit<Props, 'act
         settings={settings}
         update={update}
         required={['stateDir']}
-        message="⚠️ 请先在设置页填写工作区目录与配置文件路径"
+        message="⚠️ 请先在设置页填写工作区目录"
       />
 
       <div style={{ padding: '16px', background: 'var(--bg-panel)', borderRadius: '8px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
@@ -121,8 +124,8 @@ function EvernotePreview({ settings, update, rpcCall, addLog }: Omit<Props, 'act
               <div style={{ fontSize: '12px', color: 'var(--warning)', whiteSpace: 'pre-wrap' }}>
                 ⚠️ {result.issues.length} 条注意事项：
                 {'\n'}
-                {result.issues.slice(0, 5).join('\n')}
-                {result.issues.length > 5 ? `\n…还有 ${result.issues.length - 5} 条未显示` : ''}
+                {result.issues.slice(0, MAX_ISSUES_SHOWN).join('\n')}
+                {result.issues.length > MAX_ISSUES_SHOWN ? `\n…还有 ${result.issues.length - MAX_ISSUES_SHOWN} 条未显示` : ''}
               </div>
             )}
           </div>
@@ -140,8 +143,9 @@ function ToutiaoScan({ settings, update, rpcCall, addLog, activePhase, cancel }:
   const [result, setResult] = useState<{ uniqueItems: number; terminationReason: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // 文案不锁定轮数上限：上限由 engine 控制（key 中的 5 仅为原因标识），改配置时文案不漂移
   const reasonLabels: Record<string, string> = {
-    no_new_items_after_5_cycles: '连续 5 轮无新内容',
+    no_new_items_after_5_cycles: '连续多轮无新内容',
     no_load_more: '没有更多内容',
     cancelled: '已终止',
   };
@@ -196,6 +200,13 @@ function ToutiaoScan({ settings, update, rpcCall, addLog, activePhase, cancel }:
             终止
           </button>
         </div>
+
+        {/* favoritesUrl 缺失时给出可读提示，避免按钮灰着却无解释 */}
+        {settings.stateDir && !settings.favoritesUrl && (
+          <div style={{ fontSize: '13px', color: 'var(--warning)' }}>
+            ⚠️ 请先在「设置」页填写收藏列表 URL（登录成功后通常会自动获取）
+          </div>
+        )}
 
         {settings.stateDir && settings.favoritesUrl && !settings.loggedIn && (
           <div style={{

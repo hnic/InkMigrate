@@ -38,7 +38,6 @@ pub fn run() {
 
     let sidecar_for_exit = sidecar.clone();
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .manage(sidecar.clone())
         .setup(move |app| {
             // 启动 sidecar 进程
@@ -64,7 +63,12 @@ pub fn run() {
             // （Destroyed 对任意窗口销毁都触发）；block_on 同步等待 kill 完成——
             // spawn 出去的异步任务会随运行一起被丢弃，可能来不及执行而泄漏子进程。
             if let tauri::RunEvent::Exit = event {
-                tauri::async_runtime::block_on(sidecar_for_exit.shutdown());
+                tauri::async_runtime::block_on(async {
+                    // 先有界等待启动收尾：若 setup 里的启动任务仍在 spawn 半途，
+                    // 直接 shutdown() 会取到 None 而泄漏随后才注册的子进程
+                    sidecar_for_exit.wait_startup_settled().await;
+                    sidecar_for_exit.shutdown().await;
+                });
             }
         });
 }

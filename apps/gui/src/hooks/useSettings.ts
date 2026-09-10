@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import type { AppSettings } from '../lib/types.js';
+import { SOURCE_ADAPTER_KINDS, type AppSettings, type SourceAdapterKind } from '../lib/types.js';
 
 const STORAGE_KEY = 'inkmigrate-settings';
 
@@ -9,6 +9,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   favoritesUrl: '',
   source: 'toutiao-main',
   target: 'obsidian-main',
+  loggedIn: false,
   sourceAdapter: 'toutiao',
   configPath: '',
 };
@@ -28,8 +29,12 @@ function loadSavedSettings(): Partial<AppSettings> {
       if (typeof record[key] === 'string') result[key] = record[key] as string;
     }
     if (typeof record.loggedIn === 'boolean') result.loggedIn = record.loggedIn;
-    if (record.sourceAdapter === 'toutiao' || record.sourceAdapter === 'evernote') {
-      result.sourceAdapter = record.sourceAdapter;
+    // 用共享常量表校验（与 SourceAdapterKind 类型联合同源），新增 adapter 不会遗漏
+    if (
+      typeof record.sourceAdapter === 'string' &&
+      (SOURCE_ADAPTER_KINDS as readonly string[]).includes(record.sourceAdapter)
+    ) {
+      result.sourceAdapter = record.sourceAdapter as SourceAdapterKind;
     }
     return result;
   } catch {
@@ -51,8 +56,9 @@ export function useSettings() {
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
-    } catch {
-      // ignore quota errors
+    } catch (err) {
+      // 存储不可用（隐私模式/禁用存储等）时留痕，避免设置静默丢失无迹可查
+      console.warn('useSettings: 设置持久化到 localStorage 失败', err);
     }
   }, [settings]);
 

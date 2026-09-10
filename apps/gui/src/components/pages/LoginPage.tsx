@@ -45,8 +45,9 @@ export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin, pro
         throw new Error('登录响应格式异常（缺少 state 字段）');
       }
       const ok = result.state === 'logged-in';
-      // 过程态归位：稳定显示交给 settings.loggedIn（由 refreshLogin 写入）
-      setLoginState(ok ? 'idle' : 'failed');
+      if (!ok) {
+        setLoginState('failed');
+      }
       addLog(ok ? 'info' : 'error', `登录结果：${result.state}`);
       if (ok) {
         // 登录成功后自动填充收藏页 URL
@@ -60,6 +61,9 @@ export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin, pro
           // 登录本身已成功，刷新失败不应误报为「登录失败」
           addLog('warn', `登录成功，但刷新登录状态失败：${e instanceof Error ? e.message : String(e)}`);
         }
+        // 此时才归位过程态：稳定显示已由 refreshLogin 写入 settings.loggedIn，
+        // 若提前 setLoginState('idle')，loggedIn 写入前卡片会闪现「未登录」
+        setLoginState('idle');
       }
     } catch (e) {
       setLoginState('failed');
@@ -72,7 +76,8 @@ export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin, pro
 
   async function handleClear() {
     setLoading(true);
-    setLoginState('loading');
+    // 不复用 loginState='loading'：清除过程中状态点会误显示「登录中...」；
+    // 过程可视化只靠按钮 loading，结束统一归位（顺带清掉陈旧的 failed）
     try {
       const result = await rpcCall('auth.clear', {
         source: settings.source,
@@ -97,15 +102,21 @@ export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin, pro
     }
   }
 
-  // 卡片显示判定：过程态（loading/failed）优先，否则对齐 settings.loggedIn
+  // 卡片显示判定：loading 过程态优先；稳定态（已登录）优先于陈旧的 failed
+  // 过程态，否则一次登录失败后即使 loggedIn 已翻 true 仍显示「登录失败」
   let displayState: OperationState = 'idle';
-  if (loginState === 'loading' || loginState === 'failed') {
-    displayState = loginState;
+  if (loginState === 'loading') {
+    displayState = 'loading';
   } else if (settings.loggedIn) {
     displayState = 'success';
+  } else if (loginState === 'failed') {
+    displayState = 'failed';
   }
   const statusColor = STATUS_COLOR[displayState];
   const statusText = STATUS_TEXT[displayState];
+  // 避免嵌套三元：按优先级计算登录按钮文案（loading 覆盖稳定态）
+  let loginLabel = settings.loggedIn ? '重新登录' : '打开浏览器登录';
+  if (loading) loginLabel = '处理中...';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
@@ -163,7 +174,7 @@ export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin, pro
 
         <div style={{ display: 'flex', gap: '8px' }}>
           <button onClick={handleLogin} disabled={loading || !settings.stateDir}>
-            {loading ? '处理中...' : settings.loggedIn ? '重新登录' : '打开浏览器登录'}
+            {loginLabel}
           </button>
           <button onClick={handleClear} disabled={loading || !settings.loggedIn} className="btn-danger">
             清除登录

@@ -2,6 +2,10 @@
 name = "inkmigrate-gui"
 version = "1.0.0"
 edition = "2021"
+# MSRV 下限锚点：让过旧工具链得到 cargo 的明确报错（tauri 2.x 依赖实际可能要求更高）
+rust-version = "1.77.2"
+# 应用 crate，不发布到 crates.io
+publish = false
 
 [lib]
 name = "inkmigrate_gui_lib"
@@ -12,8 +16,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# 按实际使用收窄 tokio 特性（io/process/sync/time/rt），避免引入无关子系统
-tokio = { version = "1", features = ["rt-multi-thread", "io-util", "process", "sync", "time"] }
+# 声明本 crate 直接使用的 tokio 特性（spawn/io/process/sync/time）；
+# 注意 tauri 会传递启用更多 tokio 特性，此列表不缩小实际编译集
+tokio = { version = "1", features = ["rt", "io-util", "process", "sync", "time"] }

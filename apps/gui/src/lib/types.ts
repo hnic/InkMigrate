@@ -19,8 +19,11 @@ export interface LogEntry extends LogNotification {
   timestamp: number;
 }
 
+/** 来源类型常量表：类型联合与运行时校验共用同一真相源，新增 adapter 不会漂移。 */
+export const SOURCE_ADAPTER_KINDS = ['toutiao', 'evernote'] as const;
+
 /** 来源类型：toutiao（浏览器收藏）| evernote（ENEX/HTML 导出文件，无需登录）。 */
-export type SourceAdapterKind = 'toutiao' | 'evernote';
+export type SourceAdapterKind = (typeof SOURCE_ADAPTER_KINDS)[number];
 
 export interface AppSettings {
   stateDir: string;

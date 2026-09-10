@@ -78,3 +78,17 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   outline-offset: 1px;
   border-color: var(--focus);
 }
+
+/* 按钮同样补焦点环：键盘导航时不依赖各浏览器不一致的默认描边 */
+button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* 减少动效偏好：关闭过渡动画（!important 用于覆盖组件内联 transition） */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

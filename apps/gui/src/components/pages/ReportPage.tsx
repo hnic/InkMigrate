@@ -9,6 +9,22 @@ interface Props {
 // R3-M5: 改用共享 StatusQueryResult 类型（原 JobInfo 重声明且含不存在的 jobId 字段，
 // handler 不返回 jobId，渲染 Job: {undefined}）。jobId 显示用客户端 selectedJob。
 
+// 状态文案/配色（模块级常量）：paused 对齐 engine 的 JobStatus 联合，避免回退英文原文
+const STATUS_LABELS: Record<string, string> = {
+  completed: '完成',
+  failed: '失败',
+  interrupted: '已中断',
+  paused: '已暂停',
+  created: '已创建',
+  running: '运行中',
+};
+// 状态语义配色：失败/中断用 error 色，与下方「失败」计数卡的颜色语义一致
+const STATUS_COLORS: Record<string, string> = {
+  completed: 'var(--success)',
+  failed: 'var(--error)',
+  interrupted: 'var(--error)',
+};
+
 export function ReportPage({ settings, rpcCall }: Props) {
   const [selectedJob, setSelectedJob] = useState('');
   const [detail, setDetail] = useState<StatusQueryResult | null>(null);
@@ -25,6 +41,15 @@ export function ReportPage({ settings, rpcCall }: Props) {
         job: selectedJob,
         stateDir: settings.stateDir,
       }) as StatusQueryResult;
+      // 运行时校验关键字段：协议漂移时给出明确错误，而不是卡片渲染出 undefined
+      if (
+        typeof res?.status !== 'string' ||
+        [res.scanCount, res.verifiedCount, res.degradedCount, res.failedCount].some(
+          (n) => typeof n !== 'number',
+        )
+      ) {
+        throw new Error('status.query 返回数据格式异常（engine/GUI 版本可能不匹配）');
+      }
       setDetail(res);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -33,14 +58,6 @@ export function ReportPage({ settings, rpcCall }: Props) {
       setLoading(false);
     }
   }
-
-  const statusLabels: Record<string, string> = {
-    completed: '完成',
-    failed: '失败',
-    interrupted: '已中断',
-    created: '已创建',
-    running: '运行中',
-  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
@@ -51,7 +68,12 @@ export function ReportPage({ settings, rpcCall }: Props) {
         <div style={{ display: 'flex', gap: '8px' }}>
           <input
             value={selectedJob}
-            onChange={(e) => setSelectedJob(e.target.value)}
+            onChange={(e) => {
+              setSelectedJob(e.target.value);
+              // 输入变化即作废旧结果：否则旧 Job 的数据会被标上未查询过的新 Job ID
+              setDetail(null);
+              setError(null);
+            }}
             placeholder="mig-xxxxxxxxxxxx"
             style={{ flex: 1 }}
           />
@@ -79,7 +101,7 @@ export function ReportPage({ settings, rpcCall }: Props) {
               Job: {selectedJob}
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
-              <StatCard label="状态" value={statusLabels[detail.status] ?? detail.status} color={detail.status === 'completed' ? 'var(--success)' : 'var(--warning)'} />
+              <StatCard label="状态" value={STATUS_LABELS[detail.status] ?? detail.status} color={STATUS_COLORS[detail.status] ?? 'var(--warning)'} />
               <StatCard label="扫描总数" value={String(detail.scanCount)} />
               <StatCard label="已验证" value={String(detail.verifiedCount)} color="var(--success)" />
               <StatCard label="降级" value={String(detail.degradedCount)} color="var(--warning)" />

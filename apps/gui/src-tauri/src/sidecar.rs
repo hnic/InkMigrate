@@ -40,6 +40,17 @@ fn rpc_timeout_secs() -> u64 {
         .unwrap_or(DEFAULT_RPC_TIMEOUT_SECS)
 }
 
+/// 写 stdin 的超时（秒）。单行 JSON 只需毫秒级；超时说明 sidecar 已停止
+/// 读取输入（挂起/管道写满），不应无限期持有 stdin 锁阻塞其他 RPC。
+const STDIN_WRITE_TIMEOUT_SECS: u64 = 10;
+
+/// 应用退出时等待 sidecar 启动收尾的上限（秒）。正常启动只需毫秒级。
+const EXIT_STARTUP_WAIT_SECS: u64 = 5;
+
+/// 优雅退出宽限（秒）：关闭 stdin 后等待 engine 自行收尾排干的时限，
+/// 超时才强制 kill（避免迁移中的 SQLite 事务被 SIGKILL 截断）。
+const GRACEFUL_EXIT_SECS: u64 = 5;
+
 #[derive(Debug, Deserialize)]
 pub struct RpcError {
     pub code: i64,
@@ -106,10 +117,13 @@ impl SidecarManager {
     }
 
     async fn start_inner(&self, app: AppHandle) -> Result<(), String> {
-        let (node_bin, engine_path, browsers_path, native_binding) = resolve_sidecar_paths(&app);
+        let (node_bin, engine_path, browsers_path, native_binding) = resolve_sidecar_paths(&app)?;
 
         let mut cmd = Command::new(&node_bin);
-        cmd.arg("--max-old-space-size=8192")
+        // kill_on_drop：Child 被丢弃时兜底杀掉子进程，防止 panic 路径或
+        // 退出竞态（Exit 与启动任务并发）泄漏 node/chromium 孤儿进程
+        cmd.kill_on_drop(true)
+            .arg("--max-old-space-size=8192")
             .arg(&engine_path)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -208,25 +222,47 @@ impl SidecarManager {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
 
-        // 4. 写 stdin（短锁：只保护 write_all，保证一行不被并发写交错）
-        {
+        // 4. 写 stdin（短锁：只保护 write_all，保证一行不被并发写交错）。
+        //    写入加超时：sidecar 停止读取输入导致管道缓冲写满时 write_all 会
+        //    永久阻塞，且此时持有 stdin 锁，会连带卡死所有并发 RPC。
+        let write_result: Result<(), String> = async {
             let mut stdin_guard = self.stdin.lock().await;
-            let stdin = stdin_guard.as_mut().ok_or("sidecar 未启动")?;
-            stdin
-                .write_all(format!("{}\n", json).as_bytes())
-                .await
-                .map_err(|e| format!("写入 stdin 失败: {}", e))?;
+            let stdin = match stdin_guard.as_mut() {
+                Some(stdin) => stdin,
+                None => return Err("sidecar 未启动".to_string()),
+            };
+            let line = format!("{}\n", json);
+            tokio::time::timeout(
+                std::time::Duration::from_secs(STDIN_WRITE_TIMEOUT_SECS),
+                stdin.write_all(line.as_bytes()),
+            )
+            .await
+            .map_err(|_| "写入 stdin 超时（sidecar 可能已停止读取输入）".to_string())?
+            .map_err(|e| format!("写入 stdin 失败: {}", e))
+        }
+        .await;
+        // 写失败必须清理 pending 注册：id 永不复用，残留的 sender 会让 map
+        // 随错误次数单调增长（内存泄漏）
+        if let Err(e) = write_result {
+            self.pending.lock().await.remove(&id);
+            return Err(e);
         }
         // stdin 锁已释放，等待响应不阻塞其他 RPC
 
-        // 5. 锁外等待响应（长任务如全量扫描/迁移可能需要数小时）
-        let response = tokio::time::timeout(
+        // 5. 锁外等待响应（长任务如全量扫描/迁移可能需要数小时）。
+        //    超时同样要清理 pending 注册，原因同上
+        let response = match tokio::time::timeout(
             std::time::Duration::from_secs(rpc_timeout_secs()),
             rx,
         )
         .await
-        .map_err(|_| "RPC 超时".to_string())?
-        .map_err(|_| "RPC 响应通道关闭".to_string())?;
+        {
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                return Err("RPC 超时".to_string());
+            }
+            Ok(v) => v.map_err(|_| "RPC 响应通道关闭".to_string())?,
+        };
 
         if let Some(err) = response.error {
             return Err(format!("[{}] {}", err.code, err.message));
@@ -235,10 +271,37 @@ impl SidecarManager {
         response.result.ok_or_else(|| "响应缺少 result".to_string())
     }
 
-    /// 关闭 sidecar 进程。
+    /// 等待启动收尾（Starting → Ready/Failed），用于退出路径：确保启动任务
+    /// 已注册子进程（或已放弃）后再 kill，避免 start() 半途时 shutdown()
+    /// 取到 None 而泄漏刚注册的子进程。有界兜底，防启动卡死时退出流程挂死。
+    pub async fn wait_startup_settled(&self) {
+        let mut state = self.state_rx.clone();
+        state.borrow_and_update(); // 标记当前值为已读，changed() 只等后续迁移
+        while *state.borrow() == SidecarState::Starting {
+            if tokio::time::timeout(
+                std::time::Duration::from_secs(EXIT_STARTUP_WAIT_SECS),
+                state.changed(),
+            )
+            .await
+            .is_err()
+            {
+                return;
+            }
+        }
+    }
+
+    /// 关闭 sidecar 进程：优先优雅退出——engine 在 stdin 关闭后会收尾并排干
+    /// stdout；有界宽限后再强制 kill，避免长任务中途被 SIGKILL 截断事务。
     pub async fn shutdown(&self) {
         self.is_shutting_down.store(true, Ordering::Relaxed);
+        // 关闭 stdin → engine 读到 EOF 后自行收尾退出
+        self.stdin.lock().await.take();
         if let Some(mut child) = self.child.lock().await.take() {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(GRACEFUL_EXIT_SECS),
+                child.wait(),
+            )
+            .await;
             let _ = child.kill().await;
         }
     }
@@ -289,11 +352,33 @@ async fn read_stdout(
                     continue;
                 }
             };
-            let _ = app.emit(event_name, msg.params.clone().unwrap_or(serde_json::Value::Null));
+            // msg 此后不再使用，params 可直接移动（method 仅借用，字段不相交）
+            let _ = app.emit(event_name, msg.params.unwrap_or(serde_json::Value::Null));
         }
     }
 
     eprintln!("sidecar stdout 已关闭");
+
+    // 进程退出：唤醒所有在飞的 send_rpc，否则它们要等满整个 RPC 超时
+    // （最长 24h）才失败，期间前端命令一直挂起
+    let reason = if is_shutting_down.load(Ordering::Relaxed) {
+        "应用正在关闭"
+    } else {
+        "sidecar 进程已退出"
+    };
+    for (_, tx) in pending.lock().await.drain() {
+        let _ = tx.send(RpcResponse {
+            id: None,
+            result: None,
+            error: Some(RpcError {
+                code: -32000,
+                message: reason.to_string(),
+                data: None,
+            }),
+            method: None,
+            params: None,
+        });
+    }
 
     // 只有非正常关闭时才通知前端（shutdown 时不报崩溃）
     if !is_shutting_down.load(Ordering::Relaxed) {
@@ -308,20 +393,23 @@ async fn read_stdout(
 /// 返回 (node_bin, engine_path, Option<browsers_path>, Option<native_binding>)。
 /// - 开发模式：INKMIGRATE_ENGINE_PATH 存在时，用系统 node + 该路径，不注入环境变量。
 /// - 生产模式：从 resource_dir()/sidecar/ 解析绝对路径，注入环境变量。
-fn resolve_sidecar_paths(app: &AppHandle) -> (String, String, Option<String>, Option<String>) {
+fn resolve_sidecar_paths(
+    app: &AppHandle,
+) -> Result<(String, String, Option<String>, Option<String>), String> {
     // 开发模式逃生阀：环境变量指向 workspace 内的 engine
     if let Ok(engine_path) = std::env::var("INKMIGRATE_ENGINE_PATH") {
-        return ("node".to_string(), engine_path, None, None);
+        return Ok(("node".to_string(), engine_path, None, None));
     }
 
-    // 生产模式：resource_dir/resources/sidecar/ 下的绝对路径
-    let sidecar_dir = match app.path().resource_dir() {
-        Ok(dir) => dir.join("resources").join("sidecar"),
-        Err(_) => {
-            eprintln!("[sidecar] 警告: resource_dir 解析失败，回退到相对路径");
-            return ("node".to_string(), "../../engine/dist/index.js".to_string(), None, None);
-        }
-    };
+    // 生产模式：resource_dir/resources/sidecar/ 下的绝对路径。
+    // resource_dir 解析失败属于不可恢复的安装损坏，直接快速失败，
+    // 不再回退到 cwd 相对路径（那条路径在打包环境下必然找不到，
+    // 只会把失败推迟到 spawn 并给出误导性的报错）
+    let sidecar_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("resource_dir 解析失败: {}（应用资源缺失或安装损坏，请重新安装）", e))
+        .map(|dir| dir.join("resources").join("sidecar"))?;
 
     let node_bin = if cfg!(target_os = "windows") {
         sidecar_dir.join("node/node.exe")
@@ -333,10 +421,10 @@ fn resolve_sidecar_paths(app: &AppHandle) -> (String, String, Option<String>, Op
     let browsers_path = sidecar_dir.join("browsers");
     let native_binding = sidecar_dir.join("native/better_sqlite3.node");
 
-    (
+    Ok((
         node_bin.to_string_lossy().into_owned(),
         engine_path.to_string_lossy().into_owned(),
         Some(browsers_path.to_string_lossy().into_owned()),
         Some(native_binding.to_string_lossy().into_owned()),
-    )
+    ))
 }

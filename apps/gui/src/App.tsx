@@ -18,7 +18,7 @@ export default function App() {
   const { settings, update } = useSettings();
   const { rpcCall, progress, logs, busy, activePhase, healthDegraded, addLog, cancel } = useSidecar();
   const { refresh: refreshLogin, profilePath } = useLoginStatus({ settings, update });
-  // Evernote 文件源无登录步骤：默认页与 login 页重定向到扫描
+  // Evernote 文件源无登录/清理步骤：login 与 cleanup 页均重定向到扫描
   const isEvernote = settings.sourceAdapter === 'evernote';
   const effectivePage: PageId =
     isEvernote && (page === 'login' || page === 'cleanup') ? 'scan' : page;
@@ -37,7 +37,8 @@ export default function App() {
         <span style={{ fontSize: '18px' }}>🔄</span>
         <span style={{ fontWeight: 700, fontSize: '16px' }}>InkMigrate 墨迁</span>
         <span style={{ flex: 1 }} />
-        {settings.stateDir && (
+        {/* evernote 文件源无登录流程，不显示登录指示（否则永远误显示「未登录」） */}
+        {settings.stateDir && !isEvernote && (
           <span style={{
             fontSize: '12px',
             color: settings.loggedIn ? 'var(--success)' : 'var(--text-dim)',
@@ -65,7 +66,7 @@ export default function App() {
           {healthDegraded !== null && (
             <div role="alert" style={{
               padding: '10px 14px',
-              background: '#c0392b',
+              background: 'var(--error-hover)',
               color: '#fff',
               borderRadius: '6px',
               fontSize: '13px',

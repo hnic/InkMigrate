@@ -1,7 +1,8 @@
 import type { CSSProperties } from 'react';
 import type { ProgressEvent } from '../lib/types.js';
 
-const phaseLabels: Record<string, string> = {
+// phase 是闭合联合：按键类型建表，协议新增 phase 时编译期即报缺漏
+const phaseLabels: Record<ProgressEvent['phase'], string> = {
   scanning: '🔍 扫描中',
   migrating: '📦 迁移中',
   cleanup: '🗑️ 清理中',
@@ -58,6 +59,11 @@ const countsRowStyle: CSSProperties = {
   fontSize: '13px',
   fontWeight: 600,
 };
+// 状态计数 span 的静态配色（同上提升到模块级，避免每 tick 重建）
+const countSuccessStyle: CSSProperties = { color: 'var(--success)' };
+const countWarningStyle: CSSProperties = { color: 'var(--warning)' };
+const countErrorStyle: CSSProperties = { color: 'var(--error)' };
+const countSkippedStyle: CSSProperties = { color: 'var(--text-dim)' };
 
 export function ProgressBar({ progress }: { progress: ProgressEvent | null }) {
   if (progress === null) return null;
@@ -66,6 +72,9 @@ export function ProgressBar({ progress }: { progress: ProgressEvent | null }) {
   // 也避免 99.6% 这类未完成任务因四舍五入提前显示 100%
   const rawPct = progress.total > 0 ? (progress.current / progress.total) * 100 : 0;
   const pct = Math.min(100, Math.max(0, Math.floor(rawPct)));
+  // 完成态用真实值判定而非钳制后的 pct：current > total 属于生产端计数异常，
+  // 不应被钳制成虚假的「100% 成功」绿色
+  const isComplete = progress.total > 0 && progress.current >= progress.total;
 
   const phaseLabel = phaseLabels[progress.phase] ?? progress.phase;
   const stageLabel = progress.stage !== undefined ? (stageLabels[progress.stage] ?? progress.stage) : null;
@@ -88,7 +97,7 @@ export function ProgressBar({ progress }: { progress: ProgressEvent | null }) {
           )}
         </span>
         {progress.total > 0 && (
-          <span style={{ fontSize: '20px', fontWeight: 800, color: pct === 100 ? 'var(--success)' : 'var(--accent-hover)' }}>
+          <span style={{ fontSize: '20px', fontWeight: 800, color: isComplete ? 'var(--success)' : 'var(--accent-hover)' }}>
             {pct}%
           </span>
         )}
@@ -108,7 +117,7 @@ export function ProgressBar({ progress }: { progress: ProgressEvent | null }) {
             style={{
               width: `${pct}%`,
               height: '100%',
-              background: pct === 100
+              background: isComplete
                 ? 'var(--success)'
                 : 'linear-gradient(90deg, var(--accent), var(--accent-hover))',
               borderRadius: '5px',
@@ -129,19 +138,19 @@ export function ProgressBar({ progress }: { progress: ProgressEvent | null }) {
       {progress.counts && (
         <div style={countsRowStyle}>
           {progress.counts.verified !== undefined && (
-            <span style={{ color: 'var(--success)' }}>✅ {progress.counts.verified}</span>
+            <span style={countSuccessStyle}>✅ {progress.counts.verified}</span>
           )}
           {progress.counts.degraded !== undefined && progress.counts.degraded > 0 && (
-            <span style={{ color: 'var(--warning)' }}>⚠️ {progress.counts.degraded}</span>
+            <span style={countWarningStyle}>⚠️ {progress.counts.degraded}</span>
           )}
           {progress.counts.conflict !== undefined && progress.counts.conflict > 0 && (
-            <span style={{ color: 'var(--warning)' }}>⚠️ 冲突 {progress.counts.conflict}</span>
+            <span style={countWarningStyle}>⚠️ 冲突 {progress.counts.conflict}</span>
           )}
           {progress.counts.failed !== undefined && (
-            <span style={{ color: 'var(--error)' }}>❌ {progress.counts.failed}</span>
+            <span style={countErrorStyle}>❌ {progress.counts.failed}</span>
           )}
           {progress.counts.skipped !== undefined && progress.counts.skipped > 0 && (
-            <span style={{ color: 'var(--text-dim)' }}>⏭️ {progress.counts.skipped}</span>
+            <span style={countSkippedStyle}>⏭️ {progress.counts.skipped}</span>
           )}
         </div>
       )}
