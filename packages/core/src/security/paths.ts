@@ -24,6 +24,14 @@ export function rejectsTraversal(p: string): boolean {
   return norm.split('/').some((seg) => seg === '..');
 }
 
+/** 首段精确比较 '..' 的逃逸判定（resolveWithin 与 isPathInside 共用，消除两份
+ * 必须同步的副本：startsWith('..') 会把合法的「.. 开头文件名」（如 ..draft.md，
+ * 只要不恰好是 .. 即合法）误判为逃逸）。 */
+function relEscapes(rel: string): boolean {
+  const firstSeg = rel.split(/[\\/]/, 1)[0];
+  return firstSeg === '..' || isAbsolute(rel);
+}
+
 /**
  * 在 `root` 下解析 `target`。若解析结果在 `root` 之外，抛出 `escape` 错误。
  * 不解析符号链接；若需要符号链接防护，调用方应在 `resolveWithin` 后再调用
@@ -32,10 +40,7 @@ export function rejectsTraversal(p: string): boolean {
 export function resolveWithin(root: string, target: string): string {
   const resolved = resolve(root, target);
   const rel = relative(root, resolved);
-  // 首段精确比较 '..'：startsWith('..') 会把合法的「.. 开头文件名」（如
-  // ..draft.md，POSIX/Windows 上只要不恰好是 .. 即合法）误判为逃逸。
-  const firstSeg = rel.split(/[\\/]/, 1)[0];
-  if (firstSeg === '..' || isAbsolute(rel)) {
+  if (relEscapes(rel)) {
     throw new VaultPathEscapeError(`path "${target}" escapes root "${root}"`);
   }
   return resolved;
@@ -44,9 +49,7 @@ export function resolveWithin(root: string, target: string): string {
 /** `child` 是否位于 `parent` 内（非符号链接解析）。 */
 export function isPathInside(child: string, parent: string): boolean {
   const rel = relative(parent, child);
-  // 同 resolveWithin：按首段精确比较，避免误判 .. 开头的合法文件名
-  const firstSeg = rel.split(/[\\/]/, 1)[0];
-  return !!rel && firstSeg !== '..' && !isAbsolute(rel);
+  return !!rel && !relEscapes(rel);
 }
 
 /**
@@ -113,12 +116,39 @@ export function assertWriteDirSafe(root: string, targetAbsPath: string): void {
       assertSymlinkSafe(root, targetAbsPath);
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
-      // 悬空链接（realpath ENOENT）：写入会在链接目标处创建文件，词法校验目标位置
-      const linkTarget = resolve(targetAbsPath, '..', readlinkSync(targetAbsPath));
-      if (linkTarget !== resolve(root) && !isPathInside(linkTarget, root)) {
-        throw new VaultPathEscapeError(
-          `dangling symlink "${targetAbsPath}" resolves outside root "${root}"`,
-        );
+      // 悬空链接（realpath ENOENT）：写入会在链接目标处创建文件。目标位置的
+      // 判定必须模拟内核的路径解析，两处都不能用词法路径：
+      // 1) 相对链接内容以【已解引用的真实父目录】为基准——词法父目录在父目录
+      //    链含符号链接时会算错深度（如 root/c → root 自身时，/root/c/f 的
+      //    内容 ../evil 词法算到 /root/evil「在内」，内核却解析到 /evil）。
+      //    parentDir 在此之前已通过 assertSymlinkSafe，realpath 必然成功。
+      // 2) 比较基准用 realRoot（与 assertSymlinkSafe 一致；root 本身经符号
+      //    链接配置时词法 root 会把合法写入误判为逃逸或反之）。
+      // 3) 链接目标自身还可能含指向 root 外的符号链接组件（/root/shortcut →
+      //    /etc，悬空链接内容 shortcut/evil 词法「在内」、实际写到 /etc）。
+      //    逐级爬升到目标的最深【存在】祖先后 realpath 复核——不存在的尾
+      //    组件不可能是符号链接，存在前缀的 realpath 即可闭合该洞。
+      const realParent = realpathSync(parentDir);
+      const linkTarget = resolve(realParent, readlinkSync(targetAbsPath));
+      const realRoot = realpathSync(root);
+      let probe = linkTarget;
+      for (;;) {
+        let real: string;
+        try {
+          real = realpathSync(probe);
+        } catch (e2) {
+          if ((e2 as NodeJS.ErrnoException).code !== 'ENOENT') throw e2;
+          const next = resolve(probe, '..');
+          if (next === probe) throw e2; // 爬到根仍 ENOENT：异常如实上报
+          probe = next;
+          continue;
+        }
+        if (real !== realRoot && !isPathInside(real, realRoot)) {
+          throw new VaultPathEscapeError(
+            `dangling symlink "${targetAbsPath}" resolves outside root "${root}"`,
+          );
+        }
+        break;
       }
     }
   }

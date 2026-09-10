@@ -9,10 +9,11 @@ import {
   fstatSync,
   ftruncateSync,
   writeSync,
+  statSync,
 } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
-import { isStaleLock, type LockFileContent } from './lock-content.js';
+import { isStaleLock, STALE_MS, type LockFileContent } from './lock-content.js';
 
 export interface AcquireOptions {
   /** `.inkmigrate/locks/` 目录路径，调用方根据 `workspace.stateDir` 推导。 */
@@ -112,9 +113,16 @@ export function acquireLock(opts: AcquireOptions): HeldLock {
       writeFileSync(fd, JSON.stringify(content, null, 2));
     } catch (e) {
       // 首次写入失败：清理刚创建的空锁文件再抛出，否则残留文件会让本锁的
-      // 后续获取永远失败（调用方拿不到 HeldLock，无人释放）。
-      rmSync(path, { force: true });
+      // 后续获取永远失败（调用方拿不到 HeldLock，无人释放）。先无条件关 fd——
+      // 若 rmSync 先行且抛错（Windows 上被杀软/他进程持句柄时 EPERM/EBUSY），
+      // closeSync 将不可达，fd 泄漏且空文件残留；删除改为尽力而为，残留的
+      // 空文件由下次 acquire 的损坏处理路径兜底。
       closeSync(fd);
+      try {
+        rmSync(path, { force: true });
+      } catch {
+        /* 尽力清理 */
+      }
       throw e;
     }
     return fd;
@@ -135,7 +143,24 @@ export function acquireLock(opts: AcquireOptions): HeldLock {
     try {
       existing = JSON.parse(raw) as LockFileContent;
     } catch {
-      // 锁文件损坏 → 视为陈旧并接管
+      // 损坏 ≠ 陈旧：openSync('wx') 已成功、首次 writeFileSync 尚未完成之间，
+      // 并发 acquire 会读到空文件/半写文件，此时持有方仍存活——按 mtime 判龄：
+      // 过新则视为活跃锁，抛 LockConflictError 让调用方稍后重试，避免误删
+      // 活跃锁导致双持有（心跳路径的等长原地覆写无撕裂窗口，此窗口仅存在于
+      // 初次创建，这是两条路径的差别）。文件已消失则无龄可判，按陈旧处理，
+      // 下方 rmSync({force}) 本就是 no-op。
+      let ageMs = Number.POSITIVE_INFINITY;
+      try {
+        ageMs = Date.now() - statSync(path).mtimeMs;
+      } catch {
+        /* 文件已被并发清理 */
+      }
+      if (ageMs < STALE_MS) {
+        throw new LockConflictError(
+          path,
+          `lock "${opts.lockName}" unreadable but recently modified (age ${ageMs}ms)`,
+        );
+      }
       existing = {
         pid: -1,
         hostname: '',
@@ -221,7 +246,16 @@ export function acquireLock(opts: AcquireOptions): HeldLock {
           try {
             const raw2 = readFileSync(path, 'utf8');
             const current = JSON.parse(raw2) as LockFileContent;
-            if (current.jobId === opts.jobId) {
+            // ino 复核：确认路径仍指向本进程 fd 对应的 inode（同时弥补 Windows
+            // 上 nlink 不反映 unlink 的缺口），防止 read 与 rm 之间锁文件被
+            // 新持有方接管重建后遭误删、放行第三个并发获取者；statSync 若因
+            // 又一次接管而 ENOENT，落入下方 catch 不删除。rm 与 ino 复核之间
+            // 仍存在的微窗口是路径式 unlink 的固有余量，本复核已把可确定性
+            // 防护的接管场景闭合。
+            if (
+              current.jobId === opts.jobId &&
+              statSync(path).ino === fstatSync(fd).ino
+            ) {
               rmSync(path, { force: true });
             }
           } catch {

@@ -11,10 +11,12 @@ export function checkDiskSpace(path: string, minFreeDiskBytes: number): void {
     available = stats.bavail * stats.bsize;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    // 仅在 statfs 不被本平台支持（ENOSYS/EINVAL）时静默通过；其余失败（ENOENT
-    // 路径不存在、EACCES 无权限等）如实抛出——否则损坏的预检被误判为通过，
-    // 用户会在迁移中途才撞上 ENOSPC 且无任何预警。
-    if (code === 'ENOSYS' || code === 'EINVAL') return;
+    // 仅在 statfs 确实不被本平台/文件系统支持（ENOSYS=未实现；
+    // EOPNOTSUPP/ENOTSUP=不支持）时静默通过。EINVAL（参数无效）是歧义信号：
+    // 更可能来自畸形路径或损坏的 statfs 绑定而非平台缺失，静默放行会让本该
+    // 在预检暴露的磁盘问题拖到迁移中途以 ENOSPC 爆发——其余失败（ENOENT
+    // 路径不存在、EACCES 无权限等）同理必须如实抛出。
+    if (code === 'ENOSYS' || code === 'EOPNOTSUPP' || code === 'ENOTSUP') return;
     throw new Error(
       `disk space check failed at "${path}": ${code ?? (error as Error).message}`,
     );

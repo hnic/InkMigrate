@@ -56,8 +56,8 @@ export function isRateLimitedError(e: unknown): e is RateLimitedError {
  * 同理）——业务错误恰好 message 为 'aborted' 会被误判为取消。
  */
 export class AbortError extends Error {
-  constructor(message = 'aborted') {
-    super(message);
+  constructor(message = 'aborted', options?: ErrorOptions) {
+    super(message, options);
     this.name = 'AbortError';
   }
 }
@@ -109,8 +109,9 @@ export async function withRetry<T>(
       return await fn();
     } catch (e) {
       lastError = e;
-      // 取消信号优先于重试决策
-      if (signal?.aborted) throw new AbortError();
+      // 取消信号优先于重试决策；保留原始错误为 cause——否则并发于取消的真实
+      // 失败（如 HTTP 500）的栈与消息被完全丢弃，日志只剩笼统的取消信息。
+      if (signal?.aborted) throw new AbortError('aborted', { cause: e });
       // R4-C2: adapter 自身抛的 AbortError（非 signal 触发）也不重试——
       // 否则取消一个 in-flight extract 会浪费 3 轮退避重试。
       if (isAbortError(e)) throw e;
@@ -176,7 +177,10 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
  *（首次不退避，故只需 maxRetries-1=2 个值）。此前 backoffMs 有 3 个值，
  * 第 3 个（30000ms）因循环只跑 maxRetries 次而永不使用，是死配置——已修正。
  */
-export const DEFAULT_RETRY_POLICY: RetryPolicy = {
+// 冻结共享单例：job-runner 按引用把它传入每个 Job 的 retryPolicy，任何就地
+// 改动（测试或覆写助手误改 maxRetries/backoffMs 元素）都会进程级泄漏、影响
+// 其它 Job 与测试用例。冻结后在严格模式下立即抛错（fail fast）。
+export const DEFAULT_RETRY_POLICY: Readonly<RetryPolicy> = Object.freeze({
   maxRetries: 3,
-  backoffMs: [3000, 10000],
-};
+  backoffMs: Object.freeze([3000, 10000]),
+});

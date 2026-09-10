@@ -4,8 +4,9 @@ import {
   isPathInside,
   rejectsTraversal,
   assertSymlinkSafe,
+  assertWriteDirSafe,
 } from './paths.js';
-import { mkdtempSync, symlinkSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, symlinkSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -73,6 +74,7 @@ describe('paths (§13.2)', () => {
   });
 
   describe('assertSymlinkSafe (§13.2 符号链接逃逸)', () => {
+
     it('passes when target resolves inside root', () => {
       const realFile = join(root, 'inside.md');
       writeFileSync(realFile, 'x');
@@ -99,6 +101,49 @@ describe('paths (§13.2)', () => {
       writeFileSync(realFile, 'x');
       // 同路径（realpath 一致）不应抛——无论 FS 大小写敏感性
       expect(() => assertSymlinkSafe(root, realFile)).not.toThrow();
+    });
+  });
+
+  describe('assertWriteDirSafe（悬空符号链接逃逸）', () => {
+    it('root 内的普通悬空链接（目标也在 root 内）不抛', () => {
+      mkdirSync(join(root, 'sub'), { recursive: true });
+      // 链接文件 root/sub/f → g.txt（不存在 → 悬空，目标仍在 root/sub 内）
+      symlinkSync('g.txt', join(root, 'sub', 'f.md'));
+      expect(() => assertWriteDirSafe(root, join(root, 'sub', 'f.md'))).not.toThrow();
+    });
+
+    it('#344: 父目录链含指向 root 自身的符号链接时，按词法父目录解析会放行逃逸', () => {
+      // root/c → root（自身）；悬空链接 root/c/f 的内容 '../evil'：
+      // 词法父目录 root/c + '../evil' = root/evil「在内」；但内核把链接内容
+      // 相对【解引用后的真实父目录】root 解析 → /<tmpdir>/evil，在 root 外。
+      symlinkSync(root, join(root, 'c'));
+      // 经 root/c 创建实际落在 root/f（c 解引用为 root）
+      symlinkSync('../evil', join(root, 'c', 'f.md'));
+      expect(() => assertWriteDirSafe(root, join(root, 'c', 'f.md'))).toThrow(
+        /dangling symlink.*outside/,
+      );
+    });
+
+    it('#345: 链接目标内含指向 root 外的目录符号链接时拒绝', () => {
+      // root/shortcut → outsideRoot；悬空链接 root/d/f → ../shortcut/evil：
+      // 词法目标 root/shortcut/evil「在内」，内核沿 shortcut 写到 outsideRoot/evil。
+      mkdirSync(join(root, 'd'), { recursive: true });
+      symlinkSync(outsideRoot, join(root, 'shortcut'));
+      symlinkSync('../shortcut/evil.md', join(root, 'd', 'f.md'));
+      expect(() => assertWriteDirSafe(root, join(root, 'd', 'f.md'))).toThrow(
+        /dangling symlink.*outside/,
+      );
+    });
+
+    it('#345: root 经符号链接配置时不误判合法悬空链接为逃逸', () => {
+      // rootLink → root；写入路径走 rootLink/... 而判龄基准是 realpath(root)。
+      mkdirSync(join(root, 'sub'), { recursive: true });
+      symlinkSync('g.txt', join(root, 'sub', 'f.md'));
+      const rootLink = join(root, 'rootlink');
+      symlinkSync(root, rootLink);
+      expect(() =>
+        assertWriteDirSafe(rootLink, join(rootLink, 'sub', 'f.md')),
+      ).not.toThrow();
     });
   });
 });

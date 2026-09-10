@@ -60,13 +60,19 @@ function wrapRedacted(logger: Logger, redactor: Redactor): Logger {
         // H3: printf 风格的 rest 插值参数（如 log.info({url}, 'fetched %s', token)）
         // 也需脱敏，否则会泄漏。
         const safeRest = rest.map((x) => (typeof x === 'string' ? redactor(x) : redactValue(x, redactor)));
-        if (safeMsg === undefined) {
+        // 仅当既无 msg 也无 rest 时才折叠为单参形式——msg 为 undefined 但存在
+        // rest 时（log.info({obj}, undefined, 'extra')），转发原 arity 才能保持
+        // 与未包装 pino 一致的输出，否则已付出脱敏成本的 safeRest 被静默丢弃。
+        if (safeMsg === undefined && safeRest.length === 0) {
           fn.call(logger, safeObj);
         } else {
           fn.call(logger, safeObj, safeMsg, ...safeRest);
         }
-      } catch {
-        fn.call(logger, '[redaction failed — payload suppressed]');
+      } catch (err) {
+        // 不含 err.message——其内容可能嵌有敏感数据；仅保留错误类名，
+        // 使「脱敏器自身缺陷影响常见字段」这类问题可诊断、可评估影响面。
+        const reason = (err as Error)?.constructor?.name ?? 'unknown';
+        fn.call(logger, `[redaction failed (${reason}) — payload suppressed]`);
       }
     };
   // Logger 是函数与对象的混合体；用 Proxy 拦截已知方法。
@@ -91,11 +97,37 @@ function wrapRedacted(logger: Logger, redactor: Redactor): Logger {
           // Pino 在 child() 内部把 bindings 序列化进 chindings，前置到该 child 的
           // 每一行日志——方法级拦截看不到这些字段，必须在传入前脱敏，否则
           // logger.child({ token }).info(...) 会在每一行泄漏原始 token。
-          const safeBindings = redactValue(bindings, redactor) as typeof bindings;
+          // 脱敏与 level 方法同样 fail-closed：bindings 上的 getter 抛错时降级
+          // 占位符，绝不把异常抛回调用方、更不回退输出原值。
+          let safeBindings: typeof bindings;
+          try {
+            safeBindings = redactValue(bindings, redactor) as typeof bindings;
+          } catch {
+            safeBindings = {
+              note: '[redaction failed — bindings suppressed]',
+            } as typeof bindings;
+          }
           return wrapRedacted(
             origChild.apply(target, [safeBindings, ...rest] as Parameters<Logger['child']>) as unknown as Logger,
             redactor,
           );
+        };
+      }
+      // H1 同类旁路：setBindings 会把参数并入 chindings、前置到后续每一行，
+      // 方法级拦截同样看不到——必须在此前置脱敏；脱敏抛错时降级占位符，
+      // fail closed：绝不写入未脱敏的 bindings。
+      if (prop === 'setBindings') {
+        const origSetBindings = Reflect.get(target, prop, receiver) as (
+          b: object,
+        ) => void;
+        return (bindings: object) => {
+          let safe: unknown;
+          try {
+            safe = redactValue(bindings, redactor);
+          } catch {
+            safe = { note: '[redaction failed — bindings suppressed]' };
+          }
+          origSetBindings.call(target, safe as object);
         };
       }
       return Reflect.get(target, prop, receiver);
@@ -127,21 +159,27 @@ function redactValue(v: unknown, r: Redactor, ancestors: object[] = []): unknown
         return '[binary data]';
       }
       // L3: Map/Set/Error.cause 等非普通对象，Object.entries 不遍历其内部条目，
-      // 需显式处理避免泄漏。
+      // 需显式处理避免泄漏。Map/Set 序列化为普通对象/数组——Pino 的 JSON 风格
+      // 序列化只取自有可枚举字符串键，Map/Set 会输出 {}，精心脱敏后的内容
+      // 反而到不了日志。
       if (v instanceof Map) {
-        const out = new Map();
-        for (const [k, val] of v) out.set(redactValue(k, r, ancestors), redactValue(val, r, ancestors));
+        const out: Record<string, unknown> = {};
+        for (const [k, val] of v) {
+          out[String(redactValue(k, r, ancestors))] = redactValue(val, r, ancestors);
+        }
         return out;
       }
       if (v instanceof Set) {
-        return new Set([...v].map((x) => redactValue(x, r, ancestors)));
+        return [...v].map((x) => redactValue(x, r, ancestors));
       }
       if (v instanceof Error) {
         const out: Record<string, unknown> = {};
         // message/stack/name 是非枚举 own 属性，Object.entries 取不到，必须显式
         // 带出，否则 logger.error({ err }) 输出近乎 {}，丢失最关键的诊断信息。
-        // message/stack 可能含敏感串（URL 内嵌 token、家目录路径），同样过脱敏。
-        out.name = v.name;
+        // message/stack 可能含敏感串（URL 内嵌 token、家目录路径），同样过脱敏；
+        // name 一致处理——自定义 Error 子类可能把敏感数据放进 name（普通字符串，
+        // 脱敏廉价且不影响典型类名）。
+        out.name = r(v.name);
         out.message = r(v.message);
         if (v.stack !== undefined) out.stack = r(v.stack);
         for (const [k, val] of Object.entries(v)) {

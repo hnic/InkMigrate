@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { acquireLock, LockConflictError } from './locks.js';
-import { isStaleLock, type LockFileContent } from './lock-content.js';
+import { isStaleLock, STALE_MS, type LockFileContent } from './lock-content.js';
 
 let dir: string;
 beforeEach(() => {
@@ -140,5 +140,29 @@ describe('acquireLock (§18.4)', () => {
     held.release();
     // release 后再调 checkHealth 不应抛（幂等安全）
     held.checkHealth();
+  });
+
+  it('#332: 新鲜的损坏锁不接管（openSync 与首次写入之间的空/半写文件窗口），抛 LockConflictError', () => {
+    // 持有方 openSync('wx') 已成功、writeFileSync 未完成时，并发 acquire 读到
+    // 空文件——此时持有方仍存活，按陈旧接管并 rmSync 会删掉活跃锁导致双持有。
+    const lockPath = join(dir, 'corrupt-fresh.lock');
+    writeFileSync(lockPath, ''); // 空文件（真实窗口的可观察形态）
+    expect(() =>
+      acquireLock({ locksDir: dir, lockName: 'corrupt-fresh', jobId: 'me' }),
+    ).toThrow(LockConflictError);
+    // 损坏文件原样保留（未被 rmSync 删除）
+    expect(existsSync(lockPath)).toBe(true);
+  });
+
+  it('#332: 陈旧的损坏锁仍可接管（mtime 超过 STALE_MS 视为失活遗留）', () => {
+    const lockPath = join(dir, 'corrupt-old.lock');
+    writeFileSync(lockPath, '{partial json');
+    // 把 mtime 回拨到 STALE_MS 之前，模拟崩溃遗留的半写文件
+    const old = new Date(Date.now() - STALE_MS - 5000);
+    utimesSync(lockPath, old, old);
+    const held = acquireLock({ locksDir: dir, lockName: 'corrupt-old', jobId: 'me' });
+    const content = JSON.parse(readFileSync(held.path, 'utf8')) as LockFileContent;
+    expect(content.jobId).toBe('me');
+    held.release();
   });
 });

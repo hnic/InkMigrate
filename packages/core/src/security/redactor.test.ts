@@ -110,4 +110,40 @@ describe('redactor (§19.2)', () => {
   it('H2: redacts multi-word token values containing whitespace', () => {
     expect(r('access_token: abc def ghi')).toBe('access_token: [REDACTED]');
   });
+
+  it('#358: JSON 引号键形态的凭据也脱敏（字符串化 JSON 是错误消息的常见形态）', () => {
+    expect(r('{"access_token": "abc"}')).not.toContain('abc');
+    expect(r('{"client_secret":"xyz"}')).not.toContain('xyz');
+    expect(r('{"cookie": "sid=1"}')).not.toContain('sid=1');
+    expect(r('{"authorization":"Bearer t0k"}')).not.toContain('t0k');
+  });
+
+  it('#359: 下划线前缀的凭据键脱敏（\\b 不覆盖 _ 前缀）', () => {
+    expect(r('db_password=hunter2')).toBe('db_password=[REDACTED]');
+    expect(r('smtp_passwd: pw')).toBe('smtp_passwd: [REDACTED]');
+    expect(r('oauth_client_secret=cs')).toBe('oauth_client_secret=[REDACTED]');
+    // 连字符前缀（原本可命中）不回归
+    expect(r('db-password=hunter2')).toBe('db-password=[REDACTED]');
+  });
+
+  it('#360: PEM 私钥/证书块整体脱敏（逐行键值正则看不到多行 base64 主体）', () => {
+    const pem = [
+      '-----BEGIN RSA PRIVATE KEY-----',
+      'MIIEpAIBAAKCAQEAabcd1234 multiline',
+      'secondbase64line',
+      '-----END RSA PRIVATE KEY-----',
+    ].join('\n');
+    const out = r(pem);
+    expect(out).not.toContain('MIIEpA');
+    expect(out).not.toContain('secondbase64line');
+    expect(out).toContain('[REDACTED_KEY]');
+  });
+
+  it('#361: CLI 空格分隔凭据脱敏（--token abc / --password hunter2）', () => {
+    expect(r('--token abc123')).not.toContain('abc123');
+    expect(r('--password hunter2')).not.toContain('hunter2');
+    expect(r('spawn --secret s3cret done')).not.toContain('s3cret');
+    // 等号形态由 SECRET_RE 覆盖，不回归
+    expect(r('--password=hunter2')).not.toContain('hunter2');
+  });
 });

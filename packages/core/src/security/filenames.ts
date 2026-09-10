@@ -20,8 +20,12 @@ const ENTITY_QUOT_RE = /&quot;/g;
  */
 const ILLEGAL = /[\\/:*?"<>|／＼：＜＞｜＂？＊]/g;
 
-/** §13.4 控制字符（C0 + DEL + C1）+ BOM。M-8: 补全 C1(0x80-0x9f) 和 BOM(U+FEFF)。 */
-const CONTROL = /[\x00-\x1f\x7f-\x9f\uFEFF]/g;
+/** §13.4 控制字符（C0 + DEL + C1）+ BOM。M-8: 补全 C1(0x80-0x9f) 和 BOM(U+FEFF)。
+ * 另含不可见/双向格式字符：ZWSP/ZWJ/ZWNJ（U+200B-200F，含 LRM/RLM）、行/段
+ * 分隔符 U+2028/9、双向覆盖 U+202A-202E（RLO 是隐藏真实扩展名的经典文件名
+ * 欺骗向量）、词连接符 U+2060-2064——与全角变体同属「终端/同步工具中易歧义」
+ * 类，一并删除。 */
+const CONTROL = /[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u2064\uFEFF]/g;
 
 export interface SanitizeOptions {
   /** 主体最大长度，默认 100。 */
@@ -53,10 +57,17 @@ export function sanitizeFilename(
   // 先截断（截断可能产生保留名，例如 'CONCEPT' → 'CON'），
   // 之后再删除结尾并检查保留名，避免截断后再次逃逸。
   // L1: 用 Array.from 按 code point 截断，避免 slice(0,max) 截断代理对（如 emoji）
-  // 产生孤立代理导致无效文件名。
-  if (s.length > max) {
-    s = Array.from(s).slice(0, max).join('').replace(/[\s.]+$/g, '');
+  // 产生孤立代理导致无效文件名。判长与截断必须同一单位：guard 若用 UTF-16
+  // code unit 计数（s.length），astral 密集输入（如 60 个 emoji = 120 units）会
+  // 进入截断分支却按 code point 保留全部字符，结果仍超长（最多 2×max units）。
+  const cps = Array.from(s);
+  if (cps.length > max) {
+    s = cps.slice(0, max).join('').replace(/[\s.]+$/g, '');
   }
+  // 保留名前缀在截断之后追加，结果可能超出 maxLength 1 个字符——这是被测试
+  // 固化的既有契约（'CONCEPT'+max3 → '_CON'）：SanitizeOptions 的 maxLength
+  // 语义是「主体最大长度」，前缀是 Windows 保留名防护的额外开销，不为它
+  // 牺牲主体信息量。
   if (RESERVED.test(s)) {
     s = '_' + s;
   }

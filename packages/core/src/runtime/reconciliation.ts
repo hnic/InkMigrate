@@ -66,8 +66,10 @@ export function reconcileJob(i: ReconcileInput): ReconciliationResult {
   // 统计路径，若失同步（itemStates 尚有悬挂条目而 recoverableCount 报 0），下方
   // 等式检查只会给出误导性的失败原因，甚至放过带悬挂条目的完成。先给出可诊断的
   // 独立失败原因。
+  // 委托 domain 守卫判定可恢复态（守卫注释明确为此而设），消除
+  // `as readonly string[]` 强转与词表的又一份字面量复制。
   const recoverableInStates = i.itemStates.filter((s) =>
-    (ITEM_RECOVERABLE_STATES as readonly string[]).includes(s),
+    isItemRecoverableState(s),
   ).length;
   if (i.recoverableCount !== recoverableInStates) {
     return {
@@ -82,21 +84,34 @@ export function reconcileJob(i: ReconcileInput): ReconciliationResult {
     };
   }
 
+  // 未知条目状态（既非终态也非可恢复态，可能来自存储脏值——reconcileJob 是
+  // 公开导出、itemStates 可能未经校验）：若不单独报告，只会被下方等式静默
+  // 跳过，等式检查给出误导性的 scan_count≠sum，运维无法区分「存在未知态
+  // 条目」与「计数损坏」。fail-closed 语义不变，仅让失败原因可诊断——与
+  // 上方 recoverable 失同步预检对称。
+  const unknownStates = [
+    ...new Set(
+      i.itemStates.filter((s) => !isItemFinalState(s) && !isItemRecoverableState(s)),
+    ),
+  ];
+  if (unknownStates.length > 0) {
+    return {
+      ok: false,
+      reason: `unknown item states present: ${JSON.stringify(unknownStates)}`,
+    };
+  }
+
   const derived = deriveFinalStateCounts(i.itemStates);
   const derivedFailed = aggregateFailedCount(derived);
 
-  // §11.9 完整性方程按七个终态显式求和，与 domain/verifyCompletionEquation 同口径；
-  // 不借道 aggregateFailedCount——它与等式相符依赖「failed 聚合恰好包含
+  // §11.9 完整性方程按 domain 的等式词表（COMPLETION_EQUATION_TERMS，单一
+  // 真相源）归约求和，与 verifyCompletionEquation 严格同口径；不借道
+  // aggregateFailedCount——它与等式相符依赖「failed 聚合恰好包含
   // permanent_failed + unsupported + blocked」这一聚合口径，口径一变等式就会
-  // 无提示地断裂。derivedFailed 仅用于下方与缓存列 failed_count 的对比。
-  const sum =
-    derived.verified +
-    derived.degraded +
-    derived.permanent_failed +
-    derived.unsupported +
-    derived.blocked +
-    derived.conflict +
-    derived.skipped;
+  // 无提示地断裂。此前手写七项求和虽显式，但新增第 8 个终态时不会编译报错、
+  // 只会静默漏加一项（FinalStateCounts 的 Record 键反而会迫使调用方补齐），
+  // 改为词表归约后结构性免疫漂移。derivedFailed 仅用于下方与缓存列的对比。
+  const sum = COMPLETION_EQUATION_TERMS.reduce((acc, term) => acc + derived[term], 0);
   if (sum !== i.scanCount) {
     return {
       ok: false,

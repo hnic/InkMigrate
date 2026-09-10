@@ -7,6 +7,7 @@ import type {
 } from '../adapters/adapter.js';
 import type { SourceItem, SourceItemRef } from '../domain/models.js';
 import type { ItemFinalState, ItemRecoverableState, FinalStateCounts } from '../domain/states.js';
+import { isItemRecoverableState } from '../domain/states.js';
 import { MigrationJobs } from '../storage/repositories/migration-jobs.js';
 import { SourceItems } from '../storage/repositories/source-items.js';
 import { TargetArtifacts } from '../storage/repositories/target-artifacts.js';
@@ -559,9 +560,11 @@ export async function runMigrationJob(
     if (jobRow === undefined) {
       throw new Error(`Job ${i.jobId} 不存在（可能在运行期间被删除）`);
     }
-    // §11.9 recoverableCount 从 itemStates 统计（retryable_failed / interrupted 可恢复）
-    const recoverableCount = (itemStates as string[]).filter(
-      (s) => s === 'retryable_failed' || s === 'interrupted',
+    // §11.9 recoverableCount 从 itemStates 统计。委托 domain 守卫，与
+    // reconciliation 的 recoverable 失同步预检共用同一判定源（此前此处是
+    // 第三份硬编码字面量副本，词表调整时会静默失同步）。
+    const recoverableCount = itemStates.filter((s) =>
+      isItemRecoverableState(s),
     ).length;
 
     const reconciliation = reconcileJob({

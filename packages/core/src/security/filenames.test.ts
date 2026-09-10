@@ -91,4 +91,20 @@ describe('filenames (§13.4)', () => {
     expect(sanitizeFilename('Tom &amp; Jerry')).toBe('Tom &amp; Jerry');
     expect(sanitizeFilename('a&lt;b')).toBe('a&lt;b');
   });
+
+  it('#329: 判长与截断同用 code point 口径（astral 密集输入不再超长）', () => {
+    // 60 个 emoji = 120 UTF-16 code units：按 s.length 判长会进入截断分支，
+    // 但 code point 截断又全保留，结果仍 120 units 超过 maxLength。
+    const emojis = '😀'.repeat(60);
+    expect(emojis.length).toBe(120);
+    const out = sanitizeFilename(emojis, { maxLength: 50 });
+    expect(Array.from(out).length).toBeLessThanOrEqual(50);
+  });
+
+  it('#331: 不可见/双向格式字符被删除（RLO 文件名欺骗向量）', () => {
+    expect(sanitizeFilename('a\u200Bb')).toBe('ab'); // ZWSP
+    expect(sanitizeFilename('x\u202Etxt.exe')).toBe('xtxt.exe'); // RLO（双向覆盖）
+    expect(sanitizeFilename('a\u2028b\u2029c')).toBe('abc'); // 行/段分隔符
+    expect(sanitizeFilename('a\u2060b')).toBe('ab'); // 词连接符
+  });
 });

@@ -64,4 +64,19 @@ describe('logger (§20.1) - 脱敏包装', () => {
     a1.push(a2);
     expect(() => log.info({ a1 })).not.toThrow();
   });
+
+  it('#352: setBindings 被拦截且 fail-closed（getter 抛错时不抛出、不写入原值）', () => {
+    // pino 的 setBindings 会把参数并入 chindings 前置到后续每一行，方法级
+    // 拦截看不到——若未拦截，带抛错 getter 的 bindings 会让异常直接抛回调用方。
+    const log = createLogger({ level: 'silent' });
+    expect(typeof log.setBindings).toBe('function');
+    const evil = {
+      get apiKey(): string {
+        throw new Error('boom');
+      },
+    };
+    expect(() => log.setBindings(evil)).not.toThrow();
+    // 正常 bindings 调用也不抛（脱敏后委托给底层 setBindings）
+    expect(() => log.setBindings({ jobId: 'j1' })).not.toThrow();
+  });
 });
