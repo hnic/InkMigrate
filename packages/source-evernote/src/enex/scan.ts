@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createReadStream, readdirSync, lstatSync } from 'node:fs';
+import { open as openFile } from 'node:fs/promises';
 import type { Dirent, Stats } from 'node:fs';
 import { basename, extname, resolve } from 'node:path';
 
@@ -100,15 +101,12 @@ function walk(
     entries = readdirSync(root, { withFileTypes: true });
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    // 权限错误意味着目录内容未知（其中可能藏有 .notes），按 §15.2.1 显式失败，
-    // 不得静默跳过——skip 记录比抛错更容易被漏看
-    if (code === 'EACCES' || code === 'EPERM') {
-      throw new Error(
-        `无法读取目录 ${root}（${code}）：无法确认其中是否包含 .notes 导出文件，请修正目录权限后重试`,
-      );
-    }
-    skipped.push(`${root}/ (不可读: ${code ?? 'unknown'})`);
-    return;
+    // 目录内容未知（其中可能藏有 .notes），按 §15.2.1 显式失败，不得静默跳过
+    // ——skip 记录比抛错更容易被漏看。EACCES/EPERM 之外（EIO/EMFILE/ENFILE/
+    // EBUSY/TOCTOU 竞态下的 ENOENT 等）同样意味着内容未确认，一并显式失败
+    throw new Error(
+      `无法读取目录 ${root}（${code ?? 'unknown'}）：无法确认其中是否包含 .notes 导出文件，请检查目录权限/设备状态后重试`,
+    );
   }
   // 排序保证扫描顺序确定（同目录下按名字），重跑幂等
   entries.sort((a, b) => a.name.localeCompare(b.name, 'en'));
@@ -121,14 +119,18 @@ function walk(
     }
     if (e.isDirectory()) {
       if (isResourcesDir(e.name)) continue;
-      walk(full, enex, notes, html, skipped, includeHtml, e.name, dirStackByFile);
+      // §15.5 目录约定的 Stack 推断只在单层生效（<Stack>/<Notebook>.enex）：
+      // 更深层子目录（如 <Stack>/2023/Note.enex）不得覆盖已推断的 Stack
+      const nextStack = dirStack === undefined ? e.name : dirStack;
+      walk(full, enex, notes, html, skipped, includeHtml, nextStack, dirStackByFile);
       continue;
     }
     if (!e.isFile()) continue;
     switch (classifyExportFile(e.name, includeHtml)) {
       case 'enex':
         enex.push(full);
-        dirStackByFile.set(full, dirStack);
+        // 首写生效：重叠输入（目录 + 目录内文件直连）时后一种来源不覆盖
+        if (!dirStackByFile.has(full)) dirStackByFile.set(full, dirStack);
         break;
       case 'notes':
         notes.push(full);
@@ -142,14 +144,25 @@ function walk(
   }
 }
 
-async function sha256File(path: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const h = createHash('sha256');
-    const s = createReadStream(path);
-    s.on('data', (c) => h.update(c));
-    s.on('error', reject);
-    s.on('end', () => resolve(h.digest('hex')));
-  });
+/** 打开一次、fstat 校验并从同一 fd 哈希：lstat 与读取指向同一 inode，
+ * 消除「校验的是 A 文件、哈希的是 B 内容」的替换窗口（防路径逃逸/TOCTOU）。 */
+async function sha256File(path: string): Promise<{ sha256: string; stats: Stats }> {
+  const fh = await openFile(path, 'r');
+  try {
+    const st = await fh.stat();
+    if (!st.isFile()) throw new Error(`${path} 非普通文件`);
+    const sha256 = await new Promise<string>((resolvePromise, reject) => {
+      const h = createHash('sha256');
+      // 传入 fd：createReadStream 不再按路径重新解析打开（忽略 path 参数）
+      const s = createReadStream(path, { fd: fh.fd, autoClose: false });
+      s.on('data', (c) => h.update(c));
+      s.on('error', reject);
+      s.on('end', () => resolvePromise(h.digest('hex')));
+    });
+    return { sha256, stats: st };
+  } finally {
+    await fh.close();
+  }
 }
 
 /**
@@ -190,7 +203,8 @@ export async function collectEnexFiles(
       switch (classifyExportFile(p, includeHtml)) {
         case 'enex':
           enexPaths.push(p);
-          dirStackByFile.set(p, undefined); // 输入根直连文件：无目录 Stack
+          // 输入根直连文件：无目录 Stack（首写生效，见 walk 内同款守卫）
+          if (!dirStackByFile.has(p)) dirStackByFile.set(p, undefined);
           break;
         case 'notes':
           notesPaths.push(p);
@@ -210,7 +224,9 @@ export async function collectEnexFiles(
     throw new EvernoteNotesRejectedError(notesPaths);
   }
 
-  enexPaths.sort((a, b) => a.localeCompare(b, 'en'));
+  // 去重：inputPaths 重复或重叠（如目录 + 目录内文件）会把同一文件收集两次，
+  // 导致重复清单条目、双重哈希与 dirStack 归属歧义
+  const uniqueEnexPaths = [...new Set(enexPaths)].sort((a, b) => a.localeCompare(b, 'en'));
   interface Draft {
     path: string;
     baseName: string;
@@ -222,7 +238,7 @@ export async function collectEnexFiles(
   }
   const drafts: Draft[] = [];
   const matchedMappingKeys = new Set<string>();
-  for (const p of enexPaths) {
+  for (const p of uniqueEnexPaths) {
     let st: Stats;
     try {
       // lstat：walk 后文件被删除或被替换为符号链接时不跟随（防路径逃逸/TOCTOU），
@@ -241,14 +257,23 @@ export async function collectEnexFiles(
     let { stack, notebook } = splitStackNotebook(baseName, stackSeparator);
     // evernote-backup Stack 目录约定：文件名无 Stack 分隔符时取父目录名
     if (stack === undefined) stack = dirStackByFile.get(p);
-    // §15.5 用户映射覆盖（键接受带/不带 .enex 后缀）
-    const mapping =
-      mappings[baseName] !== undefined ? mappings[baseName] : mappings[`${baseName}.enex`];
+    // §15.5 用户映射覆盖（键接受带/不带 .enex 后缀）。
+    // hasOwnProperty 检查：baseName 撞上 Object.prototype 成员（constructor/
+    // toString 等）时原型链取值会误判命中；不带后缀的键优先，两键并存时告警
+    const hasOwn = (k: string): boolean =>
+      Object.prototype.hasOwnProperty.call(mappings, k);
+    let mappingKey: string | undefined;
+    if (hasOwn(baseName)) mappingKey = baseName;
+    else if (hasOwn(`${baseName}.enex`)) mappingKey = `${baseName}.enex`;
+    const mapping = mappingKey !== undefined ? mappings[mappingKey] : undefined;
     let mergeKey: string | null = null;
-    if (mapping !== undefined) {
-      matchedMappingKeys.add(
-        mappings[baseName] !== undefined ? baseName : `${baseName}.enex`,
-      );
+    if (mapping !== undefined && mappingKey !== undefined) {
+      matchedMappingKeys.add(mappingKey);
+      if (hasOwn(baseName) && hasOwn(`${baseName}.enex`)) {
+        warnings.push(
+          `notebookMappings 同时定义了 "${baseName}" 与 "${baseName}.enex"，已采用 "${mappingKey}"`,
+        );
+      }
       if (mapping.stack !== undefined) stack = mapping.stack ?? undefined;
       if (mapping.notebook !== undefined) notebook = mapping.notebook;
       mergeKey = mapping.mergeKey;
@@ -303,7 +328,14 @@ export async function collectEnexFiles(
     await Promise.all(
       drafts.slice(i, i + HASH_CONCURRENCY).map(async (d) => {
         try {
-          shas.set(d.path, await sha256File(d.path));
+          const { sha256, stats } = await sha256File(d.path);
+          // fd 的 fstat 与此前 lstat 不一致 = lstat 后文件被替换（TOCTOU）：
+          // 记录的 sizeBytes/mtimeMs 与哈希内容可能错账，按不可访问隔离
+          if (stats.size !== d.sizeBytes || stats.mtimeMs !== d.mtimeMs) {
+            skipped.push(`${d.path} (扫描后被替换：size/mtime 已变化)`);
+            return;
+          }
+          shas.set(d.path, sha256);
         } catch (err) {
           skipped.push(`${d.path} (读取失败: ${(err as Error).message})`);
         }
@@ -330,7 +362,8 @@ export async function collectEnexFiles(
   }
   return {
     files,
-    htmlFiles: htmlPaths.sort((a, b) => a.localeCompare(b, 'en')),
+    // 去重（同 enexPaths）：重叠输入会把同一 .html 收集两次
+    htmlFiles: [...new Set(htmlPaths)].sort((a, b) => a.localeCompare(b, 'en')),
     skipped,
     warnings,
   };

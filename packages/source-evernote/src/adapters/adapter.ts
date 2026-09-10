@@ -26,7 +26,7 @@ import {
 } from '../enex/scan.js';
 import { enexTimeToIso, streamNotes, type RawNote } from '../enex/sax-notes.js';
 import { buildNoteIdentity } from '../enex/identity.js';
-import { processResources, type ProcessedResource } from '../resources/process-resources.js';
+import { processResources } from '../resources/process-resources.js';
 import { enmlToHtml } from '../enml/enml-to-html.js';
 import { extractHtmlNote, scanHtmlNote } from '../html/html-export.js';
 import { createHash } from 'node:crypto';
@@ -149,17 +149,30 @@ async function sha256FileQuick(path: string): Promise<string> {
 
 /**
  * §15.6 远程图片下载（ENEX 与 HTML 导出共用同一管线）：各请求相互独立，
- * 并行执行以免逐张串行累加网络延迟；失败按张计数，由调用方记降级。
+ * 失败按张计数，由调用方记降级。并发以固定批次上限约束（与 scan 的
+ * HASH_CONCURRENCY 同模式）：网页剪藏单条笔记可引用数十上百张远程图，
+ * 无上限的 Promise.all 会同时打开全部 socket 并各自缓冲至 maxImageBytes。
+ * maxRetries: 1 = 不重试（迁移批量场景失败快速跳过、按张降级保留远程链接，
+ * 避免逐张退避重试拖长整体迁移时间）。
  */
+const DOWNLOAD_CONCURRENCY = 8;
+
 async function downloadRemoteImages(
   remotes: readonly { url: string }[],
   cfg: EvernoteSourceConfig,
 ): Promise<{ assets: SourceAsset[]; okCount: number; failCount: number }> {
-  const results = await Promise.all(
-    remotes.map((remote) =>
-      downloadImage({ url: remote.url, maxBytes: cfg.assets.maxImageBytes, maxRetries: 1 }),
-    ),
-  );
+  const results: Array<Awaited<ReturnType<typeof downloadImage>>> = [];
+  for (let i = 0; i < remotes.length; i += DOWNLOAD_CONCURRENCY) {
+    results.push(
+      ...(await Promise.all(
+        remotes
+          .slice(i, i + DOWNLOAD_CONCURRENCY)
+          .map((remote) =>
+            downloadImage({ url: remote.url, maxBytes: cfg.assets.maxImageBytes, maxRetries: 1 }),
+          ),
+      )),
+    );
+  }
   const assets: SourceAsset[] = [];
   let okCount = 0;
   let failCount = 0;
@@ -181,6 +194,41 @@ async function downloadRemoteImages(
     });
   }
   return { assets, okCount, failCount };
+}
+
+/**
+ * §15.6 远程图片落地（ENEX extract 与 extractHtmlAsItem 共用）：
+ * 下载结果并入 assets，失败按张降级 + 对账告警。两路共用同一辅助，
+ * 避免 okCount/failCount 计数、降级码与告警文案漂移。
+ */
+async function attachRemoteImages(
+  remotes: ReadonlyArray<{ url: string }>,
+  cfg: EvernoteSourceConfig,
+  assets: SourceAsset[],
+  degradations: NonNullable<SourceItem['degradations']>,
+  warnings: string[],
+): Promise<void> {
+  if (cfg.assets.downloadImages && remotes.length > 0) {
+    const { assets: downloaded, okCount, failCount } = await downloadRemoteImages(remotes, cfg);
+    assets.push(...downloaded);
+    if (failCount > 0) {
+      degradations.push({
+        code: 'asset-incomplete',
+        stage: 'assets',
+        message: `${failCount} 张远程图片下载失败，已保留远程链接`,
+      });
+    }
+    warnings.push(`远程图片：引用 ${remotes.length}，落地 ${okCount}，失败 ${failCount}`);
+  } else if (remotes.length > 0) {
+    warnings.push(
+      `远程图片：引用 ${remotes.length}，未下载（assets.downloadImages=false，保留远程链接）`,
+    );
+  }
+}
+
+/** 正文纯文本启发式（搜索索引用；ENEX 与 HTML 两路共用同一实现防漂移）。 */
+function deriveBodyText(html: string): string {
+  return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 type EvernoteAdapter = SourceAdapter & { __scanState?: ScanState };
@@ -218,8 +266,11 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
     if (guidMapReady === undefined) {
       guidMapReady = (async () => {
         const inputRoots = resolveInputPaths(cfg.inputPaths, workspaceDir);
+        // 与 scan/prepare 同参（含 notebookMappings）：保证重建的文件清单与
+        // 扫描时一致，映射相关校验/警告行为不因 resume 路径而分叉
         const { files } = await collectEnexFiles(inputRoots, cfg.stackSeparator, {
           includeHtml: cfg.formats.includes('html'),
+          notebookMappings: cfg.notebookMappings,
         });
         for (const file of files) {
           await streamNotes(file.path, {
@@ -382,9 +433,6 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
     async extract(ref, ctx): Promise<SourceItem> {
       const meta = refMetaOf(ref);
 
-      // §15.10：跨进程 resume（新适配器实例）首次 extract 时懒重建 GUID 映射
-      await ensureGuidMap(ctx.workspaceDir);
-
       // §15.3 完整性：扫描与提取之间文件被修改即失败（指纹输入含文件哈希，静默继续会错账）。
       // 大文件（GB 级）逐条全文件 SHA 不可行：size+mtime 未变走快速路径，变化再算 SHA 终判。
       const filePath = meta.enex?.path ?? meta.html?.path;
@@ -402,11 +450,20 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
             integrityOk = true;
           }
         } catch {
-          // stat 失败走 SHA 路径给出准确错误
+          // stat 失败（文件被删/不可读）走 SHA 路径给出准确错误
         }
       }
       if (!integrityOk) {
-        const currentSha = await sha256FileQuick(filePath);
+        let currentSha: string;
+        try {
+          currentSha = await sha256FileQuick(filePath);
+        } catch (err) {
+          // 文件在扫描后被删除/不可读：同样给出「重新扫描」的可操作指引，
+          // 而非裸 ENOENT/EACCES（哈希比对分支只覆盖「可读但内容已变」）
+          throw new Error(
+            `导出文件在扫描后不可读取：${filePath}（${(err as Error).message}），请重新扫描`,
+          );
+        }
         if (currentSha !== expectedSha) {
           throw new Error(
             `导出文件在扫描后被修改：${filePath}（期望 ${expectedSha.slice(0, 8)}，实际 ${currentSha.slice(0, 8)}），请重新扫描`,
@@ -414,10 +471,12 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
         }
       }
 
-      // §15.12 HTML 导出分派
+      // §15.12 HTML 导出分派（HTML 路径不使用 GUID 映射，无需懒重建）
       if (meta.html !== undefined) {
         return extractHtmlAsItem(ref, meta.html, cfg);
       }
+      // §15.10：跨进程 resume（新适配器实例）首次 ENEX extract 时懒重建 GUID 映射
+      await ensureGuidMap(ctx.workspaceDir);
       const enexMeta = meta.enex;
       if (enexMeta === undefined) {
         throw new Error(
@@ -438,7 +497,9 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
           if (n.ordinal === enexMeta.ordinal) raw = n;
         },
       });
-      if (outcome.cursor !== undefined && outcome.cursor.ordinal >= useCursor.ordinal) {
+      // 仅单调推进：回退重读（重试/乱序，useCursor.ordinal 为 0）得到的小游标
+      // 不得覆盖已推进的边界，否则下一次顺序提取会几乎重读整个文件
+      if (outcome.cursor !== undefined && outcome.cursor.ordinal > prevCursor.ordinal) {
         cursors.set(enexMeta.path, outcome.cursor);
       }
       if (raw === undefined) {
@@ -478,25 +539,7 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
       const assets = processed.resources.map((r) => r.asset);
       const degradations: SourceItem['degradations'] = [];
       const warnings: string[] = [];
-      if (cfg.assets.downloadImages && transform.remoteImages.length > 0) {
-        const { assets: downloaded, okCount, failCount } = await downloadRemoteImages(
-          transform.remoteImages,
-          cfg,
-        );
-        assets.push(...downloaded);
-        if (failCount > 0) {
-          degradations.push({
-            code: 'asset-incomplete',
-            stage: 'assets',
-            message: `${failCount} 张远程图片下载失败，已保留远程链接`,
-          });
-        }
-        warnings.push(`远程图片：引用 ${transform.remoteImages.length}，落地 ${okCount}，失败 ${failCount}`);
-      } else if (transform.remoteImages.length > 0) {
-        warnings.push(
-          `远程图片：引用 ${transform.remoteImages.length}，未下载（assets.downloadImages=false，保留远程链接）`,
-        );
-      }
+      await attachRemoteImages(transform.remoteImages, cfg, assets, degradations, warnings);
 
       // §15.13 对账计数（进入 extractionWarnings，报告层可聚合）
       if (processed.failures.length > 0) {
@@ -589,10 +632,8 @@ export function createEvernoteSource(input: EvernoteSourceConfigInput): Evernote
         ...(attrs.author !== undefined ? { author: attrs.author } : {}),
         ...(createdIso !== undefined ? { createdAt: createdIso } : {}),
         ...(effectiveUpdatedAt !== undefined ? { updatedAt: effectiveUpdatedAt } : {}),
-        bodyHtml: transform.html,
-        ...(transform.html.length > 0
-          ? { bodyText: transform.html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() }
-          : {}),
+      bodyHtml: transform.html,
+      ...(transform.html.length > 0 ? { bodyText: deriveBodyText(transform.html) } : {}),
         tags: note.tags,
         collections: [enexMeta.notebook],
         assets,
@@ -630,25 +671,7 @@ async function extractHtmlAsItem(
   const assets = [...result.assets];
 
   // §15.6 远程图片下载（与 ENEX 路径同一管线；默认关闭不发起网络请求）
-  if (cfg.assets.downloadImages && result.remoteImages.length > 0) {
-    const { assets: downloaded, okCount, failCount } = await downloadRemoteImages(
-      result.remoteImages,
-      cfg,
-    );
-    assets.push(...downloaded);
-    if (failCount > 0) {
-      degradations.push({
-        code: 'asset-incomplete',
-        stage: 'assets',
-        message: `${failCount} 张远程图片下载失败，已保留远程链接`,
-      });
-    }
-    warnings.push(`远程图片：引用 ${result.remoteImages.length}，落地 ${okCount}，失败 ${failCount}`);
-  } else if (result.remoteImages.length > 0) {
-    warnings.push(
-      `远程图片：引用 ${result.remoteImages.length}，未下载（assets.downloadImages=false，保留远程链接）`,
-    );
-  }
+  await attachRemoteImages(result.remoteImages, cfg, assets, degradations, warnings);
 
   // §15.13 对账计数
   if (result.missingResources > 0) {
@@ -669,9 +692,7 @@ async function extractHtmlAsItem(
     ref,
     title: ref.title ?? '未命名笔记',
     bodyHtml: result.bodyHtml,
-    ...(result.bodyHtml.length > 0
-      ? { bodyText: result.bodyHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() }
-      : {}),
+    ...(result.bodyHtml.length > 0 ? { bodyText: deriveBodyText(result.bodyHtml) } : {}),
     tags: [],
     collections: [meta.notebook],
     assets,
@@ -687,5 +708,3 @@ async function extractHtmlAsItem(
     },
   };
 }
-
-export type { EnexFileInfo, ProcessedResource };

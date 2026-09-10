@@ -32,6 +32,16 @@ function wrapped(b64Text) {
   return b64Text.replace(/(.{76})/g, '$1\n');
 }
 
+/** XML 文本节点/属性值转义：fixture 值未来混入 &/</> 时在生成期即产出合法 XML，
+ * 而不是静默产出损坏文件、让无关的解析器测试离奇失败
+ * （malformed.enex 是唯一有意损坏的 fixture，enex.test.ts 依赖这一隔离）。 */
+const escXmlText = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+/** CDATA 内容不允许出现 "]]>"，出现即生成失败（防静默产出损坏 XML）。 */
+const assertNoCdataTerm = (s) => {
+  if (String(s).includes(']]>')) throw new Error('fixture content contains "]]>" which breaks CDATA');
+  return s;
+};
+
 function enex(notes) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE en-export SYSTEM "http://xml.evernote.com/pub/evernote-export3.dtd">
@@ -43,26 +53,26 @@ ${notes.join('\n')}
 
 function resource({ bytes, mime, fileName, attachment }) {
   const attrs = [];
-  if (fileName !== undefined) attrs.push(`      <file-name>${fileName}</file-name>`);
+  if (fileName !== undefined) attrs.push(`      <file-name>${escXmlText(fileName)}</file-name>`);
   if (attachment !== undefined) attrs.push(`      <attachment>${attachment}</attachment>`);
   const attrBlock =
     attrs.length > 0 ? `\n    <resource-attributes>\n${attrs.join('\n')}\n    </resource-attributes>` : '';
   return `  <resource>
     <data encoding="base64">${wrapped(b64(bytes))}</data>
-    <mime>${mime}</mime>${attrBlock}
+    <mime>${escXmlText(mime)}</mime>${attrBlock}
   </resource>`;
 }
 
 function note({ title, content, created, updated, tags = [], attrs = {}, resources = [], guid }) {
-  const parts = [`    <title>${title}</title>`];
-  parts.push(`    <content><![CDATA[${content}]]></content>`);
+  const parts = [`    <title>${escXmlText(title)}</title>`];
+  parts.push(`    <content><![CDATA[${assertNoCdataTerm(content)}]]></content>`);
   if (created) parts.push(`    <created>${created}</created>`);
   if (updated) parts.push(`    <updated>${updated}</updated>`);
-  for (const t of tags) parts.push(`    <tag>${t}</tag>`);
+  for (const t of tags) parts.push(`    <tag>${escXmlText(t)}</tag>`);
   const attrEntries = Object.entries(attrs);
   if (attrEntries.length > 0) {
     parts.push('    <note-attributes>');
-    for (const [k, v] of attrEntries) parts.push(`      <${k}>${v}</${k}>`);
+    for (const [k, v] of attrEntries) parts.push(`      <${k}>${escXmlText(v)}</${k}>`);
     parts.push('    </note-attributes>');
   }
   parts.push(...resources);
@@ -229,6 +239,8 @@ mkdirSync(join(HTML_DIR, '会议记录.resources'), { recursive: true });
 writeFileSync(join(HTML_DIR, '会议记录.resources', '白板照片.png'), PNG_RED);
 writeFileSync(join(HTML_DIR, '会议记录.resources', '议程.pdf'), PDF_MIN);
 
+// 注意：下方 HTML 中的 <script> 与 onclick 是【故意的 XSS 测试向量】，
+// 由 html-export.test.ts 的净化断言消费（输出不得包含 <script / onclick），请勿删除。
 writeFileSync(
   join(HTML_DIR, '会议记录.html'),
   `<!DOCTYPE html>
@@ -258,8 +270,8 @@ writeFileSync(
 `,
 );
 
-// 根目录层级笔记：笔记本回退为导出根目录名；含缺失资源引用（对账降级）
-mkdirSync(join(OUT, 'html-export'), { recursive: true });
+// 根目录层级笔记：笔记本回退为导出根目录名；含缺失资源引用（对账降级）。
+// 注：html-export 目录已由上文 HTML_DIR 的 recursive mkdir 创建，无需重复创建
 writeFileSync(
   join(OUT, 'html-export', '剪藏.html'),
   `<!DOCTYPE html>

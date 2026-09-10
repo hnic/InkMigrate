@@ -219,14 +219,30 @@ describe('buildNoteIdentity（§15.4）', () => {
   });
 
   it('App Link 优先作为 externalId', () => {
+    const link = 'evernote:///view/1/s1/11111111-2222-3333-4444-555555555555/11111111-2222-3333-4444-555555555555/';
     const a = buildNoteIdentity({
       fileSha256: 'a'.repeat(64),
       ordinal: 1,
       title: 'T',
-      appLink: 'evernote:///view/1/s1/g/g/',
+      appLink: link,
       fileBaseName: 'nb',
     });
-    expect(a.externalId).toBe('evernote-link:evernote:///view/1/s1/g/g/');
+    expect(a.externalId).toBe(`evernote-link:${link}`);
+  });
+
+  it('非 per-note 稳定的 evernote:// 值不冒充第 2 级身份（回退 file#ordinal）', () => {
+    // source-url 用户可编辑且复制笔记时原样拷贝：裸链接/action 短链/无 GUID 段
+    // 的链接多条笔记可能同值，折叠成同一 externalId——必须降级到第 3 级
+    for (const bad of ['evernote://', 'evernote://whatever', 'evernote:///view/foo'] as const) {
+      const r = buildNoteIdentity({
+        fileSha256: 'a'.repeat(64),
+        ordinal: 1,
+        title: 'T',
+        appLink: bad,
+        fileBaseName: 'nb',
+      });
+      expect(r.externalId).toBe('enex:nb#1');
+    }
   });
 });
 

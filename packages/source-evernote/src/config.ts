@@ -3,13 +3,14 @@ import { z } from 'zod';
 /**
  * §15.1/§15.2 Evernote 来源配置。
  *
- * `formats` 当前仅接受 `enex`：HTML 导出解析尚未实现，显式报错而非静默忽略，
- * 避免用户以为 HTML 目录会被处理（§15.12 为后续增量）。
+ * `formats` 接受 `enex` 与 `html`（§15.12）：ENEX 按文件递归收集、HTML 导出
+ * 按目录扫描，每条 .html 生成一个笔记。
  */
 export const EvernoteSourceConfigSchema = z
   .object({
     sourceInstanceId: z.string().min(1),
-    /** 相对路径相对 workspaceDir 解析；支持文件或目录（目录递归收集 .enex）。 */
+    /** 相对路径相对 workspaceDir 解析（绝对路径原样使用，不限定在 workspace 内，
+     * 符号链接一律跳过防逃逸）；支持文件或目录（目录递归收集 .enex）。 */
     inputPaths: z.array(z.string().min(1)).min(1),
     formats: z
       .array(z.enum(['enex', 'html']))
@@ -23,17 +24,34 @@ export const EvernoteSourceConfigSchema = z
      * §15.5 用户映射清单覆盖：键为 ENEX 文件名（带或不带 .enex 后缀），
      * 值覆盖文件名推断出的 stack/notebook；mergeKey 非空的多个文件合并进
      * 同一笔记本目录（同组笔记本名必须一致，采集时校验）。
+     * 同一文件的带/不带后缀两键并存（如 Notebook 与 Notebook.enex）时快速
+     * 失败——扫描期「不带后缀键优先」的静默遮蔽会产生误导性未命中告警。
      */
     notebookMappings: z
       .record(
         z.string().min(1),
-        z.object({
-          /** 覆盖 Stack；null 表示清除文件名推断出的 Stack（merge 场景）。 */
-          stack: z.string().min(1).nullable().optional(),
-          notebook: z.string().min(1).optional(),
-          mergeKey: z.string().min(1).nullable().default(null),
-        }),
+        z
+          .object({
+            /** 覆盖 Stack；null 表示清除文件名推断出的 Stack（merge 场景）。 */
+            stack: z.string().min(1).nullable().optional(),
+            notebook: z.string().min(1).optional(),
+            mergeKey: z.string().min(1).nullable().default(null),
+          })
+          .strict(),
       )
+      .superRefine((mappings, ctx) => {
+        const seen = new Set<string>();
+        for (const key of Object.keys(mappings)) {
+          const normalized = key.replace(/\.enex$/, '');
+          if (seen.has(normalized)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: `notebookMappings 存在指向同一文件的重复键："${key}"（带/不带 .enex 后缀的键不得并存）`,
+            });
+          }
+          seen.add(normalized);
+        }
+      })
       .default({}),
     /** §15.8 地理位置显式启用（默认关闭：位置信息敏感性高）。 */
     includeGeolocation: z.boolean().default(false),
@@ -51,6 +69,9 @@ export const EvernoteSourceConfigSchema = z
         /** §15.7.3 单资源上限，默认 DTD 规定的 25 MB。 */
         maxResourceBytes: z.number().int().positive().default(25 * 1024 * 1024),
       })
+      // 嵌套对象同样 strict（与外层一致）：downloadImage 之类键名笔误若被静默
+      // 剥离，用户以为启用了下载而实际没有
+      .strict()
       .default({}),
   })
   .strict();

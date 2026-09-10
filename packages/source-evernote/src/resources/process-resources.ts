@@ -14,6 +14,9 @@ import type { RawResource } from '../enex/sax-notes.js';
 
 export const enexResourceUri = (md5Hex: string): string => `enex-resource://${md5Hex}`;
 
+/** §15.7.4 资源文件名清理的最大长度（ENEX 与 HTML 导出两条资源管线共用同一上限）。 */
+export const MAX_RESOURCE_FILENAME_LENGTH = 120;
+
 /** Magic Bytes 判型（§15.7.3，与 §12.10 同源规则）。 */
 export function sniffMime(bytes: Uint8Array): string | null {
   const startsWith = (prefix: number[], offset = 0) =>
@@ -66,7 +69,7 @@ const EXT_BY_MIME: Record<string, string> = {
   'application/zip': 'zip',
 };
 
-/** 常见 MIME 别名 → 规范形式（仅用于一致性比对，不改写 actualMime/文件名）。 */
+/** 常见 MIME 别名 → 规范形式（用于一致性比对与嗅探失败时的回退归一）。 */
 const MIME_ALIASES: Record<string, string> = {
   'image/jpg': 'image/jpeg',
   'image/pjpeg': 'image/jpeg',
@@ -130,23 +133,22 @@ export function processResources(
 ): ProcessResourcesResult {
   const resources: ProcessedResource[] = [];
   const failures: ResourceFailure[] = [];
-  const seenSha = new Set<string>();
+  const firstBySha = new Map<string, ProcessedResource>();
   const seenNames = new Set<string>();
   let duplicates = 0;
   let mimeMismatches = 0;
 
   raws.forEach((raw, index) => {
-    // 预估解码后大小（含填充修正），超限直接拒绝——否则超大 <data> 会先把
-    // base64 字符串与解码 Buffer 全量物化进内存，限制起不到约束峰值内存的作用
-    const compact = raw.dataBase64.replace(/\s+/g, '');
-    let padding = 0;
-    if (compact.endsWith('==')) padding = 2;
-    else if (compact.endsWith('=')) padding = 1;
-    const estBytes = Math.floor(compact.length / 4) * 3 - padding;
-    if (estBytes > opts.maxResourceBytes) {
+    // 预估解码后大小，超限直接拒绝——否则超大 <data> 会先把 base64 字符串与
+    // 解码 Buffer 全量物化进内存，限制起不到约束峰值内存的作用。
+    // 用无拷贝上界（解码字节 ≤ 原文长度的 3/4，数学性质而非实现细节）：
+    // 折行空白使原文略长于紧凑形态，仅在「上界超限而紧凑值未超限」的贴边
+    // 场景判得略严（真实折行仅增 ~1.3%），换取不在门控处全量拷贝多 MB 字符串
+    const upperBoundBytes = Math.floor(raw.dataBase64.length / 4) * 3;
+    if (upperBoundBytes > opts.maxResourceBytes) {
       failures.push({
         index,
-        reason: `resource ~${estBytes}B exceeds maxResourceBytes ${opts.maxResourceBytes}B`,
+        reason: `resource ~${upperBoundBytes}B exceeds maxResourceBytes ${opts.maxResourceBytes}B`,
       });
       return;
     }
@@ -170,19 +172,23 @@ export function processResources(
 
     const sha256Hex = createHash('sha256').update(bytes).digest('hex');
     const md5Hex = createHash('md5').update(bytes).digest('hex');
-    if (seenSha.has(sha256Hex)) {
+    const existing = firstBySha.get(sha256Hex);
+    if (existing !== undefined) {
       duplicates += 1;
-      // §15.7.6：同笔记内去重，引用走同一 enex-resource URI；
-      // 保留首个副本的元数据（attachment/fileName 等），后续副本的差异被丢弃
+      // §15.7.6：同笔记内去重，引用走同一 enex-resource URI，保留首个副本的
+      // fileName 等元数据；后续副本声明为附件时合并意图（attachment 驱动
+      // inline/附件渲染，静默丢弃会让内联引用渲染错位）
+      if (raw.attachment === 'true' && !existing.attachment) existing.attachment = true;
       return;
     }
-    seenSha.add(sha256Hex);
 
     const declaredMime = raw.mime.trim().toLowerCase() || 'application/octet-stream';
     const sniffed = sniffMime(bytes);
-    const actualMime = sniffed ?? declaredMime;
-    // 比对前归一常见别名（image/jpg 声明 + image/jpeg 嗅探不算不一致）
+    // 归一常见别名（image/jpg → image/jpeg）：既用于一致性比对（image/jpg 声明 +
+    // image/jpeg 嗅探不算不一致），也用于嗅探失败时的回退——否则别名声明会得到
+    // 非 canonical 的 mimeType 与 .bin 扩展名（EXT_BY_MIME 只认规范形式）
     const normalizedDeclared = MIME_ALIASES[declaredMime] ?? declaredMime;
+    const actualMime = sniffed ?? normalizedDeclared;
     const mimeMismatch = sniffed !== null && sniffed !== normalizedDeclared;
     if (mimeMismatch) mimeMismatches += 1;
     const kind = assetKindOf(actualMime);
@@ -192,7 +198,7 @@ export function processResources(
     let fileName: string;
     const cleanedOriginal =
       raw.fileName !== undefined && raw.fileName.trim().length > 0
-        ? sanitizeFilename(raw.fileName, { maxLength: 120 })
+        ? sanitizeFilename(raw.fileName, { maxLength: MAX_RESOURCE_FILENAME_LENGTH })
         : '';
     if (cleanedOriginal.length > 0) {
       fileName = cleanedOriginal;
@@ -237,6 +243,7 @@ export function processResources(
         data: new Uint8Array(bytes),
       },
     });
+    firstBySha.set(sha256Hex, resources[resources.length - 1]!);
   });
 
   return { resources, failures, duplicates, mimeMismatches };

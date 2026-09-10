@@ -111,11 +111,13 @@ export function enmlToHtml(
   const stripped = input.replace(/^<!DOCTYPE[^>]*>\s*/i, '');
   // ENML 是 XHTML：自闭合标签（<en-media/> 等）在 text/html 解析中不闭合，
   // 会把后续兄弟节点吞成子节点——替换 en-media 时连带丢失正文。显式闭合化。
+  // 属性段用引号感知匹配：alt="a > b" 这类合法 ENML 属性值里的 > 不能终止
+  // 标签，否则该标签永远闭合化失败、后续兄弟被吞（正是本步骤要防的丢失）
   const balanced = stripped.replace(
-    /<(en-media|en-todo|en-crypt)\b([^>]*?)\/>/gi,
+    /<(en-media|en-todo|en-crypt)\b((?:"[^"]*"|'[^']*'|[^>])*?)\/>/gi,
     (_m, tag: string, attrs: string) => `<${tag}${attrs}></${tag}>`,
   );
-  const clean = DOMPurify.sanitize(balanced, SANITIZE_CONFIG);
+  const clean = sanitizeNoteHtml(balanced);
 
   const parser = new dom.window.DOMParser();
   const doc = parser.parseFromString(clean, 'text/html');
@@ -172,6 +174,7 @@ export function enmlToHtml(
 
   // 4. en-todo → checkbox（div/p/span 包裹转 li + ul，turndown GFM 任务列表可转换）
   const convertedParents: Element[] = [];
+  const seenParents = new Set<Element>();
   for (const todoEl of [...body.querySelectorAll('en-todo')]) {
     result.todoCount += 1;
     const input = doc.createElement('input');
@@ -185,6 +188,10 @@ export function enmlToHtml(
     }
   }
   for (const el of convertedParents) {
+    // 同一容器内多个 en-todo 会让父元素重复入列；首个处理完已 detach，
+    // 跳过重复/已脱离文档的元素（避免空 li 死写与 children 误合并）
+    if (el.parentElement === null || seenParents.has(el)) continue;
+    seenParents.add(el);
     const li = doc.createElement('li');
     while (el.firstChild !== null) li.appendChild(el.firstChild);
     el.replaceWith(li);
@@ -211,7 +218,9 @@ export function enmlToHtml(
     const href = a.getAttribute('href');
     if (href === null) continue;
     const text = (a.textContent ?? '').trim();
-    if (href.startsWith('evernote://')) {
+    // 与清洗层（ALLOWED_URI_REGEXP 的 /i scheme 匹配）一致地大小写不敏感：
+    // EVERNOTE:///view/... 能通过清洗，若此处仅匹配小写会既不解析也不记录
+    if (/^evernote:\/\//i.test(href)) {
       // §15.10 两遍处理第二遍：GUID 可解析 → evernote-wikilink:// 伪链接
       // （目标端后处理为 Obsidian wikilink）；否则保留原链接并记录
       const guid = guidFromEvernoteLink(href);

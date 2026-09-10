@@ -106,7 +106,8 @@ describe('evernote e2e migrate', () => {
     return { result, db };
   }
 
-  it('完整迁移：笔记/图片/附件区落盘且对账通过', async () => {
+  // e2e 全链路真实耗时 >20s：显式放宽 timeout（全局默认已收紧到 10s）
+  it('完整迁移：笔记/图片/附件区落盘且对账通过', { timeout: 60_000 }, async () => {
     const w = setupWorkspace();
     try {
       const { result } = await setupAndRun(w.dbDir, w.vaultDir, w.inputDir, 1);
@@ -218,7 +219,7 @@ describe('evernote e2e migrate', () => {
     }
   });
 
-  it('HTML 导出迁移（§15.12）：笔记/图片/附件落盘且对账通过', async () => {
+  it('HTML 导出迁移（§15.12）：笔记/图片/附件落盘且对账通过', { timeout: 60_000 }, async () => {
     const root = mkdtempSync(join(tmpdir(), 'inkmigrate-evernote-e2e-html-'));
     const dbDir = join(root, 'state');
     const vaultDir = join(root, 'vault');
