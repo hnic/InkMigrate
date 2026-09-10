@@ -6,7 +6,11 @@ import {
   type SourceAdapter,
 } from '@inkmigrate/core';
 import { createToutiaoSource, profileExists, profilePath } from '@inkmigrate/source-toutiao';
-import { createEvernoteSource } from '@inkmigrate/source-evernote';
+import {
+  createEvernoteSource,
+  EvernoteSourceConfigSchema,
+  type EvernoteSourceConfig,
+} from '@inkmigrate/source-evernote';
 import { ObsidianTargetConfigSchema } from '@inkmigrate/target-obsidian';
 
 /**
@@ -30,18 +34,41 @@ export interface SourceWiring {
 export interface EvernoteSourceOptions {
   config: string;
   sourceId: string;
+  /**
+   * config 由调用方显式指定（CLI --config / engine params.configPath）时为 true：
+   * 文件不存在的 ENOENT 直接抛错而非按"无配置"回退——拼写错误的路径静默
+   * 降级到 toutiao 浏览器流程 + legacy 目标布局，正是 resume 中途换布局的
+   * 数据完整性风险。默认（走 inkmigrate.yaml 惯例路径）时保持回退。
+   */
+  explicitConfig?: boolean;
+}
+
+/** loadConfigFile 的显式性选项，见 {@link EvernoteSourceOptions.explicitConfig}。 */
+interface ExplicitConfigOpts {
+  explicit?: boolean;
 }
 
 /**
  * 读取配置文件；仅真正的 ENOENT 返回 undefined（调用方按"无配置"回退），
  * 其他读/解析失败带文件路径重新抛出，避免拼写错误的 --config 静默降级。
  */
-function loadConfigFile(configPath: string): InkMigrateConfig | undefined {
+function loadConfigFile(
+  configPath: string,
+  opts?: ExplicitConfigOpts,
+): InkMigrateConfig | undefined {
   let raw: string;
   try {
     raw = readFileSync(configPath, 'utf8');
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+      if (opts?.explicit) {
+        throw new Error(
+          `配置文件不存在：${configPath}（--config 显式指定，不静默回退）`,
+          { cause: e },
+        );
+      }
+      return undefined;
+    }
     throw new Error(`读取配置 ${configPath} 失败：${(e as Error).message}`, { cause: e });
   }
   try {
@@ -54,13 +81,16 @@ function loadConfigFile(configPath: string): InkMigrateConfig | undefined {
 /** 读取 yaml 中命中的 evernote 来源；未命中返回 undefined（调用方回退 toutiao）。 */
 export function resolveEvernoteSource(o: EvernoteSourceOptions): SourceWiring | undefined {
   const configPath = resolve(o.config);
-  const cfg = loadConfigFile(configPath);
+  const cfg = loadConfigFile(configPath, { explicit: o.explicitConfig });
   if (cfg === undefined) return undefined;
   const src = cfg.sources.find((s) => s.id === o.sourceId);
-  if (src === undefined || src.adapter !== 'evernote') return undefined;
+  // 仅真正未声明该 id 时回退 toutiao 浏览器流程；命中即校验 enabled
+  //（原 `adapter !== 'evernote'` 一并短路，enabled:false 的 toutiao 来源被静默放过）
+  if (src === undefined) return undefined;
   if (!src.enabled) {
     throw new Error(`来源 ${o.sourceId} 在配置中处于 enabled: false 状态，已跳过。`);
   }
+  if (src.adapter !== 'evernote') return undefined;
   const raw = src.config as Record<string, unknown>;
   const rawPaths: unknown[] = Array.isArray(raw.inputPaths) ? raw.inputPaths : [];
   const inputPaths = rawPaths.map((p) => {
@@ -74,12 +104,26 @@ export function resolveEvernoteSource(o: EvernoteSourceOptions): SourceWiring | 
   if (inputPaths.length === 0) {
     throw new Error(`来源 ${o.sourceId} 缺少 inputPaths（ENEX/HTML 导出目录）。`);
   }
+  // schema 填默认值后的完整生效配置：adapter 与 config_hash 用同一对象
+  //（§10.2——notebookShortId/stackSeparator/notebookMappings/assets 等行为键变更
+  // 可被审计/续跑识别，不再只哈希 {id, inputPaths} 漏掉布局类配置）
+  let effective: EvernoteSourceConfig;
+  try {
+    effective = EvernoteSourceConfigSchema.parse({
+      ...raw,
+      sourceInstanceId: src.id,
+      inputPaths,
+    });
+  } catch (e) {
+    throw new Error(
+      `配置 ${configPath} 中来源 ${o.sourceId} 的 config 无效：${(e as Error).message}`,
+      { cause: e },
+    );
+  }
   return {
-    adapter: createEvernoteSource({ ...raw, sourceInstanceId: src.id, inputPaths }),
+    adapter: createEvernoteSource(effective),
     kind: 'evernote',
-    // 与 adapter 实际生效的构造参数保持一致（§10.2 config_hash 输入）；
-    // 扫描类开关不参与实例指纹，跨机器/移动 stateDir 不影响哈希。
-    instanceConfig: { sourceInstanceId: src.id, inputPaths },
+    instanceConfig: effective as unknown as Record<string, unknown>,
   };
 }
 
@@ -117,6 +161,9 @@ export function buildToutiaoSource(o: ToutiaoSourceOptions): SourceWiring {
       sourceInstanceId: o.sourceId,
       profileDir,
       headless: false,
+      // favoritesUrl 决定扫描哪份合集（迁移的数据本身），必须参与 config_hash，
+      // 否则换 URL 续跑会复用旧实例指纹；maxScanItems 为测试性截断，不参与
+      ...(o.favoritesUrl !== undefined ? { favoritesUrl: o.favoritesUrl } : {}),
     },
   };
 }
@@ -146,9 +193,10 @@ export function resolveTargetConfig(
   config: string,
   targetId: string,
   vaultPath: string,
+  opts?: ExplicitConfigOpts,
 ): Record<string, unknown> {
   const configPath = resolve(config);
-  const cfg = loadConfigFile(configPath);
+  const cfg = loadConfigFile(configPath, opts);
   // 配置不存在或完全没有声明 targets → legacy 布局（老用户路径不变）；
   // 声明了 targets 却未命中 → 报错而非静默 legacy：错误布局会写错目录结构，
   // resume 场景下甚至会在项目中途切换布局（数据完整性风险）。

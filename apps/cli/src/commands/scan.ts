@@ -50,10 +50,12 @@ export function createScanCommand(): Command {
       favoritesUrl: string;
       maxItems?: string;
       config?: string;
-    }) => {
+    }, command: Command) => {
       // §10.2 yaml 命中 evernote 来源 → 文件源预览扫描（不启动浏览器）
       const evernote = resolveEvernoteSource({
         config: opts.config ?? CONFIG_FILENAME,
+        // 显式 --config 不存在时报错而非静默回退浏览器流程
+        explicitConfig: command.getOptionValueSource('config') === 'cli',
         sourceId: opts.source,
       });
       if (evernote !== undefined) {

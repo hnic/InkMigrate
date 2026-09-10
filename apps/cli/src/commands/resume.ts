@@ -46,7 +46,7 @@ export function createResumeCommand(): Command {
       favoritesUrl?: string;
       maxItems?: string;
       config?: string;
-    }) => {
+    }, command: Command) => {
       // --max-items 校验前置（与 migrate 一致）：parseInt 对非数字给出 NaN，
       // 会绕过 wiring 的 !== undefined 检查以 maxScanItems: NaN 直达驱动，
       // 数值比较恒假等于限额被静默关闭
@@ -123,6 +123,8 @@ export function createResumeCommand(): Command {
         // 否则 toutiao 浏览器 + Profile 校验）
         const wiring = resolveSourceWiring({
           config: opts.config ?? CONFIG_FILENAME,
+          // 显式 --config 不存在时报错而非静默回退（见 wiring loadConfigFile）
+          explicitConfig: command.getOptionValueSource('config') === 'cli',
           sourceId: sourceInstanceId,
           stateDir: opts.stateDir,
           ...(opts.favoritesUrl !== undefined ? { favoritesUrl: opts.favoritesUrl } : {}),
@@ -139,6 +141,7 @@ export function createResumeCommand(): Command {
             opts.config ?? CONFIG_FILENAME,
             targetInstanceId,
             opts.vaultPath,
+            { explicit: command.getOptionValueSource('config') === 'cli' },
           ),
         };
 

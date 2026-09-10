@@ -308,6 +308,8 @@ async function handleScanPreview(params: ScanPreviewParams | undefined): Promise
   const wiring = resolveEvernoteSource({
     config: params.configPath,
     sourceId: params.source,
+    // params.configPath 由 GUI 显式传入（schema 无默认值）：不存在即报错
+    explicitConfig: true,
   });
   if (wiring === undefined) {
     throw new Error(
@@ -567,6 +569,7 @@ async function runMigrateJob(
             config: params.configPath,
             sourceId: sourceInstanceId,
             stateDir: params.stateDir,
+            explicitConfig: true,
           })
         : undefined;
 
@@ -585,7 +588,9 @@ async function runMigrateJob(
     // 不在此双写默认值——双写一旦漂移会重新引入虚假 UPDATE）。
     const targetConfig: Record<string, unknown> =
       params.configPath !== undefined
-        ? resolveTargetConfig(params.configPath, targetInstanceId, params.vaultPath)
+        ? resolveTargetConfig(params.configPath, targetInstanceId, params.vaultPath, {
+            explicit: true,
+          })
         : legacyTargetConfig(params.vaultPath);
     // 构造 source adapter：wiring 命中（evernote/toutiao）用其适配器；
     // 无 configPath 时维持 toutiao 浏览器（adapterConfig 用已计算的 profileDir）。

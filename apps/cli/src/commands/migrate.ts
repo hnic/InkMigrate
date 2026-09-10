@@ -67,7 +67,7 @@ export function createMigrateCommand(): Command {
       favoritesUrl?: string;
       maxItems?: string;
       interval?: string;
-    }) => {
+    }, command: Command) => {
       const dbPath = join(opts.stateDir, DB_FILENAME);
       // N1: openDatabase 会自动 migrate（不存在则建库），两个分支等价，去掉冗余三元。
       const db: DB = openDatabase({ path: dbPath });
@@ -77,6 +77,9 @@ export function createMigrateCommand(): Command {
         const now = new Date().toISOString();
         // commander 选项已带默认值，这里归一一次供下方各处复用
         const configPath = opts.config ?? CONFIG_FILENAME;
+        // --config 是否由用户显式提供（区别于默认惯例路径）：显式提供而不存在时
+        // wiring 层报错而非静默回退 toutiao 浏览器流程 / legacy 目标布局
+        const explicitConfig = command.getOptionValueSource('config') === 'cli';
         // max-items 解析一次，fixture 与浏览器模式共用
         const maxItems = parseOptionalPositiveInt(opts.maxItems, 'max-items');
 
@@ -98,7 +101,7 @@ export function createMigrateCommand(): Command {
           };
         } else {
           const wiring =
-            resolveEvernoteSource({ config: configPath, sourceId: opts.source }) ??
+            resolveEvernoteSource({ config: configPath, sourceId: opts.source, explicitConfig }) ??
             buildToutiaoSource({
               sourceId: opts.source,
               stateDir: opts.stateDir,
@@ -122,7 +125,9 @@ export function createMigrateCommand(): Command {
           vaultPath: opts.vaultPath,
           // yaml 命中 obsidian target 时用其配置（含 §13.3 默认 Imports/InkMigrate
           // 目录结构）；否则维持 legacy 硬编码（头条老用户路径不变）
-          targetConfig: resolveTargetConfig(configPath, opts.target, opts.vaultPath),
+          targetConfig: resolveTargetConfig(configPath, opts.target, opts.vaultPath, {
+            explicit: explicitConfig,
+          }),
         };
 
         // H5: 确保实例记录存在——移到 config 构造后，传入实际 config 以计算真实
