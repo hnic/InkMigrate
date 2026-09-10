@@ -98,6 +98,19 @@ describe('engine schemas (N7, T-1)', () => {
     it('缺 favoritesUrl 被拒（scan.start 必填）', () => {
       expect(ScanStartSchema.safeParse({ source: 's1', stateDir: '/x' }).success).toBe(false);
     });
+    it('空 favoritesUrl 被拒（可选字段同样要求非空，与 scan.start 同口径）', () => {
+      expect(MigrateStartSchema.safeParse({ source: 's1', target: 't1', stateDir: '/x', vaultPath: '/v', favoritesUrl: '' }).success).toBe(false);
+      expect(MigrateResumeSchema.safeParse({ job: 'j1', stateDir: '/x', vaultPath: '/v', favoritesUrl: '' }).success).toBe(false);
+      expect(AuthLoginSchema.safeParse({ source: 's1', stateDir: '/x', favoritesUrl: '' }).success).toBe(false);
+    });
+    it('非 http(s) 的 favoritesUrl 被拒（浏览器导航仅接受 http(s)）', () => {
+      expect(ScanStartSchema.safeParse({ source: 's1', stateDir: '/x', favoritesUrl: 'file:///etc/passwd' }).success).toBe(false);
+      expect(MigrateStartSchema.safeParse({ source: 's1', target: 't1', stateDir: '/x', vaultPath: '/v', favoritesUrl: 'javascript:alert(1)' }).success).toBe(false);
+    });
+    it('超长 id 被拒（≤64 字符，id 是路径段/DB 键）', () => {
+      expect(AuthLoginSchema.safeParse({ source: 'a'.repeat(65), stateDir: '/x' }).success).toBe(false);
+      expect(AuthLoginSchema.safeParse({ source: 'a'.repeat(64), stateDir: '/x' }).success).toBe(true);
+    });
     it('cleanup 缺 confirmed 被拒', () => {
       expect(CleanupUnfavoriteSchema.safeParse({ source: 's1', stateDir: '/x' }).success).toBe(false);
     });

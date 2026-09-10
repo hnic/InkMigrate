@@ -56,13 +56,17 @@ export function sendErrorResponse(
   writeLine(msg, 'response');
 }
 
-/** 发送 Notification 到 stdout（用于进度/日志推送）。 */
+/**
+ * 发送 Notification 到 stdout（用于进度/日志推送）。
+ * 返回是否实际写入：不抛出 ≠ 送达——writeLine 在管道断开/背压路径会静默丢弃
+ * （返回 false），调用方（如 health_degraded 的单次节流）据此决定重试语义。
+ */
 export function sendNotification(
   method: string,
   params?: Record<string, unknown>,
-): void {
+): boolean {
   const msg: RpcNotification = { jsonrpc: '2.0', method, ...(params !== undefined ? { params } : {}) };
-  writeLine(msg, 'notification');
+  return writeLine(msg, 'notification');
 }
 
 /** 发送日志到 stderr（不干扰 stdout JSON 通道）。 */
@@ -95,8 +99,12 @@ process.stdout.on('error', (err: NodeJS.ErrnoException) => {
 const STDOUT_HIGH_WATERMARK = 1024 * 1024; // 1 MiB 排队上限
 let stdoutBackpressured = false;
 
-function writeLine(msg: unknown, priority: 'response' | 'notification' = 'notification'): void {
-  if (stdoutBroken) return; // 管道已断，静默丢弃
+/**
+ * 写一行 JSON 到 stdout。返回是否已受理写入：false 表示静默丢弃
+ * （管道断开、序列化失败、背压丢弃 notification），调用方据此决定重试语义。
+ */
+function writeLine(msg: unknown, priority: 'response' | 'notification' = 'notification'): boolean {
+  if (stdoutBroken) return false; // 管道已断，静默丢弃
   let line: string;
   try {
     line = JSON.stringify(msg) + '\n';
@@ -104,12 +112,12 @@ function writeLine(msg: unknown, priority: 'response' | 'notification' = 'notifi
     // 序列化失败（handler 返回 BigInt/循环引用等）：丢弃该消息并记日志。
     // 不能让异常逃逸——否则成功的调用会被外层 catch 误报成 -32000 失败。
     logToStderr('error', 'message serialization failed, dropping write');
-    return;
+    return false;
   }
   try {
     // R4-C1: 背压时只丢弃 notification，response/error 必须写入（否则 GUI 永久冻结）
     if (stdoutBackpressured && priority === 'notification') {
-      return;
+      return false;
     }
     const ok = process.stdout.write(line);
     if (!ok) {
@@ -132,12 +140,14 @@ function writeLine(msg: unknown, priority: 'response' | 'notification' = 'notifi
         process.stdout.once('drain', onDrain);
       }
     }
+    return true; // 已受理（write 返回 false 仅代表进内核缓冲排队，最终仍会写出）
   } catch {
     // 写入失败（EPIPE 等）——宿主已断开，标记并静默，后续写入全部丢弃
     if (!stdoutBroken) {
       stdoutBroken = true;
       logToStderr('warn', 'stdout 管道已断开（宿主可能已关闭），后续通知将被丢弃');
     }
+    return false;
   }
 }
 

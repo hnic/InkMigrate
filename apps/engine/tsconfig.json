@@ -9,6 +9,8 @@
     { "path": "../../packages/protocol" },
     { "path": "../../packages/core" },
     { "path": "../../packages/source-toutiao" },
-    { "path": "../../packages/target-obsidian" }
+    { "path": "../../packages/target-obsidian" },
+    { "path": "../../packages/wiring" },
+    { "path": "../../packages/source-evernote" }
   ]
 }

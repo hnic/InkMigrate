@@ -11,8 +11,9 @@ import {
   type JobStatus,
   canResumeFrom,
   ensureInstance,
+  MigrationJobs,
+  runMigrationJob,
 } from '@inkmigrate/core';
-import { MigrationJobs } from '@inkmigrate/core';
 import {
   createToutiaoSource,
   profilePath,
@@ -25,7 +26,12 @@ import {
   type ToutiaoBrowserAdapterConfig,
 } from '@inkmigrate/source-toutiao';
 import { lastScanIssues } from '@inkmigrate/source-evernote';
-import { resolveEvernoteSource, resolveSourceWiring, resolveTargetConfig } from '@inkmigrate/wiring';
+import {
+  resolveEvernoteSource,
+  resolveSourceWiring,
+  resolveTargetConfig,
+  legacyTargetConfig,
+} from '@inkmigrate/wiring';
 import { createObsidianTarget } from '@inkmigrate/target-obsidian';
 import { rmSync, mkdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -103,6 +109,13 @@ function expandPaths<T>(
 const ID_RE = /^[A-Za-z0-9_-]+$/;
 
 /**
+ * id 长度上限（与 schemas.ts 的 idField 同口径）：id 会成为文件系统路径段
+ * （profilePath 以 id 命名目录）与 DB 键，超长值若穿过信任边界，会在 handler
+ * 深处炸成 ENAMETOOLONG/SQLite 原生错误，而非干净的参数校验失败。
+ */
+const ID_MAX_LENGTH = 64;
+
+/**
  * adapter.close() 超时泄漏计数。sidecar 是长驻进程，每次超时都可能留下孤儿 Chromium。
  * 达到阈值强制退出（Tauri 会重启 sidecar），避免内存/FD 耗尽。
  */
@@ -116,6 +129,9 @@ function requireId(value: unknown, field: string): asserts value is string {
   }
   if (!ID_RE.test(value)) {
     throw new Error(`${field} 含非法字符（仅允许字母、数字、下划线、连字符）：${value}`);
+  }
+  if (value.length > ID_MAX_LENGTH) {
+    throw new Error(`${field} 超长（≤${ID_MAX_LENGTH} 字符，当前 ${value.length}）`);
   }
 }
 
@@ -173,8 +189,10 @@ export function registerAllHandlers(): void {
   registerMethod('auth.clear', (p) => handleAuthClear(expandPaths(p as unknown as AuthStatusParams, ['stateDir'])), AuthStatusSchema);
   registerMethod('scan.start', (p) => handleScanStart(expandPaths(p as unknown as ScanStartParams, ['stateDir'])), ScanStartSchema);
   registerMethod('scan.preview', (p) => handleScanPreview(expandPaths(p as unknown as ScanPreviewParams, ['stateDir', 'configPath'])), ScanPreviewSchema);
-  registerMethod('migrate.start', (p) => handleMigrateStart(expandPaths(p as unknown as MigrateStartParams, ['stateDir', 'vaultPath'])), MigrateStartSchema);
-  registerMethod('migrate.resume', (p) => handleMigrateResume(expandPaths(p as unknown as MigrateResumeParams, ['stateDir', 'vaultPath'])), MigrateResumeSchema);
+  // configPath 与 scan.preview 同口径展开（GUI 可能传 ~/ 开头的主目录相对路径，
+  // 未展开的 configPath 会解析不到 yaml 而误回退 toutiao 源）
+  registerMethod('migrate.start', (p) => handleMigrateStart(expandPaths(p as unknown as MigrateStartParams, ['stateDir', 'vaultPath', 'configPath'])), MigrateStartSchema);
+  registerMethod('migrate.resume', (p) => handleMigrateResume(expandPaths(p as unknown as MigrateResumeParams, ['stateDir', 'vaultPath', 'configPath'])), MigrateResumeSchema);
   registerMethod('migrate.resumable', (p) => handleMigrateResumable(expandPaths(p as unknown as MigrateResumableParams, ['stateDir'])), MigrateResumableSchema);
   registerMethod('cleanup.unfavorite', (p) => handleCleanupUnfavorite(expandPaths(p as unknown as CleanupUnfavoriteParams, ['stateDir'])), CleanupUnfavoriteSchema);
   registerMethod('status.query', (p) => handleStatusQuery(expandPaths(p as unknown as StatusQueryParams, ['stateDir'])), StatusQuerySchema);
@@ -266,6 +284,13 @@ async function handleAuthClear(params: AuthStatusParams | undefined): Promise<{ 
   if (!profileExists(params.stateDir, params.source)) {
     return { cleared: false };
   }
+  // C10: 活跃长任务（scan/migrate/cleanup）的 Chromium 正在使用该 profileDir，
+  // 此时递归删除等于从运行中的浏览器底下抽走目录（Profile 半删损坏，任务继续写
+  // 已删路径）。beginTask 槽位正是为此类互斥而设——活跃期间拒绝清除。
+  const active = getActiveTask();
+  if (active !== null) {
+    throw new Error(`有长任务正在运行（${active}），请先 job.cancel 终止后再清除 Profile`);
+  }
   rmSync(pPath, { recursive: true, force: true });
   return { cleared: true };
 }
@@ -327,7 +352,7 @@ async function handleScanStart(params: ScanStartParams | undefined): Promise<Sca
   });
   // C10: 占用活跃任务槽位（拒绝并发长任务，避免 resetCancel 互踩取消请求）。
   // 紧贴 try：占槽与 try 之间插入任何可能抛出的语句都会让槽位泄漏。
-  beginTask('scan');
+  const taskToken = beginTask('scan');
   try {
     await session.launch();
     const page = await session.newPage();
@@ -383,7 +408,7 @@ async function handleScanStart(params: ScanStartParams | undefined): Promise<Sca
     };
   } finally {
     await session.close();
-    endTask('scan'); // C10: 释放活跃任务槽位
+    endTask(taskToken); // C10: 释放活跃任务槽位（凭本次 token，迟到的释放不误清新任务）
   }
 }
 
@@ -414,6 +439,9 @@ async function handleMigrateResumable(
   if (params === undefined) throw new Error('missing params');
   requireStateDir(params.stateDir);
   requireId(params.source, 'source');
+  // 与 runMigrateJob 同口径：openDatabase 不创建父目录，fresh/typo 的 stateDir
+  // 会直接暴露 better-sqlite3 原生"unable to open database file"而非业务错误。
+  mkdirSync(params.stateDir, { recursive: true });
   const db: DB = openStateDb(params.stateDir);
   try {
     const job = resolveResumableJob(db, params.source);
@@ -496,13 +524,10 @@ async function runMigrateJob(
     requireId((params as MigrateStartParams).target, 'target');
   }
 
-  // 动态导入避免顶层依赖循环
-  const { runMigrationJob } = await import('@inkmigrate/core');
-
   mkdirSync(params.stateDir, { recursive: true });
   // C10: 先占活跃任务槽位再开库——若已有并发长任务，beginTask 抛出时不会泄漏
   // 已打开的 SQLite 连接（原实现 openDatabase 在 beginTask 之前，长驻 sidecar 会累积句柄）。
-  beginTask('migrate');
+  const taskToken = beginTask('migrate');
   let db: DB | undefined;
   try {
     // 每个 RPC 各自 open/close 连接：better-sqlite3 在 WAL 模式下连接打开很轻量，
@@ -555,19 +580,13 @@ async function runMigrateJob(
         ? wiring.instanceConfig
         : { sourceInstanceId, profileDir: profilePath(params.stateDir, sourceInstanceId), headless: false };
     // R4-M7: targetConfig 用与 CLI 一致的完整 7 键（原只传 vaultPath，hash 与 CLI 不同
-    // → 每次跨工具运行触发虚假 UPDATE）。configPath 存在时经 yaml target（schema 默认值）。
+    // → 每次跨工具运行触发虚假 UPDATE）。configPath 存在时经 yaml target（schema 默认值）；
+    // 无 configPath 时复用 wiring 的 legacyTargetConfig（与 CLI 同源的单一定义，
+    // 不在此双写默认值——双写一旦漂移会重新引入虚假 UPDATE）。
     const targetConfig: Record<string, unknown> =
       params.configPath !== undefined
         ? resolveTargetConfig(params.configPath, targetInstanceId, params.vaultPath)
-        : {
-            vaultPath: params.vaultPath,
-            importSubdir: '',
-            attachmentsSubdir: 'Attachments',
-            linkStyle: 'wikilink',
-            overwritePolicy: 'preserve',
-            collectionMapping: { toTags: false, toFolders: false },
-            maxFilenameLength: 100,
-          };
+        : legacyTargetConfig(params.vaultPath);
     // 构造 source adapter：wiring 命中（evernote/toutiao）用其适配器；
     // 无 configPath 时维持 toutiao 浏览器（adapterConfig 用已计算的 profileDir）。
     // 提前到 ensureInstance 之前：实例审计列（adapter_version 等）要取适配器真实值。
@@ -680,7 +699,7 @@ async function runMigrateJob(
     };
   } finally {
     db?.close();
-    endTask('migrate'); // C10: 释放活跃任务槽位
+    endTask(taskToken); // C10: 释放活跃任务槽位
   }
 }
 
@@ -701,14 +720,13 @@ async function handleCleanupUnfavorite(
   if (params.intervalMs !== undefined) requirePositiveMs(params.intervalMs, 'intervalMs');
   requirePositiveIntIfDefined(params.maxItems, 'maxItems');
   // C10: 先占活跃任务槽位再开库——占槽失败（并发长任务）抛出时不泄漏已打开的 DB 连接
-  beginTask('cleanup');
+  const taskToken = beginTask('cleanup');
   let db: DB | undefined;
   try {
     db = openStateDb(params.stateDir);
+    // 复用 requireProfileExists：与 scan/migrate 保持同一错误口径，不再内联重复
+    requireProfileExists(params.stateDir, params.source);
     const profileDir = profilePath(params.stateDir, params.source);
-    if (!profileExists(params.stateDir, params.source)) {
-      throw new Error(`Profile 不存在：${profileDir}，请先 auth.login`);
-    }
 
     // cleanup_plans.migration_job_id 是 NOT NULL FK，需关联一次迁移任务
     const migrationJobId = resolveLatestMigrationJobId(db, params.source);
@@ -764,7 +782,7 @@ async function handleCleanupUnfavorite(
     }
   } finally {
     db?.close();
-    endTask('cleanup'); // C10: 释放活跃任务槽位
+    endTask(taskToken); // C10: 释放活跃任务槽位
   }
 }
 
@@ -828,6 +846,9 @@ async function handleStatusQuery(
   if (params === undefined) throw new Error('missing params');
   requireStateDir(params.stateDir);
   requireId(params.job, 'job');
+  // 与 runMigrateJob 同口径：openDatabase 不创建父目录，fresh/typo 的 stateDir
+  // 会直接暴露 better-sqlite3 原生"unable to open database file"而非"Job 不存在"。
+  mkdirSync(params.stateDir, { recursive: true });
   const db: DB = openStateDb(params.stateDir);
   try {
     const job = new MigrationJobs(db).get(params.job);
