@@ -19,8 +19,13 @@ export function makeTempDb(): { db: DB; dir: string; close: () => void } {
     db,
     dir,
     close: () => {
-      db.close();
-      rmSync(dir, { recursive: true, force: true });
+      // finally 保证清理必然执行：db.close() 抛错（打开的迭代器/忙句柄，或
+      // Windows 上 WAL sidecar 持锁）时若直接串联，临时目录会泄漏成孤儿
+      try {
+        db.close();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     },
   };
 }

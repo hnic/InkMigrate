@@ -58,7 +58,10 @@ export const ITEM_RECOVERABLE_STATES = [
 ] as const;
 export type ItemRecoverableState = (typeof ITEM_RECOVERABLE_STATES)[number];
 
-// §11.1 本 Job 完整性方程允许的条目终态（规格 §11.1 七个终态）
+// §11.1 本 Job 完整性方程允许的条目终态（规格 §11.1 七个终态）。
+// 注意 'verified' 同时存在于 ITEM_PROCESSING_STATES（happy path 的最后一个
+// 处理态）：判断终态必须用 isItemFinalState，不得以处理态词表成员资格
+// 反推"非终态"（否则 §11.9 完成对账会把 verified 计成在途条目）。
 export const ITEM_FINAL_STATES = [
   'verified',
   'degraded',
@@ -129,17 +132,19 @@ export function verifyCompletionEquation(
   input: CompletionEquationInput,
 ): boolean {
   if (input.recoverable !== 0) return false;
-  // 负数计数（聚合器损坏时可能出现）会让荒谬的组合凑平方程，先行拒绝
-  if (input.scanCount < 0) return false;
-  if (Object.values(input.counts).some((n) => n < 0)) return false;
-  const sum =
-    input.counts.verified +
-    input.counts.degraded +
-    input.counts.permanent_failed +
-    input.counts.unsupported +
-    input.counts.blocked +
-    input.counts.conflict +
-    input.counts.skipped;
+  // 拒绝非安全整数（NaN/缺失键/小数）与负数：`NaN < 0`/`undefined < 0` 均为
+  // false，聚合器损坏的输入会伪装成"对账不平"而非暴露自身损坏
+  if (!Number.isSafeInteger(input.scanCount)) return false;
+  const countsValid = COMPLETION_EQUATION_TERMS.every(
+    (s) => Number.isSafeInteger(input.counts[s]) && input.counts[s] >= 0,
+  );
+  if (!countsValid) return false;
+  // 对共享词表归约求和：FinalStateCounts 的 Record 键会迫使调用方补齐新键，
+  // 但手写七项求和不会——新增终态时会静默漏加并永远对账不平
+  const sum = COMPLETION_EQUATION_TERMS.reduce(
+    (acc, term) => acc + input.counts[term],
+    0,
+  );
   return sum === input.scanCount;
 }
 
@@ -162,6 +167,10 @@ function makeStringGuard<T extends string>(values: readonly T[]) {
 }
 
 export const isItemFinalState = makeStringGuard(ITEM_FINAL_STATES);
+
+// 本模块唯一缺守卫的词表：补齐后与其他词表口径一致，调用方无需手写 includes
+export const isItemProcessingState =
+  makeStringGuard(ITEM_PROCESSING_STATES);
 
 export const isItemRecoverableState =
   makeStringGuard(ITEM_RECOVERABLE_STATES);
@@ -193,8 +202,13 @@ export const JOB_TRANSITIONS: Readonly<Record<JobStatus, ReadonlySet<JobStatus>>
  * 调用方若需允许「同 status 内推进 current_stage」（自环），自行处理 to===from。
  */
 export function canJobTransition(from: JobStatus, to: JobStatus): boolean {
-  // 运行期 from 越界（如从存储读出的脏值）时返回 false 而非抛 TypeError
-  return JOB_TRANSITIONS[from]?.has(to) ?? false;
+  // 运行期 from 越界（如从存储读出的脏值）时返回 false 而非抛 TypeError。
+  // 注意 ?. 只对 null/undefined 短路：'__proto__'/'toString' 等原型链键会命中
+  // 非空值后在 .has 上抛 TypeError，需先做自身属性检查。
+  const allowed = Object.prototype.hasOwnProperty.call(JOB_TRANSITIONS, from)
+    ? JOB_TRANSITIONS[from]
+    : undefined;
+  return allowed !== undefined && allowed.has(to);
 }
 
 // §16.9 cleanup_jobs 生命周期
@@ -229,8 +243,14 @@ export function canCleanupJobTransition(
   from: CleanupJobStatus,
   to: CleanupJobStatus,
 ): boolean {
-  // 同 canJobTransition：越界 from 视为非法转换而非崩溃
-  return CLEANUP_JOB_TRANSITIONS[from]?.has(to) ?? false;
+  // 同 canJobTransition：越界/原型链 from 视为非法转换而非崩溃
+  const allowed = Object.prototype.hasOwnProperty.call(
+    CLEANUP_JOB_TRANSITIONS,
+    from,
+  )
+    ? CLEANUP_JOB_TRANSITIONS[from]
+    : undefined;
+  return allowed !== undefined && allowed.has(to);
 }
 
 export const isJobPauseReason = makeStringGuard(JOB_PAUSE_REASONS);

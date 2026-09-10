@@ -9,10 +9,12 @@
  * 用法：cd packages/core && node rerun-all-assets.mjs [--limit N] [--dry-run]
  */
 import Database from "better-sqlite3";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+import os from "node:os";
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
+// 直接引用各包 dist 产物：运行前确保已构建最新代码，否则重跑用的是过期编译结果。
 import { createToutiaoSource } from "../source-toutiao/dist/adapters/adapter.js";
 import { profilePath } from "../source-toutiao/dist/auth/profile.js";
 import {
@@ -21,18 +23,20 @@ import {
   computeStableKey,
 } from "./dist/index.js";
 
-// 解析参数（缺值/非整数直接报用法，避免 NaN 静默放大到全量）
+// 解析参数（缺值/非整数直接报用法，避免 NaN 静默放大到全量）。
+// 未提供时返回 undefined 而非 0 哨兵：--only 0 / --limit 0 应按字面值生效，
+// 不能被误读成"未提供"后回落到全量重跑（对破坏性脚本尤其危险）。
 const args = process.argv.slice(2);
 function parseNonNegativeInt(name) {
   const i = args.indexOf(name);
-  if (i < 0) return 0;
+  if (i < 0) return undefined;
   const n = parseInt(args[i + 1], 10);
   if (!Number.isInteger(n) || n < 0) {
     throw new Error(`${name} 需要一个非负整数（收到：${args[i + 1]}）`);
   }
   return n;
 }
-const LIMIT = parseNonNegativeInt("--limit");
+const LIMIT = parseNonNegativeInt("--limit") ?? 0;
 const DRY_RUN = args.includes("--dry-run");
 const ONLY_ID = parseNonNegativeInt("--only");
 // --ids 1,2,3 只跑指定 id 列表（逗号分隔）
@@ -45,13 +49,17 @@ const IDS_FILTER = (() => {
   if (ids.length === 0) throw new Error(`--ids 未解析出有效 id: ${raw}`);
   return ids;
 })();
+// 显式指定 id 列表后混入 --limit/--only 会静默截断/收窄明确点名的条目，直接拒绝
+if (IDS_FILTER && (LIMIT > 0 || ONLY_ID !== undefined)) {
+  throw new Error("--ids 不能与 --limit/--only 同时使用");
+}
 
-// 路径可经环境变量覆盖；DB/笔记目录从根路径推导，避免绝对前缀重复。
-const STATE_DIR = process.env.INKMIGRATE_STATE_DIR ?? "/Users/hnic/.inkmigrate";
+// 路径可经环境变量覆盖；默认值从当前用户主目录推导，不绑定某一台机器。
+const STATE_DIR = process.env.INKMIGRATE_STATE_DIR ?? join(os.homedir(), ".inkmigrate");
 const DB_PATH = process.env.INKMIGRATE_DB_PATH ?? join(STATE_DIR, "inkmigrate.sqlite");
 // 笔记在 toutiao/ 子目录，附件在 vault 根的 Attachments/。
 // wikilink ![[Attachments/...]] 相对 vault 根，Obsidian 跨子目录能正确解析。
-const VAULT = process.env.INKMIGRATE_VAULT ?? "/Users/hnic/Documents/Obsidian";
+const VAULT = process.env.INKMIGRATE_VAULT ?? join(os.homedir(), "Documents", "Obsidian");
 const NOTES_DIR = join(VAULT, "toutiao");
 const SOURCE_ID = "toutiao-main";
 const ATTACHMENTS_SUBDIR = "Attachments";
@@ -68,7 +76,7 @@ const params = [SOURCE_ID, "verified", "verified"];
 if (IDS_FILTER) {
   query += ` AND si.id IN (${IDS_FILTER.map(() => "?").join(",")})`;
   params.push(...IDS_FILTER);
-} else if (ONLY_ID) {
+} else if (ONLY_ID !== undefined) {
   query += " AND si.id = ?";
   params.push(ONLY_ID);
 }
@@ -180,14 +188,18 @@ for (let idx = 0; idx < rows.length; idx++) {
 
       // 用内容路径匹配 ![](任意子域名+contentPath+任意query) 形式
       const escaped = contentPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      // ![](url) / ![](url "title") / ![alt](url...)
+      // ![](url) / ![](url "title") / ![alt](url...)。
+      // 结尾锚定到 ?/空白/引号：若某资产的内容路径是另一变体路径的前缀
+      // （如 /abc 与 /abc~tplv-large.jpeg），不锚定会把长 URL 误替换成另一张图。
       content = content.replace(
-        new RegExp(`!\\[[^\\]]*\\]\\(https?://[^)]*${escaped}[^)]*\\)`, "g"),
+        new RegExp(`!\\[[^\\]]*\\]\\(https?://[^)\\s]*${escaped}(?:[?\\s"][^)]*)?\\)`, "g"),
         placeholder,
       );
-      // <img src="url..." HTML 标签形式
+      // <img src="..." / <img src='...' HTML 标签形式。
+      // 兼容单/双引号，与 hasRemoteImg 检测的 src=["'] 口径一致，
+      // 否则单引号形式每轮都被判为"未本地化"却永远替换不掉。
       content = content.replace(
-        new RegExp(`<img[^>]*src="https?://[^"]*${escaped}[^"]*"[^>]*>`, "g"),
+        new RegExp(`<img[^>]*src=(["'])https?://[^"']*${escaped}(?:[?\\s][^"']*)?\\1[^>]*>`, "g"),
         placeholder,
       );
 
@@ -197,7 +209,10 @@ for (let idx = 0; idx < rows.length; idx++) {
       }
 
       const ext = deriveExt(asset.mimeType);
-      const filename = `${String(imgIdx + 1).padStart(3, "0")}.${ext}`;
+      // 用内容路径哈希做文件名：同一张图重跑时幂等（同名不互撞），
+      // 不会像序号命名那样在第 2 次运行用 001.jpg 覆盖第 1 次已嵌入引用的 001.webp。
+      const nameHash = createHash("sha256").update(contentPath).digest("hex").slice(0, 16);
+      const filename = `${nameHash}.${ext}`;
       const relPath = [
         ATTACHMENTS_SUBDIR, SOURCE_ID, itemKey, sanitizeFilename(filename, { maxLength: 200 }),
       ].join("/");
@@ -220,9 +235,11 @@ for (let idx = 0; idx < rows.length; idx++) {
       continue;
     }
 
-    // 写回笔记（覆盖原文件）
+    // 写回笔记：先写同目录临时文件再原子 rename，避免半写截断唯一副本
     if (!DRY_RUN) {
-      writeFileSync(notePath, content, "utf8");
+      const tmp = `${notePath}.tmp`;
+      writeFileSync(tmp, content, "utf8");
+      renameSync(tmp, notePath);
     }
     ok++;
     if (!DRY_RUN || (idx < 3 || idx % 50 === 0)) {

@@ -28,6 +28,8 @@ export type DownloadResult =
       ok: false;
       reason: string;
       httpStatus?: number;
+      /** 确定性失败（内容校验/SSRF 策略/畸形重定向等）：重试必然得到同样结果，不退避重试。 */
+      deterministic?: true;
     };
 
 const ALLOWED_MIME = new Set([
@@ -52,13 +54,29 @@ const MAGIC_SIGNATURES: ReadonlyArray<{
   prefix: ReadonlyArray<number>;
   extraOffset?: number;
   extraPrefix?: ReadonlyArray<number>;
+  /** 前缀之外的结构性校验（如 GIF 的版本字段、JPEG 的首个段标记）。 */
+  validate?: (bytes: Buffer) => boolean;
 }> = [
-  { mime: 'image/jpeg', prefix: [0xff, 0xd8, 0xff] },
+  {
+    mime: 'image/jpeg',
+    prefix: [0xff, 0xd8, 0xff],
+    // FFD8FF 后必须紧跟一个段标记（APPn/DQT/SOFn 等，0xC0-0xEF），
+    // 否则 3 字节截断垃圾也会被当作合法 JPEG
+    validate: (b) => b.length >= 4 && b[3]! >= 0xc0 && b[3]! <= 0xef,
+  },
   {
     mime: 'image/png',
     prefix: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
   },
-  { mime: 'image/gif', prefix: [0x47, 0x49, 0x46, 0x38] },
+  {
+    mime: 'image/gif',
+    prefix: [0x47, 0x49, 0x46, 0x38], // 'GIF8'
+    // 版本字段必须是 '87a' 或 '89a'（offset 4-5），4 字节 'GIF8' 截断垃圾不算
+    validate: (b) =>
+      b.length >= 6 &&
+      b[5] === 0x61 &&
+      (b[4] === 0x37 || b[4] === 0x39),
+  },
   { mime: 'image/webp', prefix: [0x52, 0x49, 0x46, 0x46], extraOffset: 8, extraPrefix: [0x57, 0x45, 0x42, 0x50] }, // RIFF + WEBP at offset 8
 ];
 
@@ -94,7 +112,12 @@ export async function downloadImage(i: DownloadInput): Promise<DownloadResult> {
     ) {
       return result;
     }
-    // 指数退避仅对网络错误（无 httpStatus 的失败：DNS/超时/内容校验等）。
+    // 内容/策略类确定性失败（大小超限、content-type 拒绝、magic bytes 不符、
+    // SSRF 拦截、畸形/超限重定向）重试必然同样失败，不再退避浪费 ~3s 与带宽
+    if (!result.ok && result.deterministic === true) {
+      return result;
+    }
+    // 指数退避仅对网络错误（无 httpStatus 的失败：DNS/超时等）。
     const isHttpError = !result.ok && result.httpStatus !== undefined;
     if (attempt < maxRetries && !isHttpError) {
       await sleep(1000 * Math.pow(2, attempt - 1));
@@ -102,6 +125,9 @@ export async function downloadImage(i: DownloadInput): Promise<DownloadResult> {
   }
   return lastError;
 }
+
+/** SSRF 策略拒绝（方案/元数据主机/私网解析）专用错误：确定性失败，不重试。 */
+class SsrfBlockedError extends Error {}
 
 /**
  * C7: SSRF 防护。文章正文里的图片 URL 由来源内容控制（半可信甚至不可信），
@@ -118,26 +144,35 @@ async function assertSafeImageUrl(urlStr: string): Promise<void> {
   try {
     parsed = new URL(urlStr);
   } catch {
-    throw new Error(`invalid image url: ${urlStr}`);
+    throw new SsrfBlockedError(`invalid image url: ${urlStr}`);
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error(`image url scheme not allowed: ${parsed.protocol}`);
+    throw new SsrfBlockedError(`image url scheme not allowed: ${parsed.protocol}`);
   }
   const host = parsed.hostname;
   if (META_HOSTS.has(host)) {
-    throw new Error(`image url points to cloud metadata endpoint: ${host}`);
+    throw new SsrfBlockedError(
+      `image url points to cloud metadata endpoint: ${host}`,
+    );
   }
-  // DNS 解析后逐个校验 IP（hostname 可能解析到多个 A 记录）
+  // DNS 解析后逐个校验 IP（hostname 可能解析到多个 A 记录）。
+  // dns.lookup 无自身超时，慢/挂解析器会卡住整条下载链（超时信号只覆盖 fetch），
+  // 用 race 兜底；解析超时按可重试网络错误处理（与 ENOTFOUND 同通道）。
   let addrs: { address: string }[];
   try {
-    const result = await lookup(host, { all: true });
+    const result = await Promise.race([
+      lookup(host, { all: true }),
+      sleep(5000).then(() => {
+        throw new Error(`dns lookup timeout after 5000ms: ${host}`);
+      }),
+    ]);
     addrs = result;
   } catch {
     throw new Error(`image url host unresolvable: ${host}`);
   }
   for (const a of addrs) {
     if (isPrivateOrLoopback(a.address)) {
-      throw new Error(
+      throw new SsrfBlockedError(
         `image url resolves to private/loopback address ${a.address} (SSRF blocked)`,
       );
     }
@@ -189,7 +224,11 @@ function isPrivateOrLoopback(ip: string): boolean {
   // IPv4
   const v4 = ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (v4) {
-    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    const octets = v4.slice(1).map(Number);
+    // 八位组 > 255 是畸形地址，按不安全处理（与 IPv6 路径"解析失败即不安全"同口径）
+    if (octets.some((o) => o > 255)) return true;
+    const [a, b] = [octets[0]!, octets[1]!];
+    if (a >= 240) return true; // 240.0.0.0/4 保留（含 255.255.255.255 广播）
     if (a === 10) return true; // 10.0.0.0/8
     if (a === 127) return true; // 127.0.0.0/8 loopback
     if (a === 0) return true; // 0.0.0.0/8
@@ -197,6 +236,10 @@ function isPrivateOrLoopback(ip: string): boolean {
     if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
     if (a === 192 && b === 168) return true; // 192.168.0.0/16
     if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10 CGNAT
+    if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 基准测试
+    if (a === 192 && b === 0) return true; // 192.0.0.0/24 与 192.0.2.0/24 TEST-NET-1
+    if (a === 198 && b === 51) return true; // 198.51.100.0/24 TEST-NET-2
+    if (a === 203 && b === 0) return true; // 203.0.113.0/24 TEST-NET-3
     return false;
   }
   // IPv6：字符串前缀匹配覆盖不了内嵌 IPv4 的各种变体（十六进制/点分 mapped、
@@ -242,7 +285,12 @@ async function tryDownloadOnce(i: DownloadInput): Promise<DownloadResult> {
     try {
       await assertSafeImageUrl(i.url);
     } catch (e) {
-      return { ok: false, reason: `ssrf blocked: ${(e as Error).message}` };
+      // 策略拒绝（SsrfBlockedError）是确定性失败；DNS 解析失败/超时保持可重试
+      return {
+        ok: false,
+        reason: `ssrf blocked: ${(e as Error).message}`,
+        ...(e instanceof SsrfBlockedError ? { deterministic: true } : {}),
+      };
     }
   }
 
@@ -267,14 +315,41 @@ async function tryDownloadOnce(i: DownloadInput): Promise<DownloadResult> {
     let redirectCount = 0;
     while (response.status >= 300 && response.status < 400 && redirectCount < 5) {
       const location = response.headers.get('location');
-      if (!location) break;
-      // 相对 Location 必须基于"当前跳"的 URL 解析（RFC 7231），而非原始 i.url
-      const targetUrl = new URL(location, currentUrl).toString();
+      // 释放本跳 3xx 响应的 body，避免占住 undici 连接直到 GC
+      const cancelBody = () => response.body?.cancel().catch(() => {});
+      if (!location) {
+        await cancelBody();
+        return {
+          ok: false,
+          reason: `redirect status ${response.status} without location header`,
+          httpStatus: response.status,
+          deterministic: true,
+        };
+      }
+      // 相对 Location 必须基于"当前跳"的 URL 解析（RFC 7231），而非原始 i.url；
+      // 畸形 Location 是确定性失败，不应伪装成可重试的网络错误
+      let targetUrl: string;
+      try {
+        targetUrl = new URL(location, currentUrl).toString();
+      } catch {
+        await cancelBody();
+        return {
+          ok: false,
+          reason: `malformed redirect location: ${location.slice(0, 200)}`,
+          httpStatus: response.status,
+          deterministic: true,
+        };
+      }
       if (!i.allowPrivateTargets) {
         try {
           await assertSafeImageUrl(targetUrl);
         } catch (e) {
-          return { ok: false, reason: `ssrf blocked (redirect): ${(e as Error).message}` };
+          await cancelBody();
+          return {
+            ok: false,
+            reason: `ssrf blocked (redirect): ${(e as Error).message}`,
+            ...(e instanceof SsrfBlockedError ? { deterministic: true } : {}),
+          };
         }
       }
       // 跨 origin 重定向不回放原始 referer（对齐浏览器对 Referer 的跨域限制）；
@@ -283,9 +358,21 @@ async function tryDownloadOnce(i: DownloadInput): Promise<DownloadResult> {
       const hopOpts: RequestInit = crossOrigin
         ? { redirect: 'manual', signal: timeoutSignal }
         : fetchOpts;
+      await cancelBody();
       response = await fetch(targetUrl, hopOpts);
       currentUrl = targetUrl;
       redirectCount++;
+    }
+    // 跳数达上限仍是 3xx：确定性失败（重试只会重放同一条链），不能落入下方
+    // 3xx httpStatus 分支被当作可重试错误空转 maxRetries 次
+    if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel().catch(() => {});
+      return {
+        ok: false,
+        reason: `too many redirects (>${redirectCount})`,
+        httpStatus: response.status,
+        deterministic: true,
+      };
     }
   } catch (e) {
     return { ok: false, reason: `network error: ${(e as Error).message}` };
@@ -307,6 +394,7 @@ async function tryDownloadOnce(i: DownloadInput): Promise<DownloadResult> {
     return {
       ok: false,
       reason: `content-type not allowed: ${contentType}`,
+      deterministic: true,
     };
   }
 
@@ -329,6 +417,7 @@ async function tryDownloadOnce(i: DownloadInput): Promise<DownloadResult> {
         return {
           ok: false,
           reason: `size ${total} exceeds maxBytes ${i.maxBytes}`,
+          deterministic: true,
         };
       }
       chunks.push(Buffer.from(value));
@@ -341,21 +430,34 @@ async function tryDownloadOnce(i: DownloadInput): Promise<DownloadResult> {
 
   const bytes = Buffer.concat(chunks);
   if (bytes.length === 0) {
-    return { ok: false, reason: 'empty/zero-byte response' };
+    return {
+      ok: false,
+      reason: 'empty/zero-byte response',
+      deterministic: true,
+    };
   }
 
   // Magic Bytes 一致性（含可选的偏移校验，如 webp 的 WEBP 标记）
   const sigMatch = MAGIC_SIGNATURES.find((s) => {
+    // 显式长度守卫：依赖越界索引返回 undefined（恰好 fail-closed）过于脆弱，
+    // 截断的 'GIF8'/'FFD8FF' 垃圾不应被当作合法图片
+    const minLen =
+      s.extraOffset !== undefined && s.extraPrefix !== undefined
+        ? Math.max(s.prefix.length, s.extraOffset + s.extraPrefix.length)
+        : s.prefix.length;
+    if (bytes.length < minLen) return false;
     if (!s.prefix.every((b, idx) => bytes[idx] === b)) return false;
     if (s.extraOffset !== undefined && s.extraPrefix !== undefined) {
       return s.extraPrefix.every((b, idx) => bytes[s.extraOffset! + idx] === b);
     }
+    if (s.validate !== undefined) return s.validate(bytes);
     return true;
   });
   if (sigMatch === undefined) {
     return {
       ok: false,
       reason: 'magic bytes do not match any known image format',
+      deterministic: true,
     };
   }
   // SVG 不在白名单（§12.10 svgPolicy 单独处理；stage 3 默认 remote-link 不落地）
@@ -369,6 +471,7 @@ async function tryDownloadOnce(i: DownloadInput): Promise<DownloadResult> {
     return {
       ok: false,
       reason: `magic bytes (${sigMatch.mime}) vs content-type (${contentType}) mismatch`,
+      deterministic: true,
     };
   }
 

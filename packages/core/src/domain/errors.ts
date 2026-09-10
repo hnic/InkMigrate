@@ -26,6 +26,10 @@ export type ItemDisposition = (typeof ITEM_DISPOSITIONS)[number];
 export const ADAPTER_ERROR_DISPOSITION_MISSING =
   'ADAPTER_ERROR_DISPOSITION_MISSING';
 
+/** 条目处置契约的其余违规（可重试却携带处置 / Job 级携带处置 / 枚举值非法）。 */
+export const ITEM_DISPOSITION_CONTRACT_VIOLATION =
+  'ITEM_DISPOSITION_CONTRACT_VIOLATION';
+
 export interface InkMigrateError {
   code: string;
   category: ErrorCategory;
@@ -37,25 +41,20 @@ export interface InkMigrateError {
   cause?: unknown;
 }
 
-export function isErrorCategory(v: unknown): v is ErrorCategory {
-  return (
-    typeof v === 'string' &&
-    (ERROR_CATEGORIES as readonly string[]).includes(v)
-  );
+/** 枚举词表守卫的通用构造器：判定体只写一份，词表之间不会各自漂移。 */
+function makeEnumGuard<T extends string>(values: readonly T[]) {
+  return (v: unknown): v is T =>
+    typeof v === 'string' && (values as readonly string[]).includes(v);
 }
 
-export function isItemDisposition(v: unknown): v is ItemDisposition {
-  return (
-    typeof v === 'string' &&
-    (ITEM_DISPOSITIONS as readonly string[]).includes(v)
-  );
-}
+export const isErrorCategory = makeEnumGuard(ERROR_CATEGORIES);
+export const isItemDisposition = makeEnumGuard(ITEM_DISPOSITIONS);
 
 /**
  * 校验错误对象是否符合 §20.2 / §11.5 的 itemDisposition 契约。
  *
  * 规则：
- * 1. `retryable: true` 时不得携带 `itemDisposition` —— 可重试错误统一进入 `retryable_failed`。
+ * 1. `retryable: true` 时不得携带 `itemDisposition` —— 可重试错误统一进入 `recoverable_failed`。
  * 2. `retryable: false` 且 `scope='item'` 时必须携带 `itemDisposition`，缺失视为
  *    `ADAPTER_ERROR_DISPOSITION_MISSING`（适配器契约错误，核心不得猜测）。
  * 3. 若携带 `itemDisposition`，其值必须是三个合法枚举之一。
@@ -67,18 +66,21 @@ export function assertItemDispositionContract(
   scope: 'job' | 'item' = 'item',
 ): void {
   if (err.retryable && err.itemDisposition !== undefined) {
-    throw new Error(
+    throwContractViolation(
+      ITEM_DISPOSITION_CONTRACT_VIOLATION,
       `retryable=true errors must not carry itemDisposition (code=${err.code})`,
     );
   }
   if (scope === 'job' && err.itemDisposition !== undefined) {
-    throw new Error(
+    throwContractViolation(
+      ITEM_DISPOSITION_CONTRACT_VIOLATION,
       `job-level errors must not carry itemDisposition; it is reserved for item-level non-retryable errors (code=${err.code})`,
     );
   }
   if (err.itemDisposition !== undefined && !isItemDisposition(err.itemDisposition)) {
-    throw new Error(
-      `itemDisposition must be one of permanent_failed|unsupported|blocked, got: ${String(err.itemDisposition)} (code=${err.code})`,
+    throwContractViolation(
+      ITEM_DISPOSITION_CONTRACT_VIOLATION,
+      `itemDisposition must be one of ${ITEM_DISPOSITIONS.join('|')}, got: ${String(err.itemDisposition)} (code=${err.code})`,
     );
   }
   if (
@@ -86,10 +88,28 @@ export function assertItemDispositionContract(
     scope === 'item' &&
     err.itemDisposition === undefined
   ) {
-    throw new Error(
+    throwContractViolation(
+      ADAPTER_ERROR_DISPOSITION_MISSING,
       `${ADAPTER_ERROR_DISPOSITION_MISSING}: item-level non-retryable error missing itemDisposition (code=${err.code})`,
     );
   }
+}
+
+/**
+ * 契约违规统一抛结构化内部错误（§11.5 要求"报告此码"，下游按 `err.code`
+ * 分流而非对消息做字符串匹配）。scope='job'：违规报告本身是 Job 级错误，
+ * 不携带 itemDisposition。
+ */
+function throwContractViolation(code: string, userMessage: string): never {
+  throw toInkMigrateError(
+    {
+      code,
+      category: 'internal',
+      retryable: false,
+      userMessage,
+    },
+    'job',
+  );
 }
 
 export type InkMigrateErrorObject = InkMigrateError & Error;
@@ -97,14 +117,35 @@ export type InkMigrateErrorObject = InkMigrateError & Error;
 /**
  * 将纯数据形态的 `InkMigrateError` 转换为同时携带领域字段的 `Error` 实例，
  * 便于在 `throw` 链路中保留结构化信息。
+ *
+ * 适配器边界拿到的常是 IPC/JSON 反序列化后的裸数据，TS 类型不提供运行时
+ * 保证：先校验基础字段并复核处置契约（scope='job' 的调用方可豁免条目级
+ * disposition 要求，见 {@link assertItemDispositionContract} 规则 4），
+ * 再抬升为可信的领域错误。
  */
-export function toInkMigrateError(err: InkMigrateError): InkMigrateErrorObject {
+export function toInkMigrateError(
+  err: InkMigrateError,
+  scope: 'job' | 'item' = 'item',
+): InkMigrateErrorObject {
+  if (
+    typeof err.code !== 'string' ||
+    err.code === '' ||
+    !isErrorCategory(err.category) ||
+    typeof err.retryable !== 'boolean'
+  ) {
+    throw new TypeError(
+      `malformed InkMigrateError payload (code=${String(err.code)}, category=${String(err.category)})`,
+    );
+  }
+  assertItemDispositionContract(err, scope);
   const e = new Error(err.userMessage) as InkMigrateErrorObject;
   e.code = err.code;
   e.category = err.category;
   e.retryable = err.retryable;
   if (err.itemDisposition !== undefined) e.itemDisposition = err.itemDisposition;
   if (err.technicalMessage !== undefined) e.technicalMessage = err.technicalMessage;
-  e.cause = err.cause;
+  // 仅在存在时赋值：无条件赋值会产生可枚举的 cause: undefined，
+  // JSON.stringify 时可能抛循环引用错误或泄漏技术细节，且 'cause' in e 误报
+  if (err.cause !== undefined) e.cause = err.cause;
   return e;
 }

@@ -2,10 +2,18 @@ import { createRequire } from 'node:module';
 
 // 版本号读取自 package.json，避免 CLI 报告的版本与发布版本漂移。
 // （rootDir 限制下不能直接 import JSON，改用运行时 require。）
+// 加载期做形状校验并快速失败：若 dist 布局变化导致解析失败会抛 MODULE_NOT_FOUND，
+// 若发布/打包工具改写 manifest 导致 version 缺失，则在此处给出可定位的错误，
+// 而不是把 undefined 一路导出成 CORE_VERSION（正是本常量要防的版本漂移）。
 const pkg = createRequire(import.meta.url)('../package.json') as {
-  version: string;
+  version?: unknown;
 };
-export const CORE_VERSION = pkg.version;
+if (typeof pkg?.version !== 'string' || pkg.version.length === 0) {
+  throw new Error(
+    "@inkmigrate/core: package.json is missing a valid 'version' field (check dist output layout)",
+  );
+}
+export const CORE_VERSION: string = pkg.version;
 
 // domain
 export * from './domain/models.js';
@@ -21,6 +29,7 @@ export * from './adapters/registry.js';
 export {
   isAdapterApiCompatible,
   SUPPORTED_ADAPTER_API_RANGE,
+  InvalidAdapterApiVersionError,
 } from './adapters/api-version.js';
 
 // storage

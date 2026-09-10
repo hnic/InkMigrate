@@ -87,29 +87,45 @@ function assertStableKey(stableKey: string, caller: string): void {
   }
 }
 
+/** deriveItemKey / deriveStableShortId 共用的前缀截取前置校验（不变量只写一份）。 */
+function validatePrefixLength(
+  stableKey: string,
+  len: number,
+  caller: string,
+): void {
+  assertStableKey(stableKey, caller);
+  if (!Number.isInteger(len) || len <= 0 || len > stableKey.length) {
+    throw new Error(`${caller}: invalid prefix length ${len}`);
+  }
+}
+
 /** §4 Item Key：用于附件目录、诊断目录；默认 `im-` + Stable Key 前 16 位。 */
 export function deriveItemKey(stableKey: string, len = 16): string {
-  assertStableKey(stableKey, 'deriveItemKey');
-  if (!Number.isInteger(len) || len <= 0 || len > stableKey.length) {
-    throw new Error(`deriveItemKey: invalid prefix length ${len}`);
-  }
+  validatePrefixLength(stableKey, len, 'deriveItemKey');
   return `im-${stableKey.slice(0, len)}`;
 }
 
 /** §4 Stable Short ID：用于笔记文件名后缀；默认 Stable Key 前 10 位。 */
 export function deriveStableShortId(stableKey: string, len = 10): string {
-  assertStableKey(stableKey, 'deriveStableShortId');
-  if (!Number.isInteger(len) || len <= 0 || len > stableKey.length) {
-    throw new Error(`deriveStableShortId: invalid prefix length ${len}`);
-  }
+  validatePrefixLength(stableKey, len, 'deriveStableShortId');
   return stableKey.slice(0, len);
 }
 
-/** §4 `inkmigrate_id` = `im:<sourceInstanceId>:<stableKey>`，Vault 内唯一。 */
+/**
+ * §4 `inkmigrate_id` = `im:<sourceInstanceId>:<stableKey>`，Vault 内唯一。
+ * 输入校验对齐本模块其余身份派生函数：ID 会写入 frontmatter 持久化且事后
+ * 难以修正，空/NUL 实例 ID 或畸形 stableKey 应在此报错而非烘焙进 ID。
+ */
 export function buildInkmigrateId(
   sourceInstanceId: string,
   stableKey: string,
 ): string {
+  if (sourceInstanceId === '' || sourceInstanceId.includes(SEP)) {
+    throw new Error(
+      'buildInkmigrateId: sourceInstanceId must be non-empty and must not contain NUL (\\0)',
+    );
+  }
+  assertStableKey(stableKey, 'buildInkmigrateId');
   return `im:${sourceInstanceId}:${stableKey}`;
 }
 
@@ -149,6 +165,15 @@ export function pickNonCollidingLength(
 ): number {
   if (ladder.length === 0) {
     throw new Error('pickNonCollidingLength: ladder must not be empty');
+  }
+  // 校验阶梯值为正整数：0/负数会让 slice(0, n) 静默回绕，小数会被截断，
+  // 稀疏数组的 undefined 则直接返回完整键——与 derive* 的前缀长度校验同口径
+  for (const len of ladder) {
+    if (!Number.isInteger(len) || len <= 0) {
+      throw new Error(
+        `pickNonCollidingLength: ladder entries must be positive integers, got [${ladder.join(', ')}]`,
+      );
+    }
   }
   // 校验升序
   for (let i = 1; i < ladder.length; i++) {

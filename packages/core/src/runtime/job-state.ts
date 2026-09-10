@@ -22,7 +22,14 @@ export function isAllowedPauseReason(
 
 export function isTerminalStatus(status: JobStatus): boolean {
   // 终态 = 转换矩阵无出边，从 JOB_TRANSITIONS 派生而非硬编码状态名。
-  return JOB_TRANSITIONS[status].size === 0;
+  // 与 canJobTransition 同口径：运行期越界 status（如存储读出的脏值、
+  // JSON 未检查的断言转换）返回 false 而非抛 TypeError——本函数经 index.ts
+  // 对外导出，调用方可能喂入脏数据。用自身属性检查而非 ?.：'__proto__' 等
+  // 原型链键经 ?. 会取到非空对象（其 .size 为 undefined，虽不抛但口径不一）。
+  const row = Object.prototype.hasOwnProperty.call(JOB_TRANSITIONS, status)
+    ? JOB_TRANSITIONS[status]
+    : undefined;
+  return row !== undefined && row.size === 0;
 }
 
 /** §11.1 resume 只能从 paused 或 interrupted 恢复。 */

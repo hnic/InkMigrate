@@ -2,7 +2,8 @@ import type { ItemFinalState, ItemRecoverableState, FinalStateCounts } from '../
 import {
   aggregateFailedCount,
   isItemFinalState,
-  ITEM_RECOVERABLE_STATES,
+  isItemRecoverableState,
+  COMPLETION_EQUATION_TERMS,
 } from '../domain/states.js';
 
 /** §11.9 从条目终态列表派生明细计数。可恢复态（interrupted/retryable_failed）不计入。 */

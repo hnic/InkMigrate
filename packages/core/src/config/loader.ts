@@ -53,21 +53,17 @@ export function loadConfigFromString(raw: string): InkMigrateConfig {
       sources?: unknown;
       targets?: unknown;
     };
-    if (Array.isArray(p.sources)) {
+    // sources/targets 的重复 ID 检查结构完全同构，收敛为一个助手避免两份副本漂移
+    const duplicateIdErrors = (key: 'sources' | 'targets'): string[] => {
+      const list = p[key];
+      if (!Array.isArray(list)) return [];
       // 元素可能是 null（如 `- ` 空列表项），用 ?. 保证 Zod 的错误仍能聚合上报
-      for (const dup of findDuplicates(
-        (p.sources as Array<{ id?: unknown } | null | undefined>).map((s) => s?.id),
-      )) {
-        errors.push(`sources: duplicate id "${dup}"`);
-      }
-    }
-    if (Array.isArray(p.targets)) {
-      for (const dup of findDuplicates(
-        (p.targets as Array<{ id?: unknown } | null | undefined>).map((t) => t?.id),
-      )) {
-        errors.push(`targets: duplicate id "${dup}"`);
-      }
-    }
+      const ids = (list as Array<{ id?: unknown } | null | undefined>).map(
+        (item) => item?.id,
+      );
+      return findDuplicates(ids).map((dup) => `${key}: duplicate id "${dup}"`);
+    };
+    errors.push(...duplicateIdErrors('sources'), ...duplicateIdErrors('targets'));
   }
   if (errors.length > 0) {
     throw new ConfigValidationError('config validation failed', errors);
@@ -87,6 +83,9 @@ function findDuplicates(ids: unknown[]): string[] {
   const seen = new Set<string>();
   const duplicates = new Set<string>();
   for (const id of ids) {
+    // 非字符串 id 在此处静默跳过是安全的，依赖 ConfigSchema 的 `id: z.string()`
+    // （无 coerce/transform）已把此类配置拒之门外；若 schema 改为 coerce/transform，
+    // 此处需同步调整，否则 `id: 1` 与 `id: "1"` 会绕过查重。
     if (typeof id !== 'string') continue;
     if (seen.has(id)) duplicates.add(id);
     else seen.add(id);

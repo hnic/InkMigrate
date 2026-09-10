@@ -1,14 +1,6 @@
-export type SourceContentKind =
-  | 'article'
-  | 'short-post'
-  | 'gallery'
-  | 'question-answer'
-  | 'video'
-  | 'note'
-  | 'external-link'
-  | 'unknown';
-
-export const SOURCE_CONTENT_KINDS: readonly SourceContentKind[] = [
+// 词表用 `as const` 声明、类型从数组派生（与 SOURCE_DEGRADATION_STAGES 同一模式）：
+// 手工并列维护的联合类型与运行时数组必然漂移，派生后新增成员只改一处。
+export const SOURCE_CONTENT_KINDS = [
   'article',
   'short-post',
   'gallery',
@@ -17,7 +9,8 @@ export const SOURCE_CONTENT_KINDS: readonly SourceContentKind[] = [
   'note',
   'external-link',
   'unknown',
-];
+] as const;
+export type SourceContentKind = (typeof SOURCE_CONTENT_KINDS)[number];
 
 export type SourceItemQuality = 'full' | 'degraded';
 
@@ -30,17 +23,7 @@ export const SOURCE_DEGRADATION_STAGES = [
 ] as const;
 export type SourceDegradationStage = (typeof SOURCE_DEGRADATION_STAGES)[number];
 
-export type SourceDegradationCode =
-  | 'content-unavailable'
-  | 'body-missing'
-  | 'partial-visibility'
-  | 'metadata-only'
-  | 'unsupported-structure'
-  | 'asset-incomplete'
-  | 'unresolved-embedded-content'
-  | 'unknown';
-
-export const SOURCE_DEGRADATION_CODES: readonly SourceDegradationCode[] = [
+export const SOURCE_DEGRADATION_CODES = [
   'content-unavailable',
   'body-missing',
   'partial-visibility',
@@ -49,7 +32,9 @@ export const SOURCE_DEGRADATION_CODES: readonly SourceDegradationCode[] = [
   'asset-incomplete',
   'unresolved-embedded-content',
   'unknown',
-];
+] as const;
+export type SourceDegradationCode =
+  (typeof SOURCE_DEGRADATION_CODES)[number];
 
 export interface SourceDegradation {
   code: SourceDegradationCode;
@@ -119,11 +104,16 @@ export interface SourceItem {
   sourceMetadata: Record<string, unknown>;
 }
 
+/** 词表守卫的通用构造器（与 domain/states.ts 的 makeStringGuard 同一模式）。 */
+function isOneOf<T extends readonly string[]>(
+  values: T,
+  v: unknown,
+): v is T[number] {
+  return typeof v === 'string' && (values as readonly string[]).includes(v);
+}
+
 export function isSourceContentKind(v: unknown): v is SourceContentKind {
-  return (
-    typeof v === 'string' &&
-    (SOURCE_CONTENT_KINDS as readonly string[]).includes(v)
-  );
+  return isOneOf(SOURCE_CONTENT_KINDS, v);
 }
 
 export function isSourceItemQuality(v: unknown): v is SourceItemQuality {
@@ -133,19 +123,13 @@ export function isSourceItemQuality(v: unknown): v is SourceItemQuality {
 export function isSourceDegradationCode(
   v: unknown,
 ): v is SourceDegradationCode {
-  return (
-    typeof v === 'string' &&
-    (SOURCE_DEGRADATION_CODES as readonly string[]).includes(v)
-  );
+  return isOneOf(SOURCE_DEGRADATION_CODES, v);
 }
 
 export function isSourceDegradationStage(
   v: unknown,
 ): v is SourceDegradationStage {
-  return (
-    typeof v === 'string' &&
-    (SOURCE_DEGRADATION_STAGES as readonly string[]).includes(v)
-  );
+  return isOneOf(SOURCE_DEGRADATION_STAGES, v);
 }
 
 /**
@@ -154,6 +138,13 @@ export function isSourceDegradationStage(
  * 该规则由来源适配器自行约束。
  */
 export function validateSourceDegradation(d: SourceDegradation, index: number): void {
+  // 持久化前的防御门可能接到松类型/解析来的数据：null/undefined 数组元素
+  // 先给出可读的校验错误，而不是裸 TypeError 掩盖真正的数据问题
+  if (d === null || typeof d !== 'object') {
+    throw new Error(
+      `degradations[${index}] must be a non-null object, got: ${String(d)}`,
+    );
+  }
   if (!isSourceDegradationCode(d.code)) {
     throw new Error(
       `degradations[${index}].code is not a valid SourceDegradationCode: ${String(d.code)}`,

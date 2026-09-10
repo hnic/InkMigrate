@@ -13,7 +13,11 @@ export interface SourceCapabilities {
   supportsInternalLinks: boolean;
   supportsSourceCleanup: boolean;
   cleanupActions: readonly string[];
-  /** 规范形式：不带点的小写扩展名（如 `'enex'`、`'html'`），不是 MIME 类型。 */
+  /**
+   * 规范形式：不带点的小写扩展名（如 `'enex'`、`'html'`），不是 MIME 类型。
+   * 文件型来源（file-stream/directory）必须至少声明一种；remote-list 来源
+   * （无文件输入）合法为空，故不强制非空。
+   */
   supportedInputFormats: readonly string[];
 }
 
@@ -27,6 +31,9 @@ export type LinkStyle = 'wikilink' | 'markdown';
  */
 export interface TargetCapabilities {
   supportsIndexes: boolean;
-  /** 至少包含一种风格；空数组无法满足 §13.7 的链接风格协商。 */
-  linkStyles: readonly LinkStyle[];
+  /**
+   * 至少包含一种风格；空数组无法满足 §13.7 的链接风格协商——用非空元组
+   * 类型在编译期强制该约束，而非仅靠注释。
+   */
+  linkStyles: readonly [LinkStyle, ...LinkStyle[]];
 }

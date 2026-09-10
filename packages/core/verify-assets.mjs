@@ -1,16 +1,21 @@
 import Database from "better-sqlite3";
+import os from "node:os";
+import path from "node:path";
+// 直接引用各包 dist 产物：运行前确保已构建最新代码，否则验证的是过期编译结果
+// （pnpm --filter source-toutiao --filter target-obsidian build）。
 import { createToutiaoSource } from "../source-toutiao/dist/adapters/adapter.js";
 import { createObsidianTarget } from "../target-obsidian/dist/adapter.js";
 import { profilePath } from "../source-toutiao/dist/auth/profile.js";
 
-// 路径与样本可经环境变量覆盖，脚本本身不绑定某一台机器。
-const stateDir = process.env.INKMIGRATE_STATE_DIR ?? "/Users/hnic/.inkmigrate";
-const vaultPath = process.env.INKMIGRATE_VAULT ?? "/Users/hnic/Documents/Obsidian";
+// 路径与样本可经环境变量覆盖，脚本本身不绑定某一台机器（默认值从当前用户主目录推导）。
+const stateDir = process.env.INKMIGRATE_STATE_DIR ?? path.join(os.homedir(), ".inkmigrate");
+const vaultPath = process.env.INKMIGRATE_VAULT ?? path.join(os.homedir(), "Documents", "Obsidian");
 const dbPath = process.env.INKMIGRATE_DB_PATH ?? `${stateDir}/inkmigrate.sqlite`;
 const sampleIds = (process.env.VERIFY_SAMPLE_IDS ?? "1154,2993,3578")
   .split(",")
   .map((s) => Number(s.trim()))
-  .filter(Number.isInteger);
+  // 过滤正整数：Number("") === 0 会让尾随逗号把 id=0 混进 IN 查询
+  .filter((n) => Number.isInteger(n) && n > 0);
 if (sampleIds.length === 0) {
   throw new Error(`VERIFY_SAMPLE_IDS 未解析出有效 id: ${process.env.VERIFY_SAMPLE_IDS}`);
 }
@@ -18,10 +23,17 @@ const SOURCE_ID = "toutiao-main";
 
 const db = new Database(dbPath);
 const rows = db.prepare(
-  `SELECT id, canonical_url, original_url, title, content_kind, fingerprint, source_metadata_json
+  `SELECT id, canonical_url, original_url, title, content_kind, fingerprint, discovered_at, source_metadata_json
    FROM source_items WHERE id IN (${sampleIds.map(() => "?").join(",")})`,
 ).all(...sampleIds);
 console.log("待验证样本:", rows.length, "条");
+// 样本覆盖检查：选错 DB / 状态目录陈旧 / id 已删除时，IN 查询会静默少返回行，
+// 少干活仍然退出码 0，"通过"就不再证明样本被验证过——直接失败。
+const foundIds = new Set(rows.map((r) => r.id));
+const missing = sampleIds.filter((id) => !foundIds.has(id));
+if (missing.length > 0) {
+  throw new Error(`以下样本 id 不存在于 source_items: ${missing.join(",")}`);
+}
 
 const source = createToutiaoSource({
   sourceInstanceId: SOURCE_ID,
@@ -44,11 +56,15 @@ const targetCtx = {
   },
 };
 
-function safeParseJson(s) {
+// 解析失败计入失败总数：本脚本的目的就是暴露数据/管线问题，
+// 静默降级为 {} 会把 DB 里的元数据损坏伪装成"无元数据"。
+function safeParseJson(s, id) {
   if (typeof s !== "string") return {};
   try {
     return JSON.parse(s);
-  } catch {
+  } catch (e) {
+    failures++;
+    console.log(`id=${id} source_metadata_json 解析失败: ${e?.message ?? e}`);
     return {};
   }
 }
@@ -67,9 +83,10 @@ try {
         originalUrl: r.original_url ?? r.canonical_url,
         title: r.title,
         contentKind: r.content_kind,
-        discoveredAt: new Date().toISOString(),
+        // 用 DB 里持久化的真实发现时间，保证验证跑的 ref 与原始迁移一致
+        discoveredAt: r.discovered_at ?? new Date().toISOString(),
         fingerprint: r.fingerprint,
-        sourceMetadata: safeParseJson(r.source_metadata_json),
+        sourceMetadata: safeParseJson(r.source_metadata_json, r.id),
       };
       const item = await source.extract(ref, { config: {}, workspaceDir: stateDir });
       const withData = item.assets.filter((a) => a.data).length;
@@ -84,6 +101,12 @@ try {
       const hasRemote = plan.renderedContent.includes("toutiaoimg") || plan.renderedContent.includes("p3-sign") || plan.renderedContent.includes("p11-sign");
       console.log("  正文含 ![[Attachments 本地嵌入: " + hasEmbed);
       console.log("  正文仍含远程图片URL: " + hasRemote);
+      // 断言而非仅打印：有资产的条目若正文缺本地嵌入或仍含远程 URL，
+      // 说明本地化失败，计入失败（否则脚本白跑也退出码 0）。
+      if (item.assets.length > 0 && (!hasEmbed || hasRemote)) {
+        failures++;
+        console.log("  断言失败: 本地嵌入=" + hasEmbed + ", 遗留远程URL=" + hasRemote);
+      }
 
       if (process.env.VERIFY_ALLOW_WRITE !== "1") {
         console.log("  跳过写入（dry-run）。设置 VERIFY_ALLOW_WRITE=1 以启用真实写入。");

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   AdapterRegistry,
   IncompatibleAdapterApiError,
+  InvalidAdapterApiVersionError,
   isAdapterApiCompatible,
   SUPPORTED_ADAPTER_API_RANGE,
 } from './index.js';
@@ -70,6 +71,17 @@ describe('api-version (§8.6)', () => {
   it('rejects prereleases outside compatibility window', () => {
     // 1.0.0-beta is prerelease; with includePrerelease:false it does not satisfy
     expect(isAdapterApiCompatible('1.0.0-beta')).toBe(false);
+  });
+  it('throws InvalidAdapterApiVersionError on malformed version strings（声明笔误 ≠ 不兼容）', () => {
+    // 固化"格式非法抛专用错误"分支：防止未来改用 semver.coerce/宽松模式
+    // 把 '1.2' 这类畸形串静默判成 false（误诊为版本不兼容）。
+    // 注：semver 7 的 valid() 会把 'v1.0.0' 规范化为 1.0.0，属合法输入
+    expect(() => isAdapterApiCompatible('1.2')).toThrow(
+      InvalidAdapterApiVersionError,
+    );
+    expect(() => isAdapterApiCompatible('not-a-version')).toThrow(
+      /invalid adapter api version/,
+    );
   });
 });
 
