@@ -152,9 +152,11 @@ export function generateMigrationReport(i: ReportInput): void {
   );
 
   // §15.10 未解析内部链接（Evernote 等来源保留原链接时的对账明细）
-  if (i.unresolvedLinks !== undefined && i.unresolvedLinks.length > 0) {
+  // 局部常量承接窄化：回调闭包内对参数属性的 !== undefined 判定不会延续
+  const unresolved = i.unresolvedLinks;
+  if (unresolved !== undefined && unresolved.length > 0) {
     writeArtifact('unresolved-links.csv', () =>
-      writeCsv(join(jobDir, 'unresolved-links.csv'), i.unresolvedLinks),
+      writeCsv(join(jobDir, 'unresolved-links.csv'), unresolved),
     );
   }
 }

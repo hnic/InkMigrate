@@ -607,7 +607,7 @@ function parseConfig(ctx: TargetContext): ObsidianTargetConfig {
 /** §13.9 decision.action → actionCode：审计关注的两个动作（forced_overwrite /
  * write_new_variant）同名透传，其余（write_canonical / update_metadata_only）为
  * staging 阶段常规写入，统一落 stage_attempt。 */
-function actionCodeFor(action: OverwriteAction): string {
+function actionCodeFor(action: OverwriteAction): ObsidianWriteResult['actionCode'] {
   switch (action) {
     case 'forced_overwrite':
     case 'write_new_variant':

@@ -81,7 +81,11 @@ function loadConfigFile(
 /** 读取 yaml 中命中的 evernote 来源；未命中返回 undefined（调用方回退 toutiao）。 */
 export function resolveEvernoteSource(o: EvernoteSourceOptions): SourceWiring | undefined {
   const configPath = resolve(o.config);
-  const cfg = loadConfigFile(configPath, { explicit: o.explicitConfig });
+  // exactOptionalPropertyTypes：显式 undefined 不能传给可选属性
+  const cfg = loadConfigFile(
+    configPath,
+    o.explicitConfig === undefined ? undefined : { explicit: o.explicitConfig },
+  );
   if (cfg === undefined) return undefined;
   const src = cfg.sources.find((s) => s.id === o.sourceId);
   // 仅真正未声明该 id 时回退 toutiao 浏览器流程；命中即校验 enabled

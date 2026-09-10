@@ -12,6 +12,8 @@ export interface EligibilityInput {
   noteNonZero: boolean;
   yamlParseable: boolean;
   hasSourceIdOrUrl: boolean;
+  /** 数据库记录与目标文件当前状态一致（§14.4 完整性前提，正向命名）。 */
+  dbTargetConsistent: boolean;
   // 双否定命名沿用 §14.4 检查清单的原文表述（"无未解决冲突 / 不在过渡态 /
   // 未确认取消收藏"），该 API 形态已被测试固化；调用方须直接传检查结论。
   noUnresolvedConflict: boolean;

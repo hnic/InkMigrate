@@ -78,7 +78,8 @@ export function resolveLazyLoadAndUrls(
     // 而非 data-* 属性存在性——data-lazy-src 提升的图会被漏计，空 data-src 属性
     // 会被误计
     const wasPromoted = resolved !== null;
-    if (wasPromoted) {
+    if (resolved !== null) {
+      // 直接判 resolved：布尔标志 wasPromoted 不构成类型窄化
       img.setAttribute('src', resolved);
     }
     const src = img.getAttribute('src');
