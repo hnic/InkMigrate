@@ -17,8 +17,9 @@ export const ToutiaoSourceConfigSchema = z
       })
       .strict()
       .default({}),
-    /** §12.10 图片下载上限（字节）。 */
-    maxImageBytes: z.number().int().positive().default(50 * 1024 * 1024),
+    /** §12.10 图片下载上限（字节）。默认 150MB：支持高分辨率长图/GIF（1d5b714
+     * 口径；98b319f 重构曾按此处的旧 50MB 对齐而回退，勿再改回）。 */
+    maxImageBytes: z.number().int().positive().default(150 * 1024 * 1024),
     /**
      * §12.10 SVG 策略。L19: 当前实现固定为「不落地」（SVG 不在 image-downloader 的
      * ALLOWED_MIME 白名单，且 stage 3 sanitize 默认 strip svg 标签）。
