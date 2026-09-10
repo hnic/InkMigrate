@@ -183,8 +183,8 @@ function ToutiaoScan({ settings, update, rpcCall, addLog, activePhase, cancel }:
       <ConfigPrompt
         settings={settings}
         update={update}
-        required={['stateDir']}
-        message="⚠️ 请先填写工作区目录，并确保已登录"
+        required={['stateDir', 'favoritesUrl']}
+        message="⚠️ 请先填写工作区目录和收藏列表 URL，并确保已登录"
       />
 
       <div style={{ padding: '16px', background: 'var(--bg-panel)', borderRadius: '8px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
@@ -201,12 +201,7 @@ function ToutiaoScan({ settings, update, rpcCall, addLog, activePhase, cancel }:
           </button>
         </div>
 
-        {/* favoritesUrl 缺失时给出可读提示，避免按钮灰着却无解释 */}
-        {settings.stateDir && !settings.favoritesUrl && (
-          <div style={{ fontSize: '13px', color: 'var(--warning)' }}>
-            ⚠️ 请先在「设置」页填写收藏列表 URL（登录成功后通常会自动获取）
-          </div>
-        )}
+        {/* favoritesUrl 缺失时 ConfigPrompt 已内联展示填写框，不再另挂死文字提示 */}
 
         {settings.stateDir && settings.favoritesUrl && !settings.loggedIn && (
           <div style={{

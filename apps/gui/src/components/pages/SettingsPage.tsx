@@ -58,6 +58,24 @@ export function SettingsPage({ settings, update }: Props) {
           </div>
         </div>
 
+        {/* 收藏列表 URL 是 toutiao 源的必需配置；evernote 走 configPath，不需要它 */}
+        {settings.sourceAdapter === 'toutiao' && (
+          <div>
+            <label htmlFor="settings-favoritesUrl" style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>收藏列表 URL</label>
+            <textarea
+              id="settings-favoritesUrl"
+              value={settings.favoritesUrl ?? ''}
+              onChange={(e) => update({ favoritesUrl: e.target.value })}
+              placeholder="https://www.toutiao.com/c/user/token/...?tab=fav"
+              rows={2}
+              style={{ fontFamily: 'monospace', fontSize: '12px', resize: 'vertical' }}
+            />
+            <div style={{ fontSize: '12px', color: 'var(--text-dim)', marginTop: '4px' }}>
+              登录成功后通常会自动获取；若没有，登录后在浏览器打开你的收藏页，复制地址栏 URL 到这里
+            </div>
+          </div>
+        )}
+
         {settings.sourceAdapter === 'evernote' && (
           <div>
             <label htmlFor="settings-configPath" style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>配置文件 (inkmigrate.yaml)</label>

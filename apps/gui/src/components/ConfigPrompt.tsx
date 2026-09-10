@@ -15,7 +15,7 @@ interface Props {
 const FIELD_LABELS: Record<ConfigField, string> = {
   stateDir: '工作区目录 (stateDir)',
   vaultPath: 'Obsidian Vault 路径',
-  favoritesUrl: '收藏页 URL',
+  favoritesUrl: '收藏列表 URL',
 };
 
 const FIELD_PLACEHOLDERS: Record<ConfigField, string> = {

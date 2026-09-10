@@ -34,7 +34,7 @@ export default function App() {
         gap: '12px',
         borderBottom: '1px solid var(--border)',
       }}>
-        <span style={{ fontSize: '18px' }}>🔄</span>
+        <img src="/logo.png" alt="InkMigrate 墨迁" style={{ width: '20px', height: '20px', borderRadius: '4px' }} />
         <span style={{ fontWeight: 700, fontSize: '16px' }}>InkMigrate 墨迁</span>
         <span style={{ flex: 1 }} />
         {/* evernote 文件源无登录流程，不显示登录指示（否则永远误显示「未登录」） */}

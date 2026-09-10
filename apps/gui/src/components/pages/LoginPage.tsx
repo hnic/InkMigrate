@@ -50,10 +50,13 @@ export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin, pro
       }
       addLog(ok ? 'info' : 'error', `登录结果：${result.state}`);
       if (ok) {
-        // 登录成功后自动填充收藏页 URL
+        // 登录成功后自动填充收藏列表 URL；提取是尽力而为（DOM 选择器可能因
+        // 头条改版失配），失败必须显式告知去向，否则用户面对灰按钮无从下手
         if (result.favoritesUrl) {
           update({ favoritesUrl: result.favoritesUrl });
-          addLog('info', `已自动获取收藏页 URL`);
+          addLog('info', `已自动获取收藏列表 URL`);
+        } else {
+          addLog('warn', '未能自动获取收藏列表 URL，请在「扫描」页或「设置」页手动填写');
         }
         try {
           await refreshLogin();
@@ -144,7 +147,7 @@ export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin, pro
               </div>
             </div>
             <div style={{ fontSize: '12px', color: 'var(--text-dim)' }}>
-              💡 收藏页 URL 会在登录成功后自动获取，无需手动填写。
+              💡 登录成功后通常会自动获取收藏列表 URL；若未获取到，可稍后在「扫描」或「设置」页手动填写。
             </div>
           </div>
         </div>
