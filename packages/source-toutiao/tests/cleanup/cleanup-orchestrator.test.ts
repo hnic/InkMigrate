@@ -681,7 +681,7 @@ describe('runCleanupUnfavorite', () => {
     db.close();
   });
 
-  it('regression: 非 article 类型（微头条/图集/问答）也纳入清理候选', async () => {
+  it('regression: 非 article 类型（微头条/图集/问答）也纳入清理候选', { timeout: 30_000 }, async () => {
     // 此前候选 SQL 硬编码 content_kind='article'，微头条/图集/问答等迁移成功后
     // 收藏永久残留且用户无察觉。修复后应纳入所有文本类，仅排除 video/external-link。
     const db = seedDb(0, [

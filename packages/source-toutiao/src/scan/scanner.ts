@@ -104,7 +104,14 @@ export async function scanFavoritesList(i: ScanInput): Promise<ScanResult> {
       emptyCycles = 0;
     }
     scrollIterations++;
-    currentHtml = await i.scrollForMore();
+    try {
+      currentHtml = await i.scrollForMore();
+    } catch (err) {
+      // 浏览器层瞬时故障（导航/CDP 超时）：返回已累积的部分结果并给出可诊断
+      // 终止原因，而不是整体抛错丢弃数百条已扫描收藏
+      terminationReason = `scroll_error:${(err as Error)?.message ?? 'unknown'}`;
+      break;
+    }
   }
 
   return {
@@ -129,17 +136,18 @@ function parseItemsFromHtml(html: string, baseUrl: string): FavoriteItem[] {
   // 取第一个非空选择器会漏掉其它类型（与 scan-driver extractItemsHtml 同理）
   const itemEls = queryAll(doc, FAVORITES_SELECTORS.item);
   for (const el of itemEls) {
-    const externalId =
-      el.getAttribute(FAVORITES_SELECTORS.itemId[0]!) ?? undefined;
+    // 非空守卫：选择器数组被清空/重构时，getAttribute(undefined) 会把属性名
+    // 强转成字面 "undefined" 静默返回 null，去重行为无声改变
+    const itemIdAttr = FAVORITES_SELECTORS.itemId[0];
+    const externalId = itemIdAttr !== undefined
+      ? el.getAttribute(itemIdAttr) ?? undefined
+      : undefined;
     const titleEls = queryFirst(el as Element, [...FAVORITES_SELECTORS.title]);
     let titleEl = titleEls[0];
     // 视频条目的内容链接在 .feed-card-cover > a，无 .title class，title 选择器组命中不到。
     // 兜底：直接找条目内的内容链接（与 scan-driver extractItemsHtml 同口径）。
     if (titleEl === undefined) {
-      titleEl =
-        (el as Element).querySelector(
-          'a[href*="/article/"], a[href*="/a/"], a[href*="/video/"], a[href*="/wenda/"], a[href*="/group/"], a[href*="/w/"]',
-        ) ?? undefined;
+      titleEl = (el as Element).querySelector(FAVORITES_SELECTORS.contentLink) ?? undefined;
     }
     // 标题：优先文本节点；视频条目标题在 a 的 title 属性里（非文本节点）
     const title =
@@ -147,6 +155,11 @@ function parseItemsFromHtml(html: string, baseUrl: string): FavoriteItem[] {
       titleEl?.getAttribute('title')?.trim() ||
       '';
     const href = titleEl?.getAttribute('href') ?? '';
+    if (!href) {
+      // 无内容链接的条目解析不出真实 URL：跳过而不是把列表页当内容页
+      // （否则 originalUrl=列表页 → contentKind 误判 + 去重键全撞同一条）
+      continue;
+    }
     const originalUrl = resolveUrl(href, baseUrl);
     const canonicalUrl = canonicalizeToutiaoUrl(originalUrl);
     const author = textOfFirst(el as Element, FAVORITES_SELECTORS.author);
@@ -157,11 +170,15 @@ function parseItemsFromHtml(html: string, baseUrl: string): FavoriteItem[] {
     const contentType = textOfFirst(el as Element, FAVORITES_SELECTORS.contentType);
     const timeEls = queryFirst(el as Element, FAVORITES_SELECTORS.publishedTime);
     const timeEl = timeEls[0];
+    // 空串与空白归一为 undefined：'' 会通过后续 !== undefined 守卫落库，
+    // 污染 R4-M4 月份分片（"未知日期"之外再添一个空日期桶）
     const publishedAt =
-      timeEl?.getAttribute('datetime') ?? timeEl?.textContent?.trim() ?? undefined;
+      timeEl?.getAttribute('datetime')?.trim() || timeEl?.textContent?.trim() || undefined;
     const collection = textOfFirst(el as Element, FAVORITES_SELECTORS.collectionName);
 
-    const finalExternalId = externalId ?? extractToutiaoContentId(canonicalUrl);
+    // URL 派生的内容 ID 跨轮次/跨 DOM 形态稳定；data-item-id 仅在 URL 提取不到
+    // 时兜底——同一内容因"有无 DOM 属性"在两轮里生成不同去重键会被重复计数
+    const finalExternalId = extractToutiaoContentId(canonicalUrl) ?? externalId;
     const kindInput: { url: string; hint?: string } = { url: canonicalUrl };
     if (contentType !== undefined) kindInput.hint = contentType;
     const item: FavoriteItem = {

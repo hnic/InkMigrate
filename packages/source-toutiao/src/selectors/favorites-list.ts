@@ -65,6 +65,11 @@ export const FAVORITES_SELECTORS = {
   contentType: ['.content-type'],
   publishedTime: ['time[datetime]', 'time', '.feed-card-time'],
   collectionName: ['.collection-name'],
+  // 内容链接兜底：条目内任意内容路径锚点。与 normalize/url.ts 的
+  // extractToutiaoContentId 路径正则同口径维护——新增内容路径需两处同步，
+  // 否则 scanner 兜底抓不到新路径（条目被跳过）或抓到非内容链接。
+  contentLink:
+    'a[href*="/article/"], a[href*="/a/"], a[href*="/video/"], a[href*="/wenda/"], a[href*="/group/"], a[href*="/w/"]',
   // 加载更多
   loadMore: [
     '[data-testid="load-more-button"]',

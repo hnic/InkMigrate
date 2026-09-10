@@ -1,7 +1,10 @@
 declare module 'turndown-plugin-gfm' {
   import type TurndownService from 'turndown';
-  export function gfm(service: TurndownService): void;
-  export const tables: (service: TurndownService) => void;
-  export const strikethrough: (service: TurndownService) => void;
-  export const taskListItems: (service: TurndownService) => void;
+  /** turndown-plugin-gfm 插件：接收 TurndownService 实例并注册 GFM 规则。 */
+  type GfmPlugin = (service: TurndownService) => void;
+  export const gfm: GfmPlugin;
+  export const tables: GfmPlugin;
+  export const strikethrough: GfmPlugin;
+  export const taskListItems: GfmPlugin;
+  export const highlightedCodeBlock: GfmPlugin;
 }
