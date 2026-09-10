@@ -113,13 +113,15 @@ export class MigrationAttempts {
     return Number(result.lastInsertRowid);
   }
 
-  createJob(i: JobAttemptInput): void {
-    this.db
+  /** 与 createItem 对称返回新行 id，供调用方后续 finishAttempt 关闭该审计行。 */
+  createJob(i: JobAttemptInput): number {
+    const result = this.db
       .prepare(
         `INSERT INTO migration_attempts(migration_job_id,attempt_scope,source_item_id,stage,action_code,attempt_no,started_at,created_at)
          VALUES(@migrationJobId,'job',NULL,@stage,@actionCode,@attemptNo,@startedAt,@createdAt)`,
       )
       .run(i);
+    return Number(result.lastInsertRowid);
   }
 
   listByItem(migrationJobId: string, sourceItemId: number): AttemptRow[] {
@@ -135,6 +137,10 @@ export class MigrationAttempts {
   /**
    * R3-H1: 查询某 item 在某 job 下已有的最大 attempt_no（用于 resume 时递增）。
    * 返回 0 表示无历史尝试。
+   *
+   * 注意：next = max + 1 的计算在调用方，读与写之间无原子性。单进程同步调用下
+   * 无窗口；若未来允许多进程并发续跑同一 job，须由调用方处理 INSERT 撞
+   * uq_migration_attempts_item 唯一索引的 SqliteError（或将递增封装进本仓储）。
    */
   maxAttemptNo(migrationJobId: string, sourceItemId: number): number {
     const row = this.db
@@ -155,7 +161,9 @@ export class MigrationAttempts {
   }
 
   /** 关闭一条尝试：写入 success/finishedAt 与可选错误信息或覆盖哈希。
-   *  id 不存在（或已被级联删除）时抛错，避免审计行停留在未关闭状态而无任何信号。 */
+   *  仅可关闭一次（WHERE finished_at IS NULL）：重复关闭抛错，保持审计行关闭后
+   *  append-only。id 不存在（或已被级联删除）时同样抛错，避免审计行停留在
+   *  未关闭状态而无任何信号。 */
   finishAttempt(id: number, f: FinishAttemptInput): void {
     const result = this.db
       .prepare(
@@ -169,7 +177,7 @@ export class MigrationAttempts {
              result_written_file_hash=COALESCE(@resultWrittenFileHash, result_written_file_hash),
              http_status=COALESCE(@httpStatus, http_status),
              diagnostic_path=COALESCE(@diagnosticPath, diagnostic_path)
-         WHERE id=@id`,
+         WHERE id=@id AND finished_at IS NULL`,
       )
       .run({
         id,
@@ -184,7 +192,14 @@ export class MigrationAttempts {
         diagnosticPath: f.diagnosticPath ?? null,
       });
     if (result.changes === 0) {
-      throw new Error(`finishAttempt: migration_attempts id=${id} 不存在，尝试未被关闭`);
+      // 区分「不存在」与「已关闭」：前者是 id 错误，后者是重复关闭，均须显式暴露
+      const row = this.db
+        .prepare('SELECT finished_at FROM migration_attempts WHERE id=?')
+        .get(id) as { finished_at: string | null } | undefined;
+      if (row === undefined) {
+        throw new Error(`finishAttempt: migration_attempts id=${id} 不存在，尝试未被关闭`);
+      }
+      throw new Error(`finishAttempt: migration_attempts id=${id} 已关闭，拒绝重复关闭以保护审计链`);
     }
   }
 }

@@ -22,29 +22,34 @@ export interface SourceItemInput {
   updatedAt: string;
 }
 
+/** 可空列声明为 `| null` 而非可选属性：better-sqlite3 将 SQL NULL 映射为 JS null
+ *（绝非 undefined），类型与运行时一致可避免 `=== undefined` 形式的守卫静默失效。 */
 export interface SourceItemRow {
   id: number;
   sourceInstanceId: string;
-  externalId?: string;
+  externalId: string | null;
   fingerprint: string;
   stableKey: string;
   itemKey: string;
   stableShortId: string;
-  canonicalUrl?: string;
-  originalUrl?: string;
-  title?: string;
+  canonicalUrl: string | null;
+  originalUrl: string | null;
+  title: string | null;
   contentKind: string;
-  sourcePosition?: number;
+  sourcePosition: number | null;
   discoveredAt: string;
   status: string;
-  quality?: string;
+  quality: string | null;
   degradationsJson: string;
-  sourceContentHash?: string;
+  sourceContentHash: string | null;
   sourceMetadataJson: string;
 }
 
 export interface UpdateCommittedResultInput {
   status: string;
+  /** 可选字段传 undefined/null 表示保留库中原值（COALESCE 语义）——因此无法把
+   *  quality/source_content_hash 显式清回 NULL；degradations_json 非 NULL，清空
+   *  目标值为 '[]'，不受此限制。status 恒为无条件覆盖。 */
   quality?: string;
   degradationsJson?: string;
   sourceContentHash?: string;

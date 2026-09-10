@@ -1,4 +1,6 @@
 import Database from 'better-sqlite3';
+import { existsSync } from 'node:fs';
+import { isAbsolute } from 'node:path';
 import type { Database as DB, Options } from 'better-sqlite3';
 import {
   SCHEMA_VERSION,
@@ -30,6 +32,13 @@ export function openDatabase(opts: OpenDbOptions): DB {
   const bindingEnv = process.env.BETTER_SQLITE3_BINDING;
   const options = { ...opts.options };
   if (bindingEnv && options.nativeBinding === undefined) {
+    // 提前校验而非让 new Database 抛出难溯源的 native 模块加载失败（相对路径/
+    // 笔误路径都可能加载到错误的 .node 文件或直接报错，看不出是环境变量的问题）。
+    if (!isAbsolute(bindingEnv) || !existsSync(bindingEnv)) {
+      throw new Error(
+        `BETTER_SQLITE3_BINDING must be an absolute path to an existing .node file, got: ${bindingEnv}`,
+      );
+    }
     options.nativeBinding = bindingEnv;
   }
   const db = new Database(opts.path, options);
@@ -39,7 +48,15 @@ export function openDatabase(opts: OpenDbOptions): DB {
   // 迁移完成后重新开启 FK（migrate 内每个迁移各自在事务中保证原子性）。
   // 仅当 schema_version 表已存在且有未应用的迁移时才需要关 FK（全新库无需）。
   try {
-    db.pragma(`busy_timeout = ${opts.busyTimeoutMs ?? 5000}`);
+    // 数值校验：该值直接内插进 pragma 语句，非有限数字（JS 调用方/反序列化配置
+    // 可绕过 TS 类型）会产生费解的 SQLite 语法错误或注入任意 pragma 文本。
+    const busyMs = opts.busyTimeoutMs ?? 5000;
+    if (!Number.isFinite(busyMs) || busyMs < 0) {
+      throw new Error(
+        `openDatabase: busyTimeoutMs must be a non-negative finite number, got ${JSON.stringify(opts.busyTimeoutMs)}`,
+      );
+    }
+    db.pragma(`busy_timeout = ${busyMs}`);
     // WAL 需要写 DB 头：readonly 连接（非 WAL 库）会抛 SQLITE_READONLY，跳过。
     if (opts.wal !== false && opts.path !== ':memory:' && !options.readonly) {
       db.pragma('journal_mode = WAL');
@@ -63,6 +80,14 @@ export function openDatabase(opts: OpenDbOptions): DB {
       if (!tableExists(db, t)) {
         throw new Error(`数据库完整性检查失败：关键表 ${t} 不存在（数据库可能已损坏）`);
       }
+    }
+    // 引用完整性兜底：已是最新版本的库不执行任何迁移体（v2/v3 的 foreign_key_check
+    // 只在重建时跑），漂移/损坏库中的孤儿行在此暴露，而非带着 FK 违规静默运行。
+    const fkViolations = db.pragma('foreign_key_check') as unknown[];
+    if (fkViolations.length > 0) {
+      throw new Error(
+        `数据库完整性检查失败：foreign_key_check 发现 ${fkViolations.length} 处引用完整性违规（数据库可能已损坏）`,
+      );
     }
   } catch (e) {
     // M-1: 上面的 pragma / migrate / 完整性检查任一失败时关闭 DB，避免泄漏连接
@@ -103,6 +128,13 @@ const MIGRATIONS: ReadonlyArray<{ version: number; apply: (db: DB) => void }> = 
  * 每个迁移在独立事务中执行；失败时事务回滚，schema_version 不递增，下次启动
  * 从断点续跑。better-sqlite3 是同步 API，事务回滚由 db.transaction 保证。
  *
+ * 每个迁移事务用 BEGIN IMMEDIATE（先取写锁再读版本）：CLI 与 Engine/GUI 是不同
+ * 进程、可能并发打开同一 SQLite 文件（见 instance-helpers 的并发说明）。若版本
+ * 读取在事务外，两进程会算出相同的 current 并各自应用同一迁移——幂等 CREATE 被
+ * ON CONFLICT 掩盖、非幂等步骤（如表重建）被静默双应用；WAL 下后写者还可能以
+ * SQLITE_BUSY_SNAPSHOT 失败（busy_timeout 不解决该错误）。IMMEDIATE 把版本读取
+ * 串行化在写锁之后，后取锁的一方会读到前者已提交的版本并跳过。
+ *
  * 前置条件：包含表重建（DROP+RENAME）的迁移要求连接 foreign_keys = OFF，
  * 否则重建会因子表引用失败。openDatabase 已处理；直接调用方需自行保证
  *（注意 PRAGMA foreign_keys 在事务内是 no-op，必须在事务外切换）。
@@ -126,25 +158,25 @@ export function migrate(db: DB): void {
     }
   }
 
-  const current = getCurrentSchemaVersion(db);
-  // 当前版本高于目标（降级场景）→ 拒绝，避免静默使用新库于旧代码。
-  if (current > SCHEMA_VERSION) {
+  // 降级预检（快速失败）；权威的版本判定在每个迁移事务内（见函数注释）。
+  const currentVersion = getCurrentSchemaVersion(db);
+  if (currentVersion > SCHEMA_VERSION) {
     throw new Error(
-      `migrate: database schema version ${current} is newer than supported ${SCHEMA_VERSION} (downgrade not supported)`,
+      `migrate: database schema version ${currentVersion} is newer than supported ${SCHEMA_VERSION} (downgrade not supported)`,
     );
   }
 
-  // 逐版本应用从 current+1 到 SCHEMA_VERSION 的迁移
+  // 逐版本应用；是否需要应用在事务内以最新提交的版本判定（并发安全的断点续跑）
   for (const m of MIGRATIONS) {
-    if (m.version <= current) continue;
     const txn = db.transaction(() => {
+      if (m.version <= getCurrentSchemaVersion(db)) return;
       m.apply(db);
       db.prepare(
         `INSERT INTO schema_version(version, applied_at) VALUES (?, ?)
          ON CONFLICT(version) DO NOTHING`,
       ).run(m.version, new Date().toISOString());
     });
-    txn();
+    txn.immediate();
   }
 }
 

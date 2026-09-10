@@ -1,14 +1,25 @@
 import type { DB } from '../database.js';
-import { isJobStatus, canJobTransition, type JobStatus } from '../../domain/states.js';
+import {
+  JOB_STATUS,
+  JOB_TRANSITIONS,
+  isJobStatus,
+  canJobTransition,
+  type JobStatus,
+} from '../../domain/states.js';
+
+/** 合法 status 词表文案：从 domain 单一真相源派生，增删状态时错误信息自动同步。 */
+const LEGAL_JOB_STATUS = JOB_STATUS.join('/');
 
 /**
  * §11.1 跨状态转换 + 自环（同 status 内推进 current_stage）。
  * M9: 矩阵改为引用 domain/states.ts 的单一真相源，消除本地副本漂移。
  */
 function canTransitionTo(from: JobStatus, to: JobStatus): boolean {
-  // 自环（to === from）总是允许：current_stage 在同一 status 内推进（如 running→running
-  // 从 scanning 到 extracting）不是状态转换，矩阵只约束跨状态转换。
-  if (to === from) return true;
+  // 自环（to === from）仅对非终态开放：running/paused 内推进 current_stage 不是
+  // 状态转换，矩阵只约束跨状态转换。completed/failed 在 JOB_TRANSITIONS 中无出边，
+  // 借「status 不变」改写终态 Job 的 current_stage/finished_at 同样必须拒绝
+  //（否则违反「终态的 Job 无法再被改写」不变量）。
+  if (to === from) return JOB_TRANSITIONS[from].size > 0;
   return canJobTransition(from, to);
 }
 
@@ -80,7 +91,7 @@ export class MigrationJobs {
     //（schema 的 CHECK 仅在 v2+ 存在，且拼写错误在此拦截更早）。
     if (!isJobStatus(i.status)) {
       throw new Error(
-        `非法 Job status 值："${i.status}"（id=${i.id}）；合法值：created/running/paused/interrupted/completed/failed`,
+        `非法 Job status 值："${i.status}"（id=${i.id}）；合法值：${LEGAL_JOB_STATUS}`,
       );
     }
     this.db
@@ -108,7 +119,8 @@ export class MigrationJobs {
       .get(id) as MigrationJobRow | undefined;
   }
 
-  /** §16.3 更新缓存计数列。未传入的字段不动。同时刷新 updated_at（与 CleanupJobs.updateCounts 一致）。 */
+  /** §16.3 更新缓存计数列。未传入的字段不动。同时刷新 updated_at（与 CleanupJobs.updateCounts
+   *  一致：计数列是便于显示的缓存非审计事实，updated_at 由仓储以当前时间刷新）。 */
   updateCounts(id: string, c: UpdateCountsInput): void {
     const sets: string[] = [];
     const params: Record<string, unknown> = { id };
@@ -119,25 +131,37 @@ export class MigrationJobs {
       if (col === undefined) {
         throw new Error(`updateCounts: 未知计数字段 "${k}"（id=${id}）`);
       }
+      // 计数列须为非负安全整数：TS 可选类型不构成运行时约束，负数/小数/null
+      // 一旦落库会污染缓存计数且无信号
+      if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0) {
+        throw new Error(
+          `updateCounts: 非法计数值 "${k}"=${JSON.stringify(v)}（id=${id}），须为非负整数`,
+        );
+      }
       sets.push(`${col} = @${k}`);
       params[k] = v;
     }
     if (sets.length === 0) return;
-    this.db
+    const result = this.db
       .prepare(
         `UPDATE migration_jobs SET ${sets.join(', ')}, updated_at=@updatedAt WHERE id=@id`,
       )
       .run({ ...params, updatedAt: new Date().toISOString() });
+    // 行不存在时抛错而非静默 no-op（与 updateStatus 同约定）
+    if (result.changes === 0) {
+      throw new Error(`migration_jobs 不存在：id=${id}，updateCounts 未生效`);
+    }
   }
 
   /**
    * §11.1 更新 Job 生命周期 status、current_stage 与暂停相关字段。
    *
    * 字段语义（M-修正：原注释声称四个时间/暂停字段均为显式 SET，与实现不符）：
-   * - pauseReasonCode/pausedAt：传值即覆盖；省略时若目标 status 仍为 paused 则保留
-   *   原值（paused 自环推进 current_stage 不丢暂停审计），离开 paused（如恢复 running）
-   *   则清空，避免审计污染。
-   * - startedAt/finishedAt：COALESCE 保留旧值，只能补写、不可清空。
+   * - pauseReasonCode/pausedAt：以目标 status 为主干——目标为 paused 时传值即覆盖、
+   *   省略保留原值（paused 自环推进 current_stage 不丢暂停审计）；目标非 paused
+   *   （如恢复 running）则一律清空，即使调用方误传也不写入非暂停 Job（避免审计污染）。
+   * - startedAt/finishedAt：COALESCE(列, 参数) 补写式——仅在列值为空时写入，
+   *   已有值不被覆盖也不可清空（保留首次启动/完成时间的审计事实）。
    *
    * §11.1 状态转换守卫：读取当前 status，按 JOB_TRANSITIONS 校验目标 status 合法性。
    * 终态（completed/failed）的 Job 无法再被改写，断点续跑只能从 paused/interrupted 恢复。
@@ -151,7 +175,7 @@ export class MigrationJobs {
     // 绕过守卫直写 DB（配合 schema 缺 CHECK，拼写错误被静默持久化）。
     if (!isJobStatus(u.status)) {
       throw new Error(
-        `非法 Job status 值："${u.status}"（id=${id}）；合法值：created/running/paused/interrupted/completed/failed`,
+        `非法 Job status 值："${u.status}"（id=${id}）；合法值：${LEGAL_JOB_STATUS}`,
       );
     }
     // 守卫后固化为 JobStatus，供事务闭包内使用（闭包会丢失类型收窄）。
@@ -182,10 +206,10 @@ export class MigrationJobs {
           `UPDATE migration_jobs
            SET status=@status,
                current_stage=COALESCE(@currentStage, current_stage),
-               pause_reason_code=COALESCE(@pauseReasonCode, CASE WHEN @status='paused' THEN pause_reason_code END),
-               paused_at=COALESCE(@pausedAt, CASE WHEN @status='paused' THEN paused_at END),
-               started_at=COALESCE(@startedAt, started_at),
-               finished_at=COALESCE(@finishedAt, finished_at),
+               pause_reason_code=CASE WHEN @status='paused' THEN COALESCE(@pauseReasonCode, pause_reason_code) END,
+               paused_at=CASE WHEN @status='paused' THEN COALESCE(@pausedAt, paused_at) END,
+               started_at=COALESCE(started_at, @startedAt),
+               finished_at=COALESCE(finished_at, @finishedAt),
                updated_at=@updatedAt
            WHERE id=@id`,
         )

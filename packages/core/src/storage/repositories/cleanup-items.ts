@@ -7,6 +7,8 @@ export interface CleanupItemInput {
   preActionState?: string | null;
   actionStatus: string;
   postActionState?: string | null;
+  /** 重试计数。省略时默认 1（该行落库即意味着至少执行过一轮动作）；
+   *  schema 列默认 0 仅表示"尚未发生动作"，生产调用方（编排器）始终显式传入。 */
   attemptCount?: number;
   actionStartedAt?: string | null;
   actionFinishedAt?: string | null;
@@ -134,6 +136,8 @@ export class CleanupItems {
 
   /** 查询某 plan 体系下已无需再处理的 source_item_id（用于排除重跑）。
    *  跨 job：只要该 source_item 在任意清理中已落到"终态"action_status，就不再选中。
+   *  仅限定 unfavorite 行动：未来若存在其他 action 的 plan，其终态不应左右
+   *  取消收藏的重跑排除集。
    *  终态包含：
    *  - unfavorited_verified（真正取消成功）
    *  - already_unfavorited（本就未收藏/内容删除——对取消收藏目标已是终态）
@@ -149,6 +153,7 @@ export class CleanupItems {
          JOIN cleanup_jobs cj ON cj.id = ci.job_id
          JOIN cleanup_plans cp ON cp.id = cj.plan_id
          WHERE cp.source_instance_id = ?
+           AND cp.action = 'unfavorite'
            AND ci.action_status IN (?, ?, ?, ?)`,
       )
       .all(

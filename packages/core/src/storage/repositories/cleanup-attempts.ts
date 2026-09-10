@@ -33,9 +33,16 @@ export class CleanupAttempts {
          ON CONFLICT(cleanup_item_id, attempt_no) DO NOTHING`,
       )
       .run({
-        preActionState: null, actionResult: null, postActionState: null,
-        finishedAt: null, errorCode: null, errorMessage: null, diagnosticPath: null,
         ...i,
+        // 逐字段 ?? 归一：显式传入的 undefined（可选属性合法）不能覆盖 null 默认值，
+        // 否则 better-sqlite3 拒绝 undefined 绑定值而在运行期抛错。
+        preActionState: i.preActionState ?? null,
+        actionResult: i.actionResult ?? null,
+        postActionState: i.postActionState ?? null,
+        finishedAt: i.finishedAt ?? null,
+        errorCode: i.errorCode ?? null,
+        errorMessage: i.errorMessage ?? null,
+        diagnosticPath: i.diagnosticPath ?? null,
       });
   }
 }

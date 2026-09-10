@@ -302,7 +302,10 @@ CREATE TABLE IF NOT EXISTS cleanup_action_attempts (
 );
 `);
 
-  // 单独执行带参数的 INSERT，避免在模板字符串里拼接时间戳
+  // 单独执行带参数的 INSERT，避免在模板字符串里拼接时间戳。
+  // 版本登记与 database.ts#migrate 重复（migrate 在调用 m.apply 后会再插一次）：
+  // applySchemaVN 必须自包含——测试与手工修复场景会脱离 migrate 直接调用本函数，
+  // 此时版本登记只能由函数自身完成；ON CONFLICT DO NOTHING 保证双写幂等。
   db.prepare(
     `INSERT INTO schema_version(version, applied_at)
      VALUES (?, ?)
@@ -352,17 +355,18 @@ DROP TABLE migration_jobs;
 ALTER TABLE migration_jobs_v2 RENAME TO migration_jobs;
 `);
 
-  // 重建后索引丢失，重新创建（IF NOT EXISTS 幂等）
+  // v1 未建任何索引，此处为新增（同时覆盖表重建场景——若未来 v1 存在索引，
+  // DROP TABLE 会连带删除，必须在重建后重新创建；IF NOT EXISTS 幂等）
   db.exec(`CREATE INDEX IF NOT EXISTS idx_migration_jobs_source ON migration_jobs(source_instance_id);`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_migration_jobs_target ON migration_jobs(target_instance_id);`);
 
   // L6: 补 FK 子列索引——SQLite 不自动索引 FK 子列，以下查询原为全表扫：
   // - migration_attempts 按 job/item 列表（listByJob/listByItem）
   // - target_artifacts 按 source_item 查最近 verified（findBySourceItem）
-  // - cleanup_items 按 job+source_item 精确查（findByJobAndSourceItem）
+  //（cleanup_items 按 job+source_item 查询无需另建索引：UNIQUE(job_id, source_item_id)
+  //  的隐式唯一索引已覆盖精确查询与 job_id 前缀扫描，再建纯属双份写放大。）
   db.exec(`CREATE INDEX IF NOT EXISTS idx_migration_attempts_job ON migration_attempts(migration_job_id);`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_target_artifacts_source_item ON target_artifacts(source_item_id);`);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_cleanup_items_job_source ON cleanup_items(job_id, source_item_id);`);
 
   // SQLite 官方表重建流程：FK 关闭下重建后，用 foreign_key_check 验证引用完整性，
   // 有违规则直接失败（迁移整体在事务中会回滚），避免提交引用断裂的库。
@@ -371,6 +375,7 @@ ALTER TABLE migration_jobs_v2 RENAME TO migration_jobs;
     throw new Error(`foreign_key_check failed after v2 rebuild: ${JSON.stringify(fkViolationsV2)}`);
   }
 
+  // 版本登记说明见 applySchemaV1 尾注（与 migrate 双写、ON CONFLICT 幂等）
   db.prepare(
     `INSERT INTO schema_version(version, applied_at)
      VALUES (?, ?)
@@ -394,6 +399,9 @@ const SOURCE_ITEM_STATUSES = [
 // 与 domain/models.ts 的 SOURCE_CONTENT_KINDS 同源，避免两份列表漂移
 // （此前 schema 漏了 'external-link'，适配器一旦产出该值会被 CHECK 拒绝）。
 const CONTENT_KINDS = SOURCE_CONTENT_KINDS as readonly string[];
+// 与 domain/models.ts 的 SourceItemQuality 取值一致（domain 暂无值清单导出，
+// 此处为 schema 内单一引用点：DDL CHECK 与 v3 预检共用）。
+const SOURCE_ITEM_QUALITIES = ['full', 'degraded'] as const;
 const CLEANUP_ITEM_PRECHECK_STATUSES = [
   'favorited', 'not_favorited', 'unknown',
   'login_required', 'challenge_required', 'content_unavailable',
@@ -406,7 +414,36 @@ const CLEANUP_ITEM_ACTION_STATUSES = [
 ];
 
 function sqlList(values: readonly string[]): string {
-  return values.map((v) => `'${v}'`).join(',');
+  // 单引号翻倍转义：当前输入是 domain 层编译期常量（简单 slug），但按 SQL 字面量
+  // 规范转义可保证未来任何输入（含引号）不产生断裂/可注入的 CHECK 语句。
+  return values.map((v) => `'${v.replace(/'/g, "''")}'`).join(',');
+}
+
+/**
+ * 表重建前预检：存量数据若含新表 CHECK 不接受的值，裸跑 INSERT...SELECT 只会抛
+ * 无行号的 "CHECK constraint failed"（事务回滚），生产库上几乎无法定位脏行。
+ * 先查出违规模块行并在抛错信息中带具体行与取值，再由人工决定修复或放弃升级。
+ */
+function assertRowsWithinCheck(
+  db: Database,
+  table: string,
+  columns: ReadonlyArray<{ col: string; values: readonly string[]; nullable?: boolean }>,
+): void {
+  const conds = columns
+    .map(({ col, values, nullable }) =>
+      nullable
+        ? `(${col} IS NOT NULL AND ${col} NOT IN (${sqlList(values)}))`
+        : `${col} NOT IN (${sqlList(values)})`,
+    )
+    .join(' OR ');
+  const offenders = db
+    .prepare(`SELECT * FROM ${table} WHERE ${conds} LIMIT 10`)
+    .all();
+  if (offenders.length > 0) {
+    throw new Error(
+      `表重建预检失败：${table} 存在将被新 CHECK 拒绝的存量行（前 10 条）：${JSON.stringify(offenders)}`,
+    );
+  }
 }
 
 /**
@@ -419,6 +456,12 @@ function sqlList(values: readonly string[]): string {
  */
 export function applySchemaV3(db: Database): void {
   // --- source_items: 加 content_kind + status + quality CHECK ---
+  // 预检存量行满足新 CHECK，失败时带行与取值（裸 CHECK 失败无法定位脏数据）
+  assertRowsWithinCheck(db, 'source_items', [
+    { col: 'content_kind', values: CONTENT_KINDS },
+    { col: 'status', values: SOURCE_ITEM_STATUSES },
+    { col: 'quality', values: SOURCE_ITEM_QUALITIES, nullable: true },
+  ]);
   db.exec(`
 CREATE TABLE IF NOT EXISTS source_items_v3 (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -436,7 +479,7 @@ CREATE TABLE IF NOT EXISTS source_items_v3 (
   source_position INTEGER,
   discovered_at TEXT NOT NULL,
   status TEXT NOT NULL CHECK(status IN (${sqlList(SOURCE_ITEM_STATUSES)})),
-  quality TEXT CHECK(quality IS NULL OR quality IN ('full','degraded')),
+  quality TEXT CHECK(quality IS NULL OR quality IN (${sqlList(SOURCE_ITEM_QUALITIES)})),
   degradations_json TEXT NOT NULL DEFAULT '[]',
   retry_count INTEGER NOT NULL DEFAULT 0,
   last_error_code TEXT,
@@ -473,6 +516,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_source_items_ext
   // 该 pragma 不依赖连接的 FK 开关，可直接使用）。
 
   // --- cleanup_jobs: 加 status CHECK ---
+  assertRowsWithinCheck(db, 'cleanup_jobs', [
+    { col: 'status', values: CLEANUP_JOB_STATUS },
+  ]);
   db.exec(`
 CREATE TABLE IF NOT EXISTS cleanup_jobs_v3 (
   id TEXT PRIMARY KEY,
@@ -500,6 +546,10 @@ ALTER TABLE cleanup_jobs_v3 RENAME TO cleanup_jobs;
 `);
 
   // --- cleanup_items: 加 precheck_status + action_status CHECK ---
+  assertRowsWithinCheck(db, 'cleanup_items', [
+    { col: 'precheck_status', values: CLEANUP_ITEM_PRECHECK_STATUSES },
+    { col: 'action_status', values: CLEANUP_ITEM_ACTION_STATUSES },
+  ]);
   db.exec(`
 CREATE TABLE IF NOT EXISTS cleanup_items_v3 (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -528,8 +578,8 @@ SELECT id, job_id, source_item_id, precheck_status, pre_action_state, action_sta
 DROP TABLE cleanup_items;
 ALTER TABLE cleanup_items_v3 RENAME TO cleanup_items;
 `);
-  // 重建 cleanup_items 索引
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_cleanup_items_job_source ON cleanup_items(job_id, source_item_id);`);
+  // 重建后 cleanup_items 无需另建 (job_id, source_item_id) 索引：新表声明的
+  // UNIQUE(job_id, source_item_id) 已自带隐式唯一索引（含 job_id 前缀扫描）
 
   // SQLite 官方表重建流程：FK 关闭下重建后，用 foreign_key_check 验证引用完整性，
   // 有违规则直接失败（迁移整体在事务中会回滚），避免提交引用断裂的库。
@@ -538,6 +588,7 @@ ALTER TABLE cleanup_items_v3 RENAME TO cleanup_items;
     throw new Error(`foreign_key_check failed after v3 rebuild: ${JSON.stringify(fkViolationsV3)}`);
   }
 
+  // 版本登记说明见 applySchemaV1 尾注（与 migrate 双写、ON CONFLICT 幂等）
   db.prepare(
     `INSERT INTO schema_version(version, applied_at)
      VALUES (?, ?)

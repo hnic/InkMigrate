@@ -33,6 +33,12 @@ const TARGET_ARTIFACT_COLUMNS = `id, migration_job_id AS migrationJobId, source_
                 relative_path AS relativePath, target_content_hash AS targetContentHash,
                 written_file_hash AS writtenFileHash, status, verified_at AS verifiedAt`;
 
+/** 业务字面量常量：与 create() 调用方传入的 status/artifactKind 保持同词表，
+ *  避免两侧拼写漂移导致查询静默返回空集（同 TARGET_ARTIFACT_COLUMNS 的动机）。 */
+const STATUS_VERIFIED = 'verified';
+const ARTIFACT_KIND_NOTE = 'note';
+const ARTIFACT_KIND_INDEX = 'index';
+
 /** §16.6 target_artifacts 仓储。 */
 export class TargetArtifacts {
   constructor(private db: DB) {}
@@ -139,6 +145,11 @@ export class TargetArtifacts {
    * §13.8 索引生成：列出某 Job 某 source 实例下所有 verified 笔记 artifact，
    * 连接 source_items 取标题/内容类型/收藏集合等元数据，供 renderIndex 构造分片索引。
    * 仅返回 artifact_kind='note' 且 status='verified' 的条目。
+   *
+   * INNER JOIN 的前置不变量：note artifact 创建时必带 source_item_id（job-runner
+   * 仅对 index 类留空），且 source_items 无删除路径——source_item 缺失/为 NULL 的
+   * note 只可能来自库外手工操作。此类行缺少索引所需的 title/contentKind 元数据，
+   * 排除是预期行为（如未来引入 source_items 删除，需在此复核并显式处理分叉）。
    */
   listVerifiedNotesForIndex(
     migrationJobId: string,
@@ -158,8 +169,8 @@ export class TargetArtifacts {
          FROM target_artifacts ta
          JOIN source_items si ON si.id = ta.source_item_id
          WHERE ta.migration_job_id = ?
-           AND ta.artifact_kind = 'note'
-           AND ta.status = 'verified'
+           AND ta.artifact_kind = '${ARTIFACT_KIND_NOTE}'
+           AND ta.status = '${STATUS_VERIFIED}'
            AND si.source_instance_id = ?
          ORDER BY ta.id`,
       )
@@ -185,7 +196,7 @@ export class TargetArtifacts {
       .prepare(
         `SELECT relative_path AS relativePath, written_file_hash AS writtenFileHash
          FROM target_artifacts
-         WHERE target_instance_id = ? AND artifact_kind = 'index'`,
+         WHERE target_instance_id = ? AND artifact_kind = '${ARTIFACT_KIND_INDEX}'`,
       )
       .all(targetInstanceId) as {
       relativePath: string;

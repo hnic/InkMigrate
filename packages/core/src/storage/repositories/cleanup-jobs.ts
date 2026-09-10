@@ -1,9 +1,13 @@
 import type { DB } from '../database.js';
 import {
+  CLEANUP_JOB_STATUS,
   isCleanupJobStatus,
   canCleanupJobTransition,
   type CleanupJobStatus,
 } from '../../domain/states.js';
+
+/** 合法 status 词表文案：从 domain 单一真相源派生，增删状态时错误信息自动同步。 */
+const LEGAL_CLEANUP_JOB_STATUS = CLEANUP_JOB_STATUS.join('/');
 
 export interface CleanupJobInput {
   id: string;
@@ -63,7 +67,7 @@ export class CleanupJobs {
     //（schema 无 CHECK，拼写错误会静默持久化并使 updateStatus 守卫失效）。
     if (!isCleanupJobStatus(i.status)) {
       throw new Error(
-        `非法 cleanup_job status 值："${i.status}"（id=${i.id}）；合法值：created/running/completed/interrupted`,
+        `非法 cleanup_job status 值："${i.status}"（id=${i.id}）；合法值：${LEGAL_CLEANUP_JOB_STATUS}`,
       );
     }
     this.db
@@ -89,7 +93,9 @@ export class CleanupJobs {
       .get(id) as CleanupJobRow | undefined;
   }
 
-  /** §16.9 更新缓存计数列。未传入的字段不动。 */
+  /** §16.9 更新缓存计数列。未传入的字段不动。
+   *  updated_at 由仓储以当前时间刷新而非沿用调用方时钟：计数列是便于显示的缓存
+   *  （非审计事实），与 MigrationJobs.updateCounts 约定一致。 */
   updateCounts(id: string, c: UpdateCleanupCountsInput): void {
     const sets: string[] = [];
     const params: Record<string, unknown> = { id };
@@ -100,17 +106,33 @@ export class CleanupJobs {
       if (col === undefined) {
         throw new Error(`updateCounts: 未知计数字段 "${k}"（id=${id}）`);
       }
+      // 计数列须为非负安全整数：TS 可选类型不构成运行时约束，负数/小数/null
+      // 一旦落库会污染缓存计数且无信号
+      if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0) {
+        throw new Error(
+          `updateCounts: 非法计数值 "${k}"=${JSON.stringify(v)}（id=${id}），须为非负整数`,
+        );
+      }
       sets.push(`${col} = @${k}`);
       params[k] = v;
     }
     if (sets.length === 0) return;
-    this.db
+    const result = this.db
       .prepare(`UPDATE cleanup_jobs SET ${sets.join(', ')}, updated_at=@updatedAt WHERE id=@id`)
       .run({ ...params, updatedAt: new Date().toISOString() });
+    // 行不存在时抛错而非静默 no-op（与 updateStatus 同约定）：UPDATE 影响 0 行
+    // 会让调用方误以为计数已落库。
+    if (result.changes === 0) {
+      throw new Error(`cleanup_job 不存在：id=${id}，updateCounts 未生效`);
+    }
   }
 
   /**
    * 更新 Job 生命周期 status 与时间戳。
+   *
+   * finished_at：进入 running 时清空（M-6 允许 interrupted → running 续跑，若保留
+   * 上次的 finished_at 会留下 status=running 且已有完成时间的矛盾行）；其余情况
+   * COALESCE 补写、不可显式清除。
    *
    * N4: 加状态机守卫（与 migration-jobs.updateStatus 的 M1 修复同模式）——
    * 原实现任意 status 字符串都能写入（配合 schema 缺 CHECK，拼写错误静默持久化）。
@@ -119,7 +141,7 @@ export class CleanupJobs {
   updateStatus(id: string, u: UpdateCleanupStatusInput): void {
     if (!isCleanupJobStatus(u.status)) {
       throw new Error(
-        `非法 cleanup_job status 值："${u.status}"（id=${id}）；合法值：created/running/completed/interrupted`,
+        `非法 cleanup_job status 值："${u.status}"（id=${id}）；合法值：${LEGAL_CLEANUP_JOB_STATUS}`,
       );
     }
     const targetStatus: CleanupJobStatus = u.status;
@@ -140,7 +162,7 @@ export class CleanupJobs {
       if (!canCleanupJobTransition(current.status, targetStatus)) {
         throw new Error(
           `非法 cleanup_job 状态转换：${current.status} → ${targetStatus}（id=${id}）。` +
-            `终态（completed/interrupted）不可再转换。`,
+            `completed 为终态不可再转换；interrupted 仅可恢复至 running（M-6）。`,
         );
       }
       this.db
@@ -148,7 +170,7 @@ export class CleanupJobs {
           `UPDATE cleanup_jobs
            SET status=@status,
                started_at=COALESCE(@startedAt, started_at),
-               finished_at=COALESCE(@finishedAt, finished_at),
+               finished_at=CASE WHEN @status='running' THEN NULL ELSE COALESCE(@finishedAt, finished_at) END,
                updated_at=@updatedAt
            WHERE id=@id`,
         )
