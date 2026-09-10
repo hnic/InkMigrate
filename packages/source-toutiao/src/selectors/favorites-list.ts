@@ -22,31 +22,42 @@
  * 视频文章微头条混合出现，单选一种选择器会漏掉其它类型。
  */
 export const FAVORITES_SELECTORS = {
-  // 列表容器（按优先级）
-  listContainer: [
-    '[data-testid="favorites-list"]',
-    '[role="list"][aria-label*="收藏"]',
-    '.profile-tab-feed',
-    '.profile-feed',
-    '.favorites-list',
-  ],
   // 单条收藏（按优先级）—— 多类型并集抓取，见 scan-driver extractItemsHtml
   // 真实页面按内容类型分多种外层容器；fixture 用 data-item-id
   item: [
     '[data-item-id]',
-    // 实测：视频条目（占多数）+ 微头条
+    // 实测：视频条目（占多数）+ 微头条。
+    // 若实测发现嵌套（wrapper 内还有 .feed-card-wrapper），需加 :not() 作用域
+    //（如 '.feed-card-wrapper:not(.profile-normal-video-card-wrapper .feed-card-wrapper)'）
+    // 防止同一卡片被并集重复发送、虚增 duplicateObservations。
     '.profile-normal-video-card-wrapper',
     '.feed-card-wrapper',
-    // 按命名规律推断的文章条目（本次测试账号无文章收藏，未实测）
+    // TODO(verify): 按命名规律推断的文章条目，未实测——待用含文章收藏的账号
+    // 验证真实 class。错误猜测会导致文章类收藏被静默漏抓（并集抓取不报错），
+    // 扫描"成功完成"但数据不完整。
     '.profile-normal-article-card-wrapper',
     '.profile-article-card-wrapper',
     '[role="listitem"]',
     '.favorite-item',
   ],
   // 字段
+  // 仅 fixture 有 data-item-id；真实页面无该属性，externalId 恒走 URL 派生兜底
+  //（scanner.parseItemsFromHtml → extractToutiaoContentId）。
+  // 注意：scanner 只消费 itemId[0]——与其它字段的多候选回退不同，往本数组
+  // 追加候选定位器会被静默忽略，需同步改造消费方。
   itemId: ['data-item-id'],
-  // 标题链接：真实页面 a.title（文章）；微头条 .content a；fixture .title
-  title: ['a.title', '.content a[href]', '.title', '[role="heading"]'],
+  // 标题链接：真实页面 a.title（文章）；微头条 .content a；fixture a.title。
+  // 注意：scanner 用首个命中元素同时取 title 和 href（→ canonicalUrl → 去重键），
+  // 必须先放限定 href 的锚点——微头条卡片里话题/搜索链接常排在 /w/ 链接之前，
+  // 命中它们会让 canonicalUrl 与去重键漂移到无关 URL。非锚点候选（.title/
+  // [role="heading"]）刻意不列入：无 href 会让条目折叠到列表页 URL（全部
+  // 挤成同一个去重键）；这类条目由 scanner 的内容链接兜底选择器接管更安全。
+  title: [
+    'a.title[href]',
+    '.content a[href*="/w/"]',
+    'a.title',
+    '.content a[href]',
+  ],
   author: ['.author', '.author-name', '.feed-card-source'],
   summary: ['.summary'],
   // 封面：真实页面 .feed-card-cover img；fixture .cover img

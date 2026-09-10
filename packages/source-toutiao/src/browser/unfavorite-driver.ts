@@ -40,24 +40,41 @@ export interface UnfavoriteDriverResult {
   detectedState?: 'login_required' | 'challenge_required' | 'content_unavailable';
 }
 
-/** 选择器参数包：aria-pressed 主信号 + collected class 回退。 */
+/** 选择器参数包：aria-pressed 显式取值（true=已收藏 / false=未收藏）。 */
 interface StateReadParams {
   favorited: string;
   notFavorited: string;
-  collectedClass: string;
 }
 
 const STATE_READ_PARAMS: StateReadParams = {
   favorited: UNFAVORITE_SELECTORS.favoritedAriaPressed,
   notFavorited: UNFAVORITE_SELECTORS.notFavoritedAriaPressed,
-  collectedClass: UNFAVORITE_SELECTORS.collectedClass,
 };
 
 /** 默认 RNG（Math.random）。可被 options.rng 注入替换以便测试。 */
 const defaultRng = Math.random;
 
+// —— 防风控节奏参数（集中命名，调优不必在两个函数里翻找字面量）——
+/** 取消收藏点击（含 actionability 等待）的上限毫秒。 */
+const CLICK_TIMEOUT_MS = 5_000;
+/** 点击后轮询确认 aria-pressed 变化的间隔毫秒。 */
+const POLL_INTERVAL_MS = 500;
+/** 阅读模拟：开头停留范围 [min, max] 毫秒（"读标题/开头"）。 */
+const READING_OPEN_DWELL_MS: readonly [number, number] = [1500, 3500];
+/** 阅读模拟：段间停留范围（"逐段阅读"）。 */
+const READING_STEP_DWELL_MS: readonly [number, number] = [1500, 4000];
+/** 阅读模拟：短停留范围（回滚后"扫一眼"/点击前"决定取消"）。 */
+const READING_SHORT_DWELL_MS: readonly [number, number] = [800, 2000];
+/** 阅读模拟：最多滚动段数（过长文章的耗时失控上限）。 */
+const READING_MAX_STEPS = 8;
+/** 阅读模拟：滚到底后回滚一段的概率。 */
+const READING_ROLLBACK_PROBABILITY = 0.4;
+
 /** 区间 [min, max] 内的随机整数毫秒。 */
-function randMs(min: number, max: number, rng: () => number): number {
+function randMs(
+  [min, max]: readonly [number, number],
+  rng: () => number,
+): number {
   return Math.round(min + rng() * (max - min));
 }
 
@@ -72,52 +89,56 @@ function randMs(min: number, max: number, rng: () => number): number {
  * 4. 滚到底后随机回滚一段（"扫一眼"），再停留；
  * 5. 最后把视口滚回顶部附近（收藏按钮多在顶部/正文区）。
  *
- * 全程使用真实 wheel/mousemove 事件（非 JS scrollTo），让风控能观测到滚动交互。
+ * 除第 5 步外全程使用真实 wheel/mousemove 事件（非 JS scrollTo），让风控能
+ * 观测到滚动交互；第 5 步的一次瞬时 scrollTo 是耗时与拟人的折中（见该处注释）。
  *
  * rng 可注入：默认 Math.random；测试传入固定种子 PRNG 可对段数/停留/鼠标轨迹
  * 做确定性断言，让这条最复杂的反检测逻辑从"完全无测试覆盖"变为可测。
  */
 async function simulateReading(page: Page, rng: () => number = defaultRng): Promise<void> {
   // 先在页面顶部随机停留（"读标题/开头"）
-  await page.waitForTimeout(randMs(1500, 3500, rng));
+  await page.waitForTimeout(randMs(READING_OPEN_DWELL_MS, rng));
 
-  // 测量可滚动高度与视口高度，决定滚动段数
+  // 测量可滚动高度与视口尺寸，决定滚动段数
   const dims = await page.evaluate(() => ({
     scrollHeight: document.documentElement.scrollHeight,
     clientHeight: document.documentElement.clientHeight,
+    clientWidth: document.documentElement.clientWidth,
   }));
   const viewport = dims.clientHeight > 0 ? dims.clientHeight : 800;
+  // 鼠标 X 轴以视口【宽度】为基准：窄长视口（如移动端 360×800）下若误用高度，
+  // 坐标会落在页面之外——页外坐标本身就是一种自动化指纹
+  const viewportWidth = dims.clientWidth > 0 ? dims.clientWidth : 1280;
   const totalScrollable = Math.max(0, dims.scrollHeight - viewport);
   // 每段滚动约 0.6-1.0 个视口；总段数随内容长度增长，上限避免过长文章耗时失控
   const stepPx = Math.round(viewport * (0.6 + rng() * 0.4));
-  const maxSteps = 8;
-  const steps = Math.min(maxSteps, Math.ceil(totalScrollable / stepPx));
+  const steps = Math.min(READING_MAX_STEPS, Math.ceil(totalScrollable / stepPx));
 
-  let scrolled = 0;
   for (let i = 0; i < steps; i++) {
     // 随机移动鼠标到视口内某处（人类阅读时鼠标会动）
-    const moveX = Math.round(100 + rng() * (viewport * 0.6));
+    const moveX = Math.round(100 + rng() * (viewportWidth * 0.6));
     const moveY = Math.round(100 + rng() * 400);
     await page.mouse.move(moveX, moveY, { steps: 5 + Math.floor(rng() * 10) });
 
     // 真实 wheel 向下滚动一段
     await page.mouse.wheel(0, stepPx);
-    scrolled += stepPx;
 
-    // 每段停留（"读完这一段"），1.5-4 秒
-    await page.waitForTimeout(randMs(1500, 4000, rng));
+    // 每段停留（"读完这一段"）
+    await page.waitForTimeout(randMs(READING_STEP_DWELL_MS, rng));
   }
 
-  // 偶尔（约 40%）回滚一段（"往回扫一眼"）
-  if (rng() < 0.4 && steps > 0) {
+  // 偶尔回滚一段（"往回扫一眼"）
+  if (rng() < READING_ROLLBACK_PROBABILITY && steps > 0) {
     await page.mouse.wheel(0, -stepPx);
-    await page.waitForTimeout(randMs(800, 2000, rng));
+    await page.waitForTimeout(randMs(READING_SHORT_DWELL_MS, rng));
   }
 
-  // 滚回顶部附近（收藏按钮通常在正文区/顶部）
+  // 滚回顶部附近（收藏按钮通常在正文区/顶部）。已知的拟人性偏离：这里用一次
+  // instant scrollTo 而非连续负向 wheel——清理动辄上千条，逐段 wheel 回滚会显著
+  // 拉长单条耗时；瞬时跳转的暴露面由前后随机停留与点击后的状态轮询兜底。
   await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior }));
   // 点击前再停留一瞬（"决定要取消收藏"）
-  await page.waitForTimeout(randMs(800, 2000, rng));
+  await page.waitForTimeout(randMs(READING_SHORT_DWELL_MS, rng));
 }
 
 /**
@@ -143,10 +164,16 @@ export async function driveUnfavorite(
     return { success: false, wasCollected: false, isCollected: false, reason: 'no canonicalUrl' };
   }
 
-  await opts.page.goto(url, {
-    waitUntil: 'domcontentloaded',
-    timeout: opts.navigationTimeoutMs ?? 30_000,
-  });
+  try {
+    await opts.page.goto(url, {
+      waitUntil: 'domcontentloaded',
+      timeout: opts.navigationTimeoutMs ?? 30_000,
+    });
+  } catch {
+    // 结果契约：导航失败（超时/网络错误/ERR_ABORTED）返回结构化失败回执，
+    // 不让原始异常逃出 driveUnfavorite——编排器按 reason 做四类映射与重试决策
+    return { success: false, wasCollected: false, isCollected: false, reason: 'navigation_failed' };
+  }
 
   // §5/§14.12 特殊页面检测（登录墙/风控挑战/内容不可用）：在等待收藏按钮前先识别。
   // 命中即提前返回 success=false + detectedState，编排器据此受控中断（而非把
@@ -184,8 +211,19 @@ export async function driveUnfavorite(
     return { success: false, wasCollected: false, isCollected: false, reason: 'collect button not found' };
   }
 
-  // 读操作前状态：aria-pressed 主信号，collected class 作回退
+  // 读操作前状态：aria-pressed 主信号。null = 属性缺失（SPA 未 hydration/改版），
+  // 绝不能默认"未收藏"——那会把实际仍收藏的条目误报 already_unfavorited 终态、
+  // 永久漏清；也不能盲点击（aria-pressed 是切换按钮，误点可能反向收藏）。
+  // ref 本身来自收藏扫描（先验已收藏），按失败上报交由编排器重试/人工介入。
   const wasCollected = await readCollectedState(collectBtn);
+  if (wasCollected === null) {
+    return {
+      success: false,
+      wasCollected: true,
+      isCollected: true,
+      reason: 'collect state unknown (aria-pressed missing)',
+    };
+  }
 
   // 本来就未收藏，无需操作（编排器据此计入"跳过"）。不模拟阅读：跳过项非风控重点。
   if (!wasCollected) {
@@ -199,17 +237,23 @@ export async function driveUnfavorite(
   }
 
   // 点击取消收藏
-  await collectBtn.click({ timeout: 5_000 });
+  try {
+    await collectBtn.click({ timeout: CLICK_TIMEOUT_MS });
+  } catch {
+    // 结果契约：点击失败（超时/不可点/元素分离）返回结构化失败回执
+    return { success: false, wasCollected: true, isCollected: true, reason: 'click_failed' };
+  }
 
   // 在窗口内轮询确认 aria-pressed 转 false：避免固定等待在状态更新延迟/风控时误判"仍收藏"
   const windowMs = opts.waitAfterClickMs ?? 3_000;
-  const pollIntervalMs = 500;
   const deadline = Date.now() + windowMs;
   let isCollected = true;
   while (Date.now() < deadline) {
-    await opts.page.waitForTimeout(Math.min(pollIntervalMs, deadline - Date.now()));
-    isCollected = await readCollectedState(collectBtn);
-    if (!isCollected) break; // 一旦转未收藏立即确认，不必等满窗口
+    await opts.page.waitForTimeout(Math.min(POLL_INTERVAL_MS, deadline - Date.now()));
+    // 元素被 SPA 重渲染替换时 evaluate 抛错、aria-pressed 瞬时缺失时返回 null：
+    // 两种"读不到"都保守视为仍收藏，绝不把未知当"已取消"误报成功
+    isCollected = (await readCollectedState(collectBtn).catch(() => null)) ?? true;
+    if (!isCollected) break; // 仅显式 notFavorited 才确认成功，不必等满窗口
   }
 
   return {
@@ -235,12 +279,12 @@ export async function driveUnfavorite(
 async function detectSpecialPage(
   page: Page,
 ): Promise<'login_required' | 'challenge_required' | 'content_unavailable' | undefined> {
-  // 1. URL 重定向到登录/passlot
+  // 1. URL 重定向到登录/passport
   const currentUrl = page.url().toLowerCase();
   if (currentUrl.includes('login') || currentUrl.includes('passport')) {
     return 'login_required';
   }
-  // C8: 风控挑战（验证码）。原实现只用 fixture testid `[data-testid="security-challenge"]`，
+  // 2. C8: 风控挑战（验证码）。原实现只用 fixture testid `[data-testid="security-challenge"]`，
   // 真实头条页面不存在该 testid → 撞到真实验证码页时永不命中 → 不中断 → 继续下一条，
   // 或在风控期内反复操作导致封号。补充 URL 模式（verify/captcha/safe/sec）与真实页面
   // 候选选择器（iframe.captcha、含验证码/安全验证文案的元素）。
@@ -272,7 +316,8 @@ async function detectSpecialPage(
  * execute 走同一套判定逻辑，消除二者历史上"inspect 用 collected class、execute 用
  * aria-pressed"的不一致。
  *
- * 调用方负责导航 + 等待渲染后传入按钮 locator。返回 null 表示按钮不存在。
+ * 调用方负责导航 + 等待渲染后传入按钮 locator。返回 null 表示按钮不存在
+ * 或状态未知（aria-pressed 缺失，见 readCollectedState）。
  */
 export async function inspectCollectedState(
   collectBtn: ReturnType<Page['locator']>,
@@ -308,14 +353,20 @@ export async function waitForCollectedAttribute(
     });
 }
 
-/** 读单个收藏按钮的收藏状态：aria-pressed 主信号（true=已收藏），collected class 回退。 */
+/**
+ * C9: 读单个收藏按钮的收藏状态：aria-pressed 主信号（true/false 显式判定）。
+ * 返回 null = aria-pressed 缺失（未知）：真实页面按钮【不】带 collected class
+ * （selectors 注释已声明），class 回退只会把"实际仍收藏"误判为"未收藏"，
+ * 故属性缺失时宁可返回未知，由调用方保守处理（轮询视为仍收藏/整体报失败）。
+ */
 async function readCollectedState(
   collectBtn: ReturnType<Page['locator']>,
-): Promise<boolean> {
+): Promise<boolean | null> {
   return collectBtn.evaluate((el, params: StateReadParams) => {
     const pressed = el.getAttribute('aria-pressed');
     if (pressed === params.favorited) return true;
     if (pressed === params.notFavorited) return false;
-    return el.classList.contains(params.collectedClass);
+    // aria-pressed 缺失 = 未知；真实页面无 collected class，绝不能默认"未收藏"
+    return null;
   }, STATE_READ_PARAMS);
 }

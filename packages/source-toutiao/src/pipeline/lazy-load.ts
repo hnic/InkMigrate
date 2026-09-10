@@ -42,6 +42,9 @@ export function resolveLazyLoadAndUrls(
   const doc = dom.window.document;
   const images: string[] = [];
   const lazyLoadImages: string[] = [];
+  // 图片 URL 去重（保序）：同一 URL 在文档中重复出现/被多个 img 引用时，
+  // 该清单是下游附件下载的 manifest，重复项会导致同一 URL 被反复拉取
+  const seenUrls = new Set<string>();
 
   // 图片：先解析懒加载
   doc.querySelectorAll('img').forEach((img) => {
@@ -60,7 +63,9 @@ export function resolveLazyLoadAndUrls(
     if (resolved === null) {
       const srcset = img.getAttribute('srcset');
       if (srcset) {
-        const first = srcset.split(',')[0]?.trim().split(/\s+/)[0];
+        // 首候选 = 跳过前导逗号/空白后的第一个非空白序列（HTML srcset 规范
+        // 允许候选 URL 内含逗号，如 "pic,w_200.jpg"——按逗号 split 会截断 URL）
+        const first = srcset.match(/^[,\s]*(\S+)/)?.[1];
         // M4: srcset 在 DOMPurify（stage 5）中按整值去空白做 URI 白名单校验，
         // 非逐候选 URL 校验，故此处提升首候选到 src 前需独立校验 scheme。
         // 拒绝 javascript:/data: 等危险 scheme（仅允许 http/https/协议相对/根相对）。
@@ -69,7 +74,11 @@ export function resolveLazyLoadAndUrls(
         }
       }
     }
-    if (resolved !== null) {
+    // 是否实际发生了懒加载提升（决定 lazyLoadImages 归属）：按提升结果判定，
+    // 而非 data-* 属性存在性——data-lazy-src 提升的图会被漏计，空 data-src 属性
+    // 会被误计
+    const wasPromoted = resolved !== null;
+    if (wasPromoted) {
       img.setAttribute('src', resolved);
     }
     const src = img.getAttribute('src');
@@ -85,12 +94,17 @@ export function resolveLazyLoadAndUrls(
           return;
         }
         img.setAttribute('src', abs);
-        images.push(abs);
-        if (
-          img.hasAttribute('data-src') ||
-          img.hasAttribute('data-original')
-        ) {
+        if (!seenUrls.has(abs)) {
+          seenUrls.add(abs);
+          images.push(abs);
+        }
+        if (wasPromoted) {
           lazyLoadImages.push(abs);
+          // 清理已被消费的懒加载属性：残留的 srcset/data-* 未经过逐候选校验，
+          // 会留在输出 HTML 中被下游渲染器（优先 srcset）或重复执行再次应用
+          for (const attr of ['srcset', 'data-original', 'data-src', 'data-lazy-src']) {
+            img.removeAttribute(attr);
+          }
         }
       } catch {
         // 无效 URL 跳过
@@ -104,6 +118,12 @@ export function resolveLazyLoadAndUrls(
     if (href) {
       try {
         const abs = new URL(href, baseUrl).toString();
+        // M4 补充：与 img 分支对称地独立校验 scheme——new URL('javascript:…', base)
+        // 原样解析出 javascript: URL，防御 DOMPurify（stage 5）对 a[href] 的残留
+        if (!isSafeUrlScheme(abs, baseUrl)) {
+          a.removeAttribute('href');
+          return;
+        }
         a.setAttribute('href', abs);
       } catch {
         // ignore

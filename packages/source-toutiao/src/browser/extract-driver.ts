@@ -1,4 +1,5 @@
 import type { Page } from 'playwright';
+import { errors as playwrightErrors } from 'playwright';
 import { createHash } from 'node:crypto';
 import {
   type SourceAsset,
@@ -14,6 +15,18 @@ import { ToutiaoSourceConfigSchema } from '../config.js';
 const DEFAULT_MAX_IMAGE_BYTES = ToutiaoSourceConfigSchema.shape.maxImageBytes.parse(
   undefined,
 );
+
+/** 详情页导航超时兜底（未显式配置 navigationTimeoutMs 时）。 */
+const DEFAULT_NAVIGATION_TIMEOUT_MS = 60_000;
+/** 等待正文容器出现的上限毫秒；超时降级继续（不等待完整渲染）。 */
+const ARTICLE_WAIT_TIMEOUT_MS = 10_000;
+/** 正文容器候选选择器（命中任一即认为正文开始渲染）。 */
+const ARTICLE_CONTAINER_SELECTOR = 'article, .article-content, .post-content';
+/**
+ * 图片下载并发上限：平衡吞吐与内存（每张图字节短暂驻留 asset.data，
+ * 并发过高易 OOM）。
+ */
+const IMAGE_DOWNLOAD_CONCURRENCY = 3;
 
 export interface ExtractDriverOptions {
   page: Page;
@@ -50,14 +63,23 @@ export async function driveExtractDetail(
   try {
     await opts.page.goto(url, {
       waitUntil: 'domcontentloaded',
-      timeout: opts.navigationTimeoutMs ?? 60_000,
+      timeout: opts.navigationTimeoutMs ?? DEFAULT_NAVIGATION_TIMEOUT_MS,
     });
     // 等正文容器出现（不等所有网络请求完成）；超时则降级继续。
     // 不把 body 放进 selector：body 在 domcontentloaded 后必然存在，
     // 会让等待立即返回、形同虚设
-    await opts.page.waitForSelector('article, .article-content, .post-content', {
-      timeout: 10_000,
-    }).catch(() => {});
+    try {
+      const handle = await opts.page.waitForSelector(ARTICLE_CONTAINER_SELECTOR, {
+        timeout: ARTICLE_WAIT_TIMEOUT_MS,
+      });
+      // ElementHandle 是页面侧的远程对象引用，用完即弃需显式释放
+      await handle?.dispose();
+    } catch (e) {
+      // 仅超时降级继续（正文容器未出现不阻断提取）；页面关闭/崩溃等异常
+      // 继续上抛，交给下方导航错误分类（retryable/code/itemDisposition），
+      // 而非被吞掉后在 page.content() 处以未分类的裸错误逃出
+      if (!(e instanceof playwrightErrors.TimeoutError)) throw e;
+    }
   } catch (e) {
     // 包装 Playwright 导航错误，附带 retryable 标志：
     // - 瞬时网络类错误（DNS 解析失败、连接被重置、net::ERR_TIMED_OUT 等）标记
@@ -76,12 +98,19 @@ export async function driveExtractDetail(
       itemDisposition: string;
     };
     wrapped.retryable = isTransient;
-    wrapped.code = msg.includes('Timeout') || msg.includes('timeout')
-      ? 'NAVIGATION_TIMEOUT'
-      : isTransient
-        ? 'NAVIGATION_TRANSIENT_NETWORK'
-        : 'NAVIGATION_FAILED';
-    wrapped.itemDisposition = 'permanent_failed';
+    if (/timeout/i.test(msg)) {
+      wrapped.code = 'NAVIGATION_TIMEOUT';
+    } else if (isTransient) {
+      wrapped.code = 'NAVIGATION_TRANSIENT_NETWORK';
+    } else {
+      wrapped.code = 'NAVIGATION_FAILED';
+    }
+    // §20.2/§11.5 契约：仅条目级不可重试错误携带 itemDisposition；
+    // retryable=true 的瞬时错误不得携带（可重试错误统一进 retryable_failed），
+    // 否则错误对象自相矛盾，校验方（assertItemDispositionContract 规则 1）会拒绝
+    if (!isTransient) {
+      wrapped.itemDisposition = 'permanent_failed';
+    }
     throw wrapped;
   }
 
@@ -100,15 +129,22 @@ export async function driveExtractDetail(
   // 单图上限默认值单源取自 ToutiaoSourceConfigSchema.maxImageBytes（zod default），
   // 不再手写字面量，避免与 config 默认值漂移（adapter 仅在显式配置时透传）。
   const maxBytes = opts.maxImageBytes ?? DEFAULT_MAX_IMAGE_BYTES;
-  // 有界并发下载：图集页常有数十张图，串行下载耗时数倍。并发度限制为 3，
-  // 平衡吞吐与内存（每张图字节短暂驻留 asset.data，并发过高易 OOM）。
-  const IMAGE_DOWNLOAD_CONCURRENCY = 3;
+  // 有界并发下载：图集页常有数十张图，串行下载耗时数倍。并发度限制见
+  // IMAGE_DOWNLOAD_CONCURRENCY 注释。
   const assets: SourceAsset[] = await mapWithConcurrency(
     detail.images,
     IMAGE_DOWNLOAD_CONCURRENCY,
     async (imgUrl: string): Promise<SourceAsset> => {
       const asset: SourceAsset = { originalUrl: imgUrl, kind: 'image' };
-      const dl = await downloadImage({ url: imgUrl, maxBytes, referer: url });
+      // best-effort：downloadImage 的类型契约不保证不抛（当前实现恰好内部
+      // 兜住失败），抛错时降级为 metadata-only asset，不拖垮同条目的其它
+      // 图片下载与整个条目
+      let dl: Awaited<ReturnType<typeof downloadImage>>;
+      try {
+        dl = await downloadImage({ url: imgUrl, maxBytes, referer: url });
+      } catch {
+        return asset;
+      }
       if (dl.ok) {
         const sha256 = createHash('sha256').update(dl.bytes).digest('hex');
         asset.mimeType = dl.mimeType;

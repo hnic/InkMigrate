@@ -22,8 +22,9 @@ export interface DetectInput {
  * 3. unknown 兜底。
  */
 export function detectContentKind(input: DetectInput): SourceContentKind {
-  // 1. hint
-  if (input.hint !== undefined) {
+  // 1. hint（仅接受字符串：DetectInput 的索引签名允许宽松载荷，公共 API 需容忍
+  // null/非字符串 hint——直接跳过并回落 URL 判定，而非抛 TypeError）
+  if (typeof input.hint === 'string') {
     const mapped = mapHint(input.hint);
     if (mapped !== undefined) return mapped;
   }

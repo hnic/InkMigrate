@@ -21,21 +21,34 @@ export interface ReadabilityResult {
 export function readabilityFallbackFromDoc(doc: Document): ReadabilityResult {
   // L9: 优先级修正——先尝试头条/常见博客的精确正文容器（.article-content / .post-content），
   // 再回退 <article>，最后才是宽泛的 [class*="content"]。
+  // 精确选择器只取文档序首个，可能命中空/样板容器而错过内容更充实的兄弟容器，
+  // 故先做最小文本量校验再接受（空命中让位给下一候选）。
+  const pick = (sel: string): Element | undefined => {
+    const el = doc.querySelector(sel);
+    return el && (el.textContent?.trim().length ?? 0) > 0 ? el : undefined;
+  };
   const article =
-    doc.querySelector('.article-content') ??
-    doc.querySelector('.post-content') ??
-    doc.querySelector('article') ??
+    pick('.article-content') ??
+    pick('.post-content') ??
+    pick('article') ??
     // 宽泛回退：querySelector 只取文档序首个，常命中 .ad-content / .sidebar-content
     // 等非正文容器；改为过滤明显非正文后取文本最长者，与头部注释"找最长"一致。
     Array.from(doc.querySelectorAll('[class*="content"]'))
-      .filter((el) => !/\b(ad|sidebar|comment|footer|related)\b/i.test(String(el.className)))
+      // SVG 元素的 className 是 SVGAnimatedString（String() 得 "[object SVGAnimatedString]"
+      // 恒不匹配），统一读 class 属性对 HTML/SVG 均可靠，避免 SVG 容器绕过过滤。
+      .filter((el) => !/\b(ad|sidebar|comment|footer|related)\b/i.test(el.getAttribute('class') ?? ''))
       .sort((a, b) => (b.textContent?.length ?? 0) - (a.textContent?.length ?? 0))[0];
   let contentHtml = '';
   if (article) {
     contentHtml = article.innerHTML;
   } else {
-    // 兜底用 body
-    contentHtml = doc.body?.innerHTML ?? '';
+    // 兜底用 body，但剔除 script/style/noscript/nav 等非正文节点：
+    // 减小下游 §12.9 清洗体积，也避免导航/脚本噪声混入正文
+    const body = doc.body?.cloneNode(true) as HTMLElement | undefined;
+    body
+      ?.querySelectorAll('script, style, noscript, nav, header, footer')
+      .forEach((n) => n.remove());
+    contentHtml = body?.innerHTML ?? '';
   }
 
   // 标题：优先正文子树内的 <h1>（全文档首个 h1 常是站点页头/logo），
@@ -44,8 +57,11 @@ export function readabilityFallbackFromDoc(doc: Document): ReadabilityResult {
   const ogTitle =
     doc.querySelector('meta[property="og:title"]')?.getAttribute('content')?.trim() || undefined;
   const titleEl = doc.querySelector('title');
-  const rawTitle = h1?.textContent ?? ogTitle ?? titleEl?.textContent ?? undefined;
-  const title = rawTitle?.trim() || undefined;
+  // 空白 h1 文本不应阻断回退：先 trim 再用 || 级联，
+  // 否则空字符串（非 nullish）会抑制 og:title / <title> 回退
+  const rawTitle =
+    h1?.textContent?.trim() || ogTitle || titleEl?.textContent?.trim() || undefined;
+  const title = rawTitle || undefined;
 
   const result: ReadabilityResult = { contentHtml };
   if (title !== undefined) result.title = title;

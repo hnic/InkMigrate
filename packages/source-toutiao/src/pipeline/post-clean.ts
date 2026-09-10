@@ -23,10 +23,13 @@ export function htmlToMarkdownSafe(html: string): string {
   return turndown.turndown(html).trim();
 }
 
-const RESIDUAL_HTML = /<\/?[a-z][\s\S]*?>/gi;
-const DANGEROUS_SCHEME = /\((javascript|vbscript|file|data):[^)]*\)/gi;
+// 残留 HTML 只按单行标签形态移除（标签内不含 < > \n）：
+// [\s\S]*? 可跨行匹配，普通散文里 "a<b and c>d" / "x<y\nthen y>z" 会被整段吞掉
+const RESIDUAL_HTML = /<\/?[a-z][^<>\n]*>/gi;
+// 仅锚定 Markdown 链接语法 ]( ——裸 \((file|data):…\) 会误伤正文括号散文
+//（如 "(file: 见附件)"），替换保留 ]() 与链接文字而非整段删除
+const DANGEROUS_SCHEME = /\]\(\s*(?:javascript|vbscript|file|data):[^)]*\)/gi;
 const CONTROL_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F]/g;
-const MULTI_BLANK = /\n{3,}/g;
 const NESTED_LINK = /\[((?:\[[^\]]*\]|[^\]])*)\]\(([^)]*)\)/g;
 const EMPTY_PARAGRAPH = /\n\s*\n\s*\n/g;
 
@@ -44,6 +47,9 @@ export function postCleanMarkdown(md: string): string {
   const PH_RE = /\uE000CODE(\d+)\uE001/g;
   const placeholders: string[] = [];
   let s = md
+    // 源文档若本就含 U+E000/U+E001（或字面 "\uE000CODE0\uEE001" 串），还原阶段
+    // 会被当成我们的占位符替换进错误内容——先剔除再抽取，杜绝碰撞
+    .replace(/[\uE000\uE001]/g, '')
     .replace(CODE_BLOCK, (m) => {
       const idx = placeholders.length;
       placeholders.push(m);
@@ -55,9 +61,11 @@ export function postCleanMarkdown(md: string): string {
       return `${PH_OPEN}${idx}${PH_CLOSE}`;
     });
 
-  s = s.replace(RESIDUAL_HTML, '');
-  s = s.replace(DANGEROUS_SCHEME, '()');
+  // 先移除控制字符、再查危险 scheme：顺序反了的话，"java\x0Bscript:" 这类
+  // 混淆值会先通过 scheme 检查、控制字符剔除后又拼回合法 javascript: 链接
   s = s.replace(CONTROL_CHARS, '');
+  s = s.replace(RESIDUAL_HTML, '');
+  s = s.replace(DANGEROUS_SCHEME, ']()');
   // §13.6 解码泄漏的 HTML 实体：HTML 经多次 innerHTML 序列化后，属性值里的
   // `"` 被重编码为 `&quot;`，会漏进 Markdown。在代码块已占位后解码，避免误伤
   // 代码内容；不解码 &lt;/&gt; 以免绕过 stage 5 的 HTML Sanitization。
@@ -79,11 +87,12 @@ export function postCleanMarkdown(md: string): string {
     });
     if (before === s) break;
   }
+  // 连续空行折叠到最多两行：EMPTY_PARAGRAPH 的 \s* 可吞并任意 3+ 换行/空白行
+  // 序列，单独的 MULTI_BLANK/\n{3,}/ 在其后不可能再命中（已删除，避免误导）
   s = s.replace(EMPTY_PARAGRAPH, '\n\n');
-  s = s.replace(MULTI_BLANK, '\n\n');
 
-  // 还原代码块和行内代码
-  s = s.replace(PH_RE, (_, idx) => placeholders[Number(idx)] ?? '');
+  // 还原代码块和行内代码；索引失配时回退保留原文而非静默删除代码
+  s = s.replace(PH_RE, (m, idx) => placeholders[Number(idx)] ?? m);
 
   return s.trim();
 }

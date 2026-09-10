@@ -2,14 +2,12 @@ export {
   createToutiaoSource,
   buildRefFromFavorite,
   stableKeyForRef,
-  type ToutiaoBrowserAdapterConfig,
-} from './adapters/adapter.js';
-export {
   SOURCE_TOUTIAO_KIND,
   SOURCE_TOUTIAO_VERSION,
   SOURCE_TOUTIAO_ADAPTER_API_VERSION,
+  type ToutiaoBrowserAdapterConfig,
 } from './adapters/adapter.js';
-export { TOUTIAO_CAPABILITIES } from './capabilities.js';
+export { TOUTIAO_CAPABILITIES, TOUTIAO_CLEANUP_ACTIONS } from './capabilities.js';
 export {
   ToutiaoSourceConfigSchema,
   type ToutiaoSourceConfig,

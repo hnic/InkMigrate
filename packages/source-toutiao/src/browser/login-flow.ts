@@ -136,13 +136,15 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginFlowRes
 
     /**
      * 成功出口：收集信号并用 detectLoginState 交叉校验（与超时出口同一标准）。
-     * DOM 判定与 URL/遮罩信号矛盾（如 URL 仍停在登录页、登录遮罩仍在）时降级为
-     * auth-state-unknown，不直接宣布 logged-in。
+     * 白名单降级：仅交叉校验显式 logged-in 才确认；not-logged-in 与
+     * auth-state-unknown（信号冲突或不足）都降级，遵守 §12.2"不猜测已登录"。
+     * DOM 命中（头像+用户名/按钮消失）只是触发条件，最终结论以多信号交叉
+     * 校验为准——它是条件 B（按钮消失）这类易受改版误触发的启发式唯一的安全网。
      */
     const finishLoggedIn = async (): Promise<LoginFlowResult> => {
       const signals = await collectLoginSignals(page, targetUrl);
       const state: LoginState =
-        detectLoginState(signals) === 'not-logged-in' ? 'auth-state-unknown' : 'logged-in';
+        detectLoginState(signals) === 'logged-in' ? 'logged-in' : 'auth-state-unknown';
       // 登录成功后从页面提取收藏页 URL
       const favUrl = await extractFavoritesUrl(page);
       return { state, signals, ...(favUrl !== undefined ? { favoritesUrl: favUrl } : {}) };
@@ -181,7 +183,9 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginFlowRes
   } finally {
     // 无论正常返回还是 collectLoginSignals 抛错，都确保关闭自有的页面，避免泄漏。
     if (ownsPage) {
-      await page.close();
+      // close 失败不掩盖 try 块的原始错误（如 goto 超时/用户已关闭浏览器导致
+      // 上下文销毁）——此时 close 多半也会失败，吞掉即可让根因到达调用方
+      await page.close().catch(() => {});
     }
   }
 }
@@ -194,27 +198,47 @@ async function collectLoginSignals(
   originalUrl: string,
 ): Promise<Partial<LoginSignals>> {
   const currentUrl = page.url();
-  const urlLower = currentUrl.toLowerCase();
 
+  // 仅以 hostname+pathname 判定认证页：对整串 URL（含查询参数）做 includes 会把
+  // 恰好含 'login'/'account' 等字样的正常 URL（如 ?ch=news_login 的追踪参数、
+  // 文章 slug）同时置 redirectedToLogin=true / currentUrlLeftAuthPage=false——
+  // 两个负向信号足以把刚登录成功的页面误判为 not-logged-in。解析失败保持
+  // 保守默认（视为仍在认证页，宁可多降级也不猜已登录）。
+  let onAuthUrl = true;
+  try {
+    const { hostname, pathname } = new URL(currentUrl);
+    const authTarget = `${hostname}${pathname}`.toLowerCase();
+    onAuthUrl = AUTH_URL_PATTERNS.some((p) => authTarget.includes(p));
+  } catch {
+    // URL 不可解析：保守视为仍在认证页
+  }
   const signals: Partial<LoginSignals> = {
-    currentUrlLeftAuthPage: !AUTH_URL_PATTERNS.some((p) => urlLower.includes(p)),
-    redirectedToLogin: AUTH_URL_PATTERNS.some((p) => urlLower.includes(p)),
+    currentUrlLeftAuthPage: !onAuthUrl,
+    redirectedToLogin: onAuthUrl,
   };
 
-  // hasUserEntryElement: 检查已登录用户入口（用 count 检查元素存在，不依赖 CSS 可见性时序）
+  /** 逐个探测候选选择器是否命中（任一存在即 true），count 失败按不存在处理。 */
+  const anySelectorPresent = async (selectors: readonly string[]): Promise<boolean> => {
+    for (const sel of selectors) {
+      if ((await page.locator(sel).count().catch(() => 0)) > 0) return true;
+    }
+    return false;
+  };
+
+  // hasUserEntryElement: 检查已登录用户入口（用 count 检查元素存在，不依赖 CSS 可见性时序）。
+  // 末项是 2026 改版后真实 header 的用户名载体（头像链接的 aria-label，与
+  // evaluateLoginCheck 同源）——缺了它改版页永远凑不满 2 个正向信号，交叉校验
+  // 只能给出 auth-state-unknown。
   const userEntrySelectors = [
     '[data-testid="user-center"]',
     '.username',
     '.user-avatar',
     '.account-menu',
     '[data-testid="user-avatar"]',
+    '.ttp-header-profile .user-icon a[aria-label]:not([aria-label=""])',
   ];
-  for (const sel of userEntrySelectors) {
-    const count = await page.locator(sel).count().catch(() => 0);
-    if (count > 0) {
-      signals.hasUserEntryElement = true;
-      break;
-    }
+  if (await anySelectorPresent(userEntrySelectors)) {
+    signals.hasUserEntryElement = true;
   }
 
   // hasLoginMask: 检查登录遮罩
@@ -224,12 +248,8 @@ async function collectLoginSignals(
     '.login-dialog',
     '[data-testid="login-mask"]',
   ];
-  for (const sel of loginMaskSelectors) {
-    const count = await page.locator(sel).count().catch(() => 0);
-    if (count > 0) {
-      signals.hasLoginMask = true;
-      break;
-    }
+  if (await anySelectorPresent(loginMaskSelectors)) {
+    signals.hasLoginMask = true;
   }
 
   // favoritesPageAccessible: 导航目标 URL 与当前 URL 一致（未被重定向到登录页）
@@ -285,11 +305,19 @@ async function extractFavoritesUrl(page: Page): Promise<string | undefined> {
       });
 
       if (href !== null) {
-        // 相对路径转绝对路径：交给 URL 解析处理无前导斜杠（'u/123?tab=fav'）、
-        // 协议相对（'//host/…'）等形态，裸拼接会产生 'https://www.toutiao.comu/…'
-        // 之类的畸形 URL
-        if (href.startsWith('http://') || href.startsWith('https://')) return href;
-        return new URL(href, TOUTIAO_HOME).href;
+        // 相对路径转绝对 + 协议白名单：先 resolve 再校验协议——new URL() 对绝对
+        // URL 保留原 scheme（忽略 base），'javascript:'/'data:' 等非 http(s) 的
+        // href 若先做 startsWith 快速路径会原样漏出，成为调用方后续要导航/持久化
+        // 的 favoritesUrl。resolve 成功但协议不合法视同本轮未找到，继续轮询；
+        // 畸形 href（new URL 抛错）也只放弃该条链接，不中断整体提取。
+        try {
+          const resolved = new URL(href, TOUTIAO_HOME);
+          if (resolved.protocol === 'http:' || resolved.protocol === 'https:') {
+            return resolved.href;
+          }
+        } catch {
+          // 畸形 href：继续轮询
+        }
       }
 
       // 还没找到，hover 用户头像区域展开下拉菜单（收藏链接在 .user-list 下拉里）

@@ -24,7 +24,7 @@
  *     --state-dir <path-to-.inkmigrate> --source toutiao-main \
  *     --url "https://www.toutiao.com/c/user/token/<TOKEN>/?tab=fav"
  *
- * 可选：--config 有头(基线),headless(现状),headless+chrome  指定只跑哪几组（逗号分隔）
+ * 可选：--config headed,headless,headless-chrome  指定只跑哪几组（逗号分隔，按稳定 id 匹配）
  */
 import { chromium } from 'playwright';
 import type { BrowserContext } from 'playwright';
@@ -38,7 +38,12 @@ const args = process.argv.slice(2);
 const parsed: Record<string, string> = {};
 for (let i = 0; i < args.length; i++) {
   const flag = args[i];
-  if (flag === undefined || !flag.startsWith('--')) continue;
+  // 孤立 token（flag 拼写错误、多余位置参数、复制粘贴残留）告警而非静默跳过：
+  // 无人值守实验里静默用错 state-dir/url 比直接报错更危险
+  if (flag === undefined || !flag.startsWith('--')) {
+    console.warn(`⚠️ 忽略无法识别的参数：${flag}`);
+    continue;
+  }
   const value = args[i + 1];
   if (value === undefined || value.startsWith('--')) {
     console.error(`参数 ${flag} 缺少取值`);
@@ -66,23 +71,27 @@ if (!existsSync(profileDir)) {
 }
 
 interface ProbeConfig {
+  /** 机器可读的稳定 ID：--config 过滤与判读 find 都按它匹配，label 仅用于展示。 */
+  id: string;
   label: string;
   headless: boolean;
   channel?: 'chrome';
 }
 
 const ALL_CONFIGS: ProbeConfig[] = [
-  { label: '有头(基线)', headless: false },
-  { label: 'headless(现状)', headless: true },
-  { label: 'headless+chrome', headless: true, channel: 'chrome' },
+  { id: 'headed', label: '有头(基线)', headless: false },
+  { id: 'headless', label: 'headless(现状)', headless: true },
+  { id: 'headless-chrome', label: 'headless+chrome', headless: true, channel: 'chrome' },
 ];
 
 const configs = configFilter
-  ? ALL_CONFIGS.filter((c) => configFilter.includes(c.label))
+  ? ALL_CONFIGS.filter((c) => configFilter.includes(c.id))
   : ALL_CONFIGS;
 
 if (configs.length === 0) {
-  console.error(`无匹配配置。可选：${ALL_CONFIGS.map((c) => c.label).join(', ')}`);
+  console.error(
+    `无匹配配置。可选：${ALL_CONFIGS.map((c) => c.id).join(', ')}（label 仅用于展示：${ALL_CONFIGS.map((c) => c.label).join(', ')}）`,
+  );
   process.exit(1);
 }
 
@@ -91,6 +100,7 @@ console.log(`Profile: ${profileDir}`);
 console.log(`将跑 ${configs.length} 组配置：${configs.map((c) => c.label).join(' / ')}\n`);
 
 interface ProbeResult {
+  id: string;
   label: string;
   itemCount: number;
   finalUrl: string;
@@ -99,6 +109,8 @@ interface ProbeResult {
   loggedOut: boolean;
   rawHtmlLen: number;
   scriptCount: number;
+  /** 诊断 evaluate 是否成功：false 时 rawHtmlLen=0 是"测不到"而非"空骨架被拦"。 */
+  diagOk: boolean;
   error?: string;
   durationMs: number;
 }
@@ -121,7 +133,8 @@ async function runOne(cfg: ProbeConfig): Promise<ProbeResult> {
     const { refs, scanResult } = await driveScanFavorites({
       page,
       favoritesUrl: url,
-      baseUrl: 'https://www.toutiao.com/',
+      // 从已校验的 --url 实参派生 baseUrl，避免与硬编码域名两处来源漂移
+      baseUrl: new URL(url).origin + '/',
       sourceInstanceId: source,
       maxEmptyCycles: 2,
     });
@@ -133,14 +146,18 @@ async function runOne(cfg: ProbeConfig): Promise<ProbeResult> {
     // 注意这是解析/hydration 后的 documentElement.outerHTML 字符数（非 HTTP 响应
     // 字节数），但足以区分 39B 空骨架与 >10KB 完整 SPA 两个数量级。
     // （扫到 0 可能是反爬空壳，也可能是登录后真空；该指标最可靠）
+    // diagOk 标记 evaluate 本身是否成功：evaluate 偶发失败（导航中/崩溃/target
+    // closed）时 rawHtmlLen=0 是"测不到"，不能与"空骨架被拦"混为一谈。
     const diag = await page
       .evaluate(() => ({
         rawHtmlLen: document.documentElement?.outerHTML.length ?? 0,
         scriptCount: document.querySelectorAll('script').length,
       }))
-      .catch(() => ({ rawHtmlLen: 0, scriptCount: 0 }));
+      .then((d) => ({ ...d, diagOk: true as const }))
+      .catch(() => ({ rawHtmlLen: 0, scriptCount: 0, diagOk: false as const }));
 
     return {
+      id: cfg.id,
       label: cfg.label,
       itemCount: refs.length,
       finalUrl,
@@ -149,10 +166,12 @@ async function runOne(cfg: ProbeConfig): Promise<ProbeResult> {
       terminatedBy: scanResult.terminationReason,
       rawHtmlLen: diag.rawHtmlLen,
       scriptCount: diag.scriptCount,
+      diagOk: diag.diagOk,
       durationMs: Date.now() - start,
     };
   } catch (err) {
     return {
+      id: cfg.id,
       label: cfg.label,
       itemCount: 0,
       finalUrl: '(异常)',
@@ -161,18 +180,27 @@ async function runOne(cfg: ProbeConfig): Promise<ProbeResult> {
       terminatedBy: 'error',
       rawHtmlLen: 0,
       scriptCount: 0,
+      diagOk: false,
       error: err instanceof Error ? err.message : String(err),
       durationMs: Date.now() - start,
     };
   } finally {
     if (context !== undefined) {
+      let closeFailed = false;
       await context.close().catch((e) => {
         // 三组配置共用同一 profile，close 失败意味着锁未释放，会连累下一组
         // launch 失败（并被误读为"被拦"），必须显式暴露。
+        closeFailed = true;
         console.error(
-          `⚠️ [${cfg.label}] context.close 失败：${e instanceof Error ? e.message : String(e)}（profile 可能仍被锁定，将影响后续配置）`,
+          `⚠️ [${cfg.label}] context.close 失败：${e instanceof Error ? e.message : String(e)}（profile 可能仍被锁定）`,
         );
       });
+      if (closeFailed) {
+        // 以"结论可信"为目标的对照实验：close 失败后剩余配置必失败、对比已失效，
+        // 立即中止并宣告本轮实验作废，而不是跑完打出误导性的"对照结果"表格
+        console.error('⚠️ profile 锁未释放，剩余配置不再执行，本轮对照实验作废。');
+        process.exit(1);
+      }
     }
   }
 }
@@ -217,16 +245,20 @@ console.log();
 // 决定性判读：用 rawHtmlLen 区分"空骨架被拦(<200B)"vs"正常 SPA(>10KB)"
 // 39B 空骨架 vs >10KB 完整 SPA 的分界阈值（三处判读共用，勿各自硬编码）
 const EMPTY_SKELETON_MAX_BYTES = 200;
-const baseline = results.find((r) => r.label === '有头(基线)');
-const headless = results.find((r) => r.label === 'headless(现状)');
-const chromeHeadless = results.find((r) => r.label === 'headless+chrome');
+// 判读按稳定 id 匹配（label 仅展示用，改动 label 不应静默跳过判读段）
+const baseline = results.find((r) => r.id === 'headed');
+const headless = results.find((r) => r.id === 'headless');
+const chromeHeadless = results.find((r) => r.id === 'headless-chrome');
 
 console.log('========== 判读 ==========');
 if (baseline && headless) {
-  // 异常退出（profile 锁/浏览器缺失等）的 rawHtmlLen=0 不算"被拦"，否则崩溃会被
-  // 误读成"✅ 反爬成立"的结论。
-  const baselineBlocked = baseline.error === undefined && baseline.rawHtmlLen < EMPTY_SKELETON_MAX_BYTES;
-  const headlessBlocked = headless.error === undefined && headless.rawHtmlLen < EMPTY_SKELETON_MAX_BYTES;
+  // 异常退出（profile 锁/浏览器缺失等）与诊断 evaluate 失败的 rawHtmlLen=0 都不算
+  // "被拦"（diagOk=false 表示"测不到"而非"空骨架"），否则崩溃会被误读成
+  // "✅ 反爬成立"的结论。
+  const baselineBlocked =
+    baseline.error === undefined && baseline.diagOk && baseline.rawHtmlLen < EMPTY_SKELETON_MAX_BYTES;
+  const headlessBlocked =
+    headless.error === undefined && headless.diagOk && headless.rawHtmlLen < EMPTY_SKELETON_MAX_BYTES;
   if (baselineBlocked && headlessBlocked) {
     console.log('⚠️ 有头和 headless 都拿到空骨架 → 登录态未生效，本轮无法判定反爬（需先解决登录态）。');
   } else if (!baselineBlocked && headlessBlocked) {
@@ -243,6 +275,7 @@ if (baseline && headless) {
 if (chromeHeadless) {
   const blocked =
     chromeHeadless.error === undefined &&
+    chromeHeadless.diagOk &&
     chromeHeadless.rawHtmlLen < EMPTY_SKELETON_MAX_BYTES;
   console.log(
     blocked

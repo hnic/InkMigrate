@@ -40,6 +40,12 @@ export interface ScanDriverResult {
   refs: SourceItemRef[];
   /** scanFavoritesList 返回的完整扫描统计。 */
   scanResult: ScanResult;
+  /**
+   * 提取轮次失败计数（初始提取 + 滚动轮重试后仍失败）。>0 表示扫描可能被
+   * 截断：此时 scanResult.terminationReason 会追加 `_with_N_extraction_errors`
+   * 后缀，调用方可据此区分"扫到底/没有收藏"与"页面故障导致的提前终止"。
+   */
+  extractionErrors: number;
 }
 
 /**
@@ -110,9 +116,17 @@ export async function driveScanFavorites(
         function canonicalizeUrl(raw: string): string {
           try {
             const u = new URL(raw);
+            if (u.protocol !== 'http:' && u.protocol !== 'https:') return raw;
+            // 仅头条域名剥参（与 Node 端 canonicalizeToutiaoUrl 同口径）：非头条域名
+            // 的 from/source 可能是功能性参数而非追踪参数，误剥会造成两侧 key 漂移
+            const h = u.hostname;
+            if (h !== 'toutiao.com' && !h.endsWith('.toutiao.com')) return raw;
             u.hash = '';
             for (const k of [...u.searchParams.keys()]) {
-              if (TRACKING_PARAMS.has(k)) u.searchParams.delete(k);
+              // 键名小写比对：From=/UTM_Source= 等变体需与 Node 端一致剥除，
+              // 否则 DOM 重渲染换参数大小写后浏览器端误判"新条目"→ Node 归一化
+              // 去重丢弃 → 空轮累积 → 提前终止（§缺陷3 复发）
+              if (TRACKING_PARAMS.has(k.toLowerCase())) u.searchParams.delete(k);
             }
             return u.toString();
           } catch {
@@ -177,8 +191,11 @@ export async function driveScanFavorites(
           // 与 Node 端 scanner 同口径（key = externalId ?? canonicalUrl）：
           // 优先 data-item-id（scanner 的 externalId 直读该属性），其次 URL 派生
           // id/canonicalUrl。两侧口径不同会导致同一元素被重复发送或提前终止。
+          // 注意 '' 的处理：getAttribute 的 '' 非 nullish，Node 端 scanner 会把
+          // externalId='' 当作存在（key=''），此处保持同口径（'' 也直接作 key），
+          // 避免空值条目在两侧 key 分裂后重复发送、徒增空轮。
           const attrId = el.getAttribute('data-item-id');
-          const key = attrId !== null && attrId !== '' ? attrId : dedupeKey(href);
+          const key = attrId !== null ? attrId : dedupeKey(href);
           if (!known.has(key)) {
             newEls.push(el);
             newKeys.push(key);
@@ -202,13 +219,22 @@ export async function driveScanFavorites(
     return result.html;
   };
 
+  let extractionErrors = 0;
   let initialHtml: string;
   try {
     initialHtml = await extractItemsHtml();
   } catch {
-    // 首轮提取失败（页面仍在跳转/执行上下文销毁）：以空 HTML 起步，
-    // 由后续滚动轮次与空轮循环兜底，不让整个扫描在起步时即失败
-    initialHtml = '';
+    // 首轮提取失败（页面仍在跳转/执行上下文销毁）：等新文档就绪后重试一次
+    //（与 scrollForMore 的恢复路径同款），仍失败才以空 HTML 起步并计数——
+    // 由后续滚动轮次与空轮循环兜底，同时 extractionErrors 保证"空结果"
+    // 可被判别为页面故障而非"没有收藏"
+    await opts.page.waitForLoadState('domcontentloaded').catch(() => {});
+    try {
+      initialHtml = await extractItemsHtml();
+    } catch {
+      extractionErrors++;
+      initialHtml = '';
+    }
   }
   const waitMs = opts.waitAfterScrollMs ?? 1500;
   let scrollRound = 0;
@@ -258,6 +284,9 @@ export async function driveScanFavorites(
       try {
         return await extractAfterScroll();
       } catch {
+        // null 与"无更多"共用返回值（scanner 契约，保留已累计条目），但计入
+        // 失败数：终止原因会带后缀，截断的扫描不会伪装成完整扫描
+        extractionErrors++;
         return null;
       }
     }
@@ -274,6 +303,12 @@ export async function driveScanFavorites(
     scanInput.maxItems = opts.maxItems;
   }
   const scanResult = await scanFavoritesList(scanInput);
+  if (extractionErrors > 0) {
+    // 可观测性：返回 null 与"无更多内容"在 scanner 契约里不可区分（都会记
+    // no_load_more），被瞬时提取失败截断的扫描不能以"完整扫描"的面目到达
+    // 调用方/报告。追加后缀而非改写原值，保留 no_new_items/no_load_more 语义
+    scanResult.terminationReason += `_with_${extractionErrors}_extraction_errors`;
+  }
 
   // 过滤无法转 markdown 笔记的内容类型。video 无正文文本（详情页是播放器），
   // 迁移出来只会是空壳/降级笔记，故在成为候选前剔除。保留文本类
@@ -286,7 +321,7 @@ export async function driveScanFavorites(
     .filter((fav) => !EXCLUDED_KINDS.has(fav.contentKind))
     .map((fav) => buildRefInline(opts.sourceInstanceId, fav, discoveredAt));
 
-  return { refs, scanResult };
+  return { refs, scanResult, extractionErrors };
 }
 
 /**

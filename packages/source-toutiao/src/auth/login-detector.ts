@@ -15,7 +15,7 @@ export interface LoginSignals {
   hasUserEntryElement?: boolean;
   /** 收藏页或用户中心可正常打开，且未出现登录遮罩。 */
   favoritesPageAccessible?: boolean;
-  /** 受保护页面访问后没有被重定向到登录页。 */
+  /** 受保护页面访问后被重定向到登录页（true 为负向信号；false 表示未重定向，参与 URL 正向信号合并计 1）。 */
   redirectedToLogin?: boolean;
   /** 页面存在登录遮罩。 */
   hasLoginMask?: boolean;
