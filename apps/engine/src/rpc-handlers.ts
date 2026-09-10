@@ -215,10 +215,12 @@ async function handleAuthLogin(params: AuthLoginParams | undefined): Promise<Aut
   const session = new ToutiaoBrowserSession({ profileDir, headless: false });
   try {
     await session.launch();
-    // 通知 GUI：浏览器已打开
+    // 通知 GUI：浏览器已打开。已登录（Profile 带有效会话）时 runLoginFlow 会在
+    // 数秒内自动确认并结束等待；文案按"先检测、未登录再扫码"表述，避免已登录
+    // 用户被误导去重复扫码
     sendNotification('log', {
       level: 'info',
-      message: '浏览器已打开，请在浏览器窗口中扫码登录',
+      message: '浏览器已打开，正在检测登录状态；若未登录，请在浏览器窗口中扫码登录',
     });
     sendNotification('progress', {
       phase: 'login',

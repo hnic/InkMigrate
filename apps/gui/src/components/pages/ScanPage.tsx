@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { AppSettings } from '../../lib/types.js';
 import { ConfigPrompt } from '../ConfigPrompt.js';
+import { normalizeFavoritesUrl, isSendableFavoritesUrl } from '../../lib/favorites-url.js';
 
 /** 问题清单最多展示条数（超出截断并提示剩余数量）。 */
 const MAX_ISSUES_SHOWN = 5;
@@ -152,6 +153,20 @@ function ToutiaoScan({ settings, update, rpcCall, addLog, activePhase, cancel }:
 
   async function handleScan() {
     if (busy || scanning) return;
+    // 粘贴噪声规范化 + 发送前可读校验（与 LoginPage 同口径）：常见粘贴错误
+    // （地址栏复制丢协议头/首尾空白）在客户端给出中文提示，而非裸 -32602
+    const favoritesUrl = normalizeFavoritesUrl(settings.favoritesUrl);
+    if (!isSendableFavoritesUrl(favoritesUrl)) {
+      const msg = favoritesUrl === ''
+        ? '收藏列表 URL 为空，请先在「登录」页登录自动获取，或在下方手动填写'
+        : `收藏列表 URL 无法识别（需 http(s) 链接）：「${favoritesUrl}」`;
+      setError(msg);
+      addLog('error', `扫描失败：${msg}`);
+      return;
+    }
+    if (favoritesUrl !== settings.favoritesUrl) {
+      update({ favoritesUrl });
+    }
     setResult(null);
     setError(null);
     setBusy(true);
@@ -159,7 +174,7 @@ function ToutiaoScan({ settings, update, rpcCall, addLog, activePhase, cancel }:
       const res = await rpcCall('scan.start', {
         source: settings.source,
         stateDir: settings.stateDir,
-        favoritesUrl: settings.favoritesUrl,
+        favoritesUrl,
       }) as { uniqueItems?: number; terminationReason?: string };
       // 响应字段做容错归一，避免后端缺字段时渲染路径抛错
       setResult({

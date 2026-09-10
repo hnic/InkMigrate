@@ -81,9 +81,13 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginFlowRes
     const deadline = Date.now() + timeoutMs;
 
     // 首轮检测前等待页面渲染（不等完整 networkidle，只等 DOM 元素出现）
-    // 等登录按钮（未登录）或用户头像（已登录）之一出现——两者都标志 header 已渲染
-    await page.waitForSelector('.login-button, .ttp-header-profile .user-icon', {
-      timeout: 10_000,
+    // 等登录按钮（未登录）或用户图标（已登录）之一出现——两者都标志 header 已渲染。
+    // .user-icon 用裸类：2026-09 实测它不再挂在 .ttp-header-profile 下（顶栏容器
+    // 改为 .fix-header），带祖先的旧选择器在改版页永远等不到。
+    // 5s 上限：这只是让首轮检测更可能命中的优化，轮询每 2s 会兜底重检，
+    // 选择器漂移时不应让用户白等 10s 才开始真正的检测
+    await page.waitForSelector('.login-button, .user-icon', {
+      timeout: 5_000,
     }).catch(() => {});
 
     // 合并头像+用户名检测为单次 evaluate，减少往返
@@ -101,15 +105,24 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginFlowRes
             '.ttp-header-profile img, .header-profile-wrapper img, .user-icon img',
           );
           const hasAvatar = profile !== null;
-          // 头条改版后用户名不在 .name 元素里，而在头像链接的 aria-label 属性
+          // 用户名载体历经三次改版：.name 元素 → 头像链接 aria-label（2026-06）→
+          // a > img[alt] / a > span 文本（2026-09 实测）。三者并列取或，祖先选择器
+          // 同步放宽为裸 .user-icon 兜底（.ttp-header-profile 容器已不存在）
           const userIcon = document.querySelector(
-            '.ttp-header-profile .user-icon, .header-profile-wrapper .user-icon',
+            '.ttp-header-profile .user-icon, .header-profile-wrapper .user-icon, .user-icon',
           );
-          const nameFromLabel = userIcon?.querySelector('a')?.getAttribute('aria-label')?.trim();
-          const hasName = (nameFromLabel?.length ?? 0) > 0;
-          // header 区是否已渲染（避免对空白页误判）
+          const userLink = userIcon?.querySelector('a');
+          const hasName = [
+            userLink?.getAttribute('aria-label'),
+            userLink?.querySelector('img')?.getAttribute('alt'),
+            userLink?.querySelector('span')?.textContent,
+          ].some((t) => (t?.trim().length ?? 0) > 0);
+          // header 区是否已渲染（避免对空白页误判）。.fix-header 是 2026-09 实测的
+          // 顶栏容器；.user-icon/.login-button 作为强用户区标记兜底——空白页不会有
           const headerRendered =
-            document.querySelector('.ttp-header-profile, .ttp-site-header, header') !== null;
+            document.querySelector(
+              '.fix-header, .ttp-header-profile, .ttp-site-header, header, .user-icon, .login-button',
+            ) !== null;
           return { hasAvatar, hasName, hasLoginButton, headerRendered };
         })
         .catch(() => ({
@@ -161,6 +174,16 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginFlowRes
         return await finishLoggedIn();
       }
 
+      // 主动登录态核查：DOM 快路径失配（选择器漂移）时不能干等满超时——已登录
+      // 用户会被 300s 心跳卡住且阻塞后续长任务。此处周期性跑与超时出口完全同一
+      // 判据的多信号交叉校验（≥2 独立正向 + 0 反向，§12.2 不猜测已登录），
+      // 仅在时序上前移收敛，不放宽标准。collectLoginSignals 内部各探测均已容错，
+      // 不会因瞬时页面跳转抛错中断轮询。
+      const interimSignals = await collectLoginSignals(page, targetUrl);
+      if (detectLoginState(interimSignals) === 'logged-in') {
+        return await finishLoggedIn();
+      }
+
       // 首轮不等 pollMs（已登录时 waitForSelector 后立即检测），后续轮询等待
       if (!isFirstRound) {
         await new Promise((resolve) => setTimeout(resolve, pollMs));
@@ -176,9 +199,14 @@ export async function runLoginFlow(opts: LoginFlowOptions): Promise<LoginFlowRes
       return await finishLoggedIn();
     }
 
-    // 超时：返回最终状态
+    // 超时：返回最终状态。若多信号已判定 logged-in（DOM 快路径全程失配但信号
+    // 齐备），同样尝试提取收藏 URL——登录证据充分时不应白白丢弃提取结果
     const timeoutSignals = await collectLoginSignals(page, targetUrl);
     const timeoutState = detectLoginState(timeoutSignals);
+    if (timeoutState === 'logged-in') {
+      const favUrl = await extractFavoritesUrl(page);
+      return { state: timeoutState, signals: timeoutSignals, ...(favUrl !== undefined ? { favoritesUrl: favUrl } : {}) };
+    }
     return { state: timeoutState, signals: timeoutSignals };
   } finally {
     // 无论正常返回还是 collectLoginSignals 抛错，都确保关闭自有的页面，避免泄漏。
@@ -229,6 +257,9 @@ async function collectLoginSignals(
   // 末项是 2026 改版后真实 header 的用户名载体（头像链接的 aria-label，与
   // evaluateLoginCheck 同源）——缺了它改版页永远凑不满 2 个正向信号，交叉校验
   // 只能给出 auth-state-unknown。
+  // 2026-09 追加（探针对照实测）：裸 .user-icon / .user-card.logged / a.user-info
+  // 在已登录首页存在、未登录首页（全新 profile）全部不存在，可作独立正向信号；
+  // 旧的 .ttp-header-profile 祖先在当前首页结构中已消失。
   const userEntrySelectors = [
     '[data-testid="user-center"]',
     '.username',
@@ -236,6 +267,9 @@ async function collectLoginSignals(
     '.account-menu',
     '[data-testid="user-avatar"]',
     '.ttp-header-profile .user-icon a[aria-label]:not([aria-label=""])',
+    '.user-icon',
+    '.user-card.logged',
+    'a.user-info',
   ];
   if (await anySelectorPresent(userEntrySelectors)) {
     signals.hasUserEntryElement = true;
@@ -320,12 +354,13 @@ async function extractFavoritesUrl(page: Page): Promise<string | undefined> {
         }
       }
 
-      // 还没找到，hover 用户头像区域展开下拉菜单（收藏链接在 .user-list 下拉里）
-      // 改版后下拉挂在 .user-icon 下，hover 它才能展开
+      // 还没找到，hover 用户头像区域展开下拉菜单（收藏链接在 .user-list 下拉里）。
+      // 2026-09 实测：下拉挂在裸 .user-icon 下（.ttp-header-profile 祖先已消失），
+      // 且多数时候无需 hover 即在 DOM 中（带 popup-hide 隐藏类）；hover 仅为兜底
       if (attempt === 0) {
         try {
           await page
-            .locator('.ttp-header-profile .user-icon, .ttp-header-profile, .header-profile-wrapper')
+            .locator('.ttp-header-profile .user-icon, .ttp-header-profile, .header-profile-wrapper, .user-icon')
             .first()
             .hover({ timeout: 2000 });
           await page.waitForTimeout(300);

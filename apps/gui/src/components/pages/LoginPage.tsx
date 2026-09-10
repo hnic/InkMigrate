@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { AppSettings, OperationState, AuthLoginResult } from '../../lib/types.js';
+import { normalizeFavoritesUrl, isSendableFavoritesUrl } from '../../lib/favorites-url.js';
 
 interface Props {
   settings: AppSettings;
@@ -36,10 +37,20 @@ export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin, pro
     setLoading(true);
     setLoginState('loading');
     try {
+      // 粘贴噪声规范化（地址栏复制丢协议头/首尾空白）+ 发送前可读校验：
+      // 让常见粘贴错误以中文提示失败，而非裸 -32602 schema 错误
+      const favoritesUrl = normalizeFavoritesUrl(settings.favoritesUrl);
+      if (favoritesUrl !== '' && !isSendableFavoritesUrl(favoritesUrl)) {
+        throw new Error(`收藏列表 URL 无法识别（需 http(s) 链接）：「${favoritesUrl}」，请在「设置」页修正`);
+      }
+      // 自愈回写：规范化改变了输入时同步回设置，后续扫描/迁移页拿到干净值
+      if (favoritesUrl !== settings.favoritesUrl && favoritesUrl !== '') {
+        update({ favoritesUrl });
+      }
       const result = await rpcCall('auth.login', {
         source: settings.source,
         stateDir: settings.stateDir,
-        ...(settings.favoritesUrl ? { favoritesUrl: settings.favoritesUrl } : {}),
+        ...(favoritesUrl !== '' ? { favoritesUrl } : {}),
       }) as AuthLoginResult;
       if (typeof result?.state !== 'string') {
         throw new Error('登录响应格式异常（缺少 state 字段）');
@@ -49,15 +60,16 @@ export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin, pro
         setLoginState('failed');
       }
       addLog(ok ? 'info' : 'error', `登录结果：${result.state}`);
+      // 引擎仅在登录证据充分时（DOM/多信号确认，或超时多信号判定）才提取
+      // 收藏 URL——有值即回填，不额外要求 state===logged-in
+      if (result.favoritesUrl) {
+        update({ favoritesUrl: result.favoritesUrl });
+        addLog('info', `已自动获取收藏列表 URL`);
+      } else if (ok) {
+        // 提取是尽力而为（DOM 选择器可能因头条改版失配），失败必须显式告知去向
+        addLog('warn', '未能自动获取收藏列表 URL，请在「扫描」页或「设置」页手动填写');
+      }
       if (ok) {
-        // 登录成功后自动填充收藏列表 URL；提取是尽力而为（DOM 选择器可能因
-        // 头条改版失配），失败必须显式告知去向，否则用户面对灰按钮无从下手
-        if (result.favoritesUrl) {
-          update({ favoritesUrl: result.favoritesUrl });
-          addLog('info', `已自动获取收藏列表 URL`);
-        } else {
-          addLog('warn', '未能自动获取收藏列表 URL，请在「扫描」页或「设置」页手动填写');
-        }
         try {
           await refreshLogin();
         } catch (e) {

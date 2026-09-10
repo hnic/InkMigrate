@@ -1,0 +1,19 @@
+<!doctype html>
+<!--
+  模拟「DOM 快路径全部失配、但多信号交叉校验仍可判定 logged-in」的页面：
+  仅有 .username 用户入口（collectLoginSignals 的 userEntrySelectors 命中），
+  无 header 容器 / .user-icon / img / .login-button / aria-label。
+  用于锁定轮询内【多信号主动检测早退】行为：不该干等满 loginTimeoutMs。
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>首页</title>
+</head>
+<body>
+  <div>
+    <span class="username">测试用户</span>
+    <div class="feed">内容…</div>
+  </div>
+</body>
+</html>

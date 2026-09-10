@@ -1,0 +1,42 @@
+<!doctype html>
+<!--
+  模拟头条【已登录】首页结构（2026-09 实测真实形态，探针采集）。
+  与 2026-06 改版（header-logged-in.html）的关键差异：
+    - 无 <header> 元素、无 .ttp-header-profile/.ttp-site-header 祖先
+    - 顶栏容器是 .fix-header.common-component-wrapper
+    - 用户名载体从 a[aria-label] 改为 a > img[alt] / a > span 文本
+    - .user-list 下拉（含「我的收藏」tab=fav 链接）无需 hover 即在 DOM 中
+      （带 popup-hide 隐藏类），链接为协议相对 //www.toutiao.com/...
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>今日头条</title>
+</head>
+<body>
+  <div id="root">
+    <div class="home-container  new-style">
+      <div class="fix-header common-component-wrapper">
+        <div>
+          <a class="logo" aria-label="今日头条徽标" href="https://www.toutiao.com"></a>
+          <div class="user-icon red">
+            <a href="//www.toutiao.com/c/user/token/MOCK_TOKEN_2026_09/?source=feed" target="_blank" rel="noopener" tabindex="0" role="button" aria-haspopup="true" aria-expanded="false">
+              <img src="//sf1-cdn-tos.toutiaostatic.com/img/mock-avatar~300x300.image" alt="分秒必争山丘D">
+            </a>
+            <div class="user-list hover-list ttp-popup-container popup-anime-hide popup-hide" style="transform: scale(0.8); transform-origin: center top;">
+              <div role="menu">
+                <a href="//www.toutiao.com/c/user/token/MOCK_TOKEN_2026_09/?source=feed" target="_blank" rel="noopener" role="menuitem" tabindex="-1">个人主页</a>
+                <a href="//mp.toutiao.com" target="_blank" rel="noopener" role="menuitem" tabindex="-1">创作平台</a>
+                <a href="//www.toutiao.com/c/user/token/MOCK_TOKEN_2026_09/?tab=fav?source=feed" target="_blank" rel="noopener" role="menuitem" tabindex="-1">我的收藏</a>
+                <a href="#" role="menuitem" tabindex="-1">退出登录</a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <!-- 未登录时隐藏的登录弹窗（已登录页同样存在，必须不被误判为登录遮罩） -->
+  <div class="ttp-modal-wrapper ttp-login-modal modal-hide modal-anime-hide" id="login_modal_ele"></div>
+</body>
+</html>

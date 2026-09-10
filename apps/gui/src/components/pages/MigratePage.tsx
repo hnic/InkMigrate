@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { AppSettings, ResumableJob, MigrateResult } from '../../lib/types.js';
 import { ConfigPrompt } from '../ConfigPrompt.js';
+import { normalizeFavoritesUrl, isSendableFavoritesUrl } from '../../lib/favorites-url.js';
 
 interface Props {
   settings: AppSettings;
@@ -46,9 +47,28 @@ export function MigratePage({ settings, update, rpcCall, addLog, activePhase, ca
     void refreshResumable();
   }, [refreshResumable]);
 
+  /** 迁移参数共用的 favoritesUrl 规范化（与登录/扫描页同口径）。 */
+  function resolveFavoritesUrlParam(): { value?: string; error?: string } {
+    const favoritesUrl = normalizeFavoritesUrl(settings.favoritesUrl);
+    if (favoritesUrl === '') return {};
+    if (!isSendableFavoritesUrl(favoritesUrl)) {
+      return { error: `收藏列表 URL 无法识别（需 http(s) 链接）：「${favoritesUrl}」，请在「设置」页修正` };
+    }
+    if (favoritesUrl !== settings.favoritesUrl) {
+      update({ favoritesUrl });
+    }
+    return { value: favoritesUrl };
+  }
+
   async function handleMigrate() {
     setResult(null);
     setError(null);
+    const fav = resolveFavoritesUrlParam();
+    if (fav.error !== undefined) {
+      setError(fav.error);
+      addLog('error', `迁移失败：${fav.error}`);
+      return;
+    }
     try {
       const params: Record<string, unknown> = {
         source: settings.source,
@@ -56,7 +76,7 @@ export function MigratePage({ settings, update, rpcCall, addLog, activePhase, ca
         stateDir: settings.stateDir,
         vaultPath: settings.vaultPath,
       };
-      if (settings.favoritesUrl) params.favoritesUrl = settings.favoritesUrl;
+      if (fav.value !== undefined) params.favoritesUrl = fav.value;
       if (maxItems) params.maxItems = parseInt(maxItems, 10);
       if (interval) params.intervalMs = parseInt(interval, 10);
       // §10.2 配置驱动的来源分派（Evernote 文件源）
@@ -78,13 +98,19 @@ export function MigratePage({ settings, update, rpcCall, addLog, activePhase, ca
     if (!resumable.job) return;
     setResult(null);
     setError(null);
+    const fav = resolveFavoritesUrlParam();
+    if (fav.error !== undefined) {
+      setError(fav.error);
+      addLog('error', `续跑失败：${fav.error}`);
+      return;
+    }
     try {
       const params: Record<string, unknown> = {
         job: resumable.job,
         stateDir: settings.stateDir,
         vaultPath: settings.vaultPath,
       };
-      if (settings.favoritesUrl) params.favoritesUrl = settings.favoritesUrl;
+      if (fav.value !== undefined) params.favoritesUrl = fav.value;
       if (maxItems) params.maxItems = parseInt(maxItems, 10);
       if (settings.configPath) params.configPath = settings.configPath;
 
