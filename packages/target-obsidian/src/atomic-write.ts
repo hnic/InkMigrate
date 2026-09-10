@@ -2,20 +2,26 @@ import {
   mkdirSync,
   writeFileSync,
   renameSync,
-  existsSync,
   rmSync,
-  readFileSync,
 } from 'node:fs';
 import { dirname, join, basename } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { assertSymlinkSafe, writtenFileHash } from '@inkmigrate/core';
+import {
+  assertSymlinkSafe,
+  assertWriteDirSafe,
+  writtenFileHash,
+} from '@inkmigrate/core';
 
 /**
  * §13.10 原子写入流程（底层，不校验 frontmatter 结构）。
  *
  * 1. 在同目录创建隐藏临时文件（`.inkmigrate-<basename>.<rand>.tmp`）。
- * 2. 写入（writeFileSync 刷数据到 OS，但不 fsync——断电仍可能丢半截，L11）。
- * 3. 安全校验：解引用符号链接确认 tmpPath 真实路径在 Vault 内。
+ * 2. 写入（writeFileSync 刷数据到 OS，但不 fsync——文件与 rename 的目录项都
+ *    不做持久化承诺，断电后目标可能缺失或回旧版，返回哈希描述的是交付给
+ *    rename 的字节而非磁盘已持久化的字节，L11 威胁模型下接受该权衡）。
+ * 3. 安全校验：写前用 core assertWriteDirSafe 校验目标父目录链 + 终组件符号
+ *    链接（ENOENT 安全）；写后确认 tmpPath 真实路径在 Vault 内，rename 前对
+ *    目标父目录链再做一次复核。
  * 4. 原子 rename 到目标路径。
  *
  * I17: 抽出此底层函数供分片索引 / 附件复用——它们不需要 frontmatter 校验，
@@ -37,13 +43,17 @@ export function atomicWriteRaw(
     throw new Error('atomicWriteRaw: content is empty');
   }
 
-  // §13.2 符号链接逃逸防护：如果调用方提供了 vaultRoot，写入前再次确认
-  if (vaultRoot !== undefined && existsSync(targetPath)) {
-    assertSymlinkSafe(vaultRoot, targetPath);
-  }
-
   const dir = dirname(targetPath);
   mkdirSync(dir, { recursive: true });
+
+  // §13.2 统一写入防护：core assertWriteDirSafe 专为 atomic-write 设计——校验
+  // 父目录链（目标尚不存在也安全）并拒绝符号链接终组件。原先 existsSync 门控
+  // 的 assertSymlinkSafe 只覆盖「目标已存在」的情况：新文件（常见场景）完全不
+  // 设防，父目录已是逃逸符号链接时要等 tmp 写完才被发现（字节已落到 Vault 外）。
+  // 改在 mkdir 之后、写 tmp 之前校验，tmp 永远不会写到 Vault 外。
+  if (vaultRoot !== undefined) {
+    assertWriteDirSafe(vaultRoot, targetPath);
+  }
 
   const tmpPath = join(
     dir,
@@ -58,14 +68,21 @@ export function atomicWriteRaw(
 
     if (vaultRoot !== undefined) {
       assertSymlinkSafe(vaultRoot, tmpPath);
+      // H4: rename 前复核目标父目录链——上方校验与 rename 之间父目录被换成
+      // 指向 Vault 外的符号链接时，rename 会把成品文件放到 Vault 外且仍报告
+      // 成功（对 tmpPath 的校验只证明 tmp 自身位置，帮不上目标侧）。
+      assertWriteDirSafe(vaultRoot, targetPath);
     }
 
     renameSync(tmpPath, targetPath);
   } catch (e) {
-    if (existsSync(tmpPath)) rmSync(tmpPath, { force: true });
+    // force 已忽略 ENOENT，无需 existsSync 预检（预检本身还是 check-then-act）
+    rmSync(tmpPath, { force: true });
     throw e;
   }
 
+  // 逻辑内容哈希：rename 原子交付的就是这份字节；内存与磁盘的静默差异由
+  // verifyNote/verifyAsset 的「重读文件重算哈希」闭环兜底，不在此重复 I/O。
   return writtenFileHash(isBuffer ? content : Buffer.from(content, 'utf8'));
 }
 
@@ -94,8 +111,13 @@ export function atomicWrite(
  * 不做完整 YAML 解析（frontmatter.ts 已生成结构化内容；这里只防呆）。
  */
 function validateFrontmatterStructure(content: string): void {
-  const lines = content.split('\n');
-  if (lines[0] !== '---') {
+  // 容忍 BOM 与 CRLF：外部编辑器产出的合法 frontmatter 首行按 \n 切分后可能是
+  // '\uFEFF---' 或 '---\r'，严格等值比较会误拒（且误报为"无结束分隔符"）。
+  // 本流水线自身恒为 LF/无 BOM，此处仅提升防呆校验的健壮性，不改变现有输出。
+  const text = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+  const isDelim = (line: string): boolean => line === '---' || line === '---\r';
+  const lines = text.split('\n');
+  if (lines[0] === undefined || !isDelim(lines[0])) {
     throw new Error(
       'atomicWrite: content must start with "---" frontmatter delimiter',
     );
@@ -103,7 +125,8 @@ function validateFrontmatterStructure(content: string): void {
   // 找到第二个 "---"
   let closed = false;
   for (let i = 1; i < lines.length; i++) {
-    if (lines[i] === '---') {
+    const line = lines[i];
+    if (line !== undefined && isDelim(line)) {
       closed = true;
       break;
     }
@@ -113,10 +136,4 @@ function validateFrontmatterStructure(content: string): void {
       'atomicWrite: content has opening "---" but no closing "---" delimiter',
     );
   }
-}
-
-/** §13.10 内部读取辅助（用于覆盖前读取已有文件计算 written_file_hash）。 */
-export function readTargetIfExists(path: string): string | undefined {
-  if (!existsSync(path)) return undefined;
-  return readFileSync(path, 'utf8');
 }

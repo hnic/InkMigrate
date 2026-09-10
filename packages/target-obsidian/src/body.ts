@@ -3,9 +3,9 @@ import { gfm } from 'turndown-plugin-gfm';
 import {
   computeStableKey,
   deriveStableShortId,
-  sanitizeFilename,
   type SourceItem,
 } from '@inkmigrate/core';
+import { noteFilenameBody } from './paths.js';
 
 /** §13.6 共享的 turndown 实例（启用 GFM 表格/任务列表）。 */
 const turndown = new TurndownService({
@@ -58,12 +58,15 @@ export function convertEvernoteWikilinks(markdown: string, ctx: WikilinkResolveC
       const suffix = ctx.filenameShortId
         ? `-${deriveStableShortId(computeStableKey(ctx.sourceInstanceId, `sha256:${fingerprint}`))}`
         : '';
-      // 目标与别名都要剔除会破坏 wikilink 语法的字符：sanitizeFilename 只替换
-      // `\ / : * ? " < > |`，`[` `]` 会残留（目标含 `]]` 会提前终止链接）；
-      // 别名里的 `|` 是分隔符，同样剔除（wikilink 内无法转义这些字符）。
-      const target = `${sanitizeFilename(title, {
-        maxLength: Math.max(1, ctx.maxFilenameLength - suffix.length),
-      })}${suffix}`.replace(/[[\]]/g, '');
+      // 目标必须与磁盘文件名逐字节一致：共用 paths.ts noteRelativePath 的同一
+      // 推导（sanitize + maxLength 扣减 + 括号剔除，见 noteFilenameBody 注释），
+      // 任一侧独自加工都会让含 `[`/`]` 的标题产生悬空链接。
+      // 别名里的 `|` 是 wikilink 分隔符、`[` `]` 会破坏语法，同样剔除
+      // （wikilink 内无法转义这些字符）。
+      const target = noteFilenameBody(title, {
+        suffix,
+        maxFilenameLength: ctx.maxFilenameLength,
+      });
       const safeText = text.replace(/[[\]|]/g, '');
       return safeText.length > 0 && text !== title
         ? `[[${target}|${safeText}]]`
@@ -103,8 +106,11 @@ export function renderBody(i: RenderBodyInput): string {
   const linkStyle = i.linkStyle ?? 'wikilink';
   // N4（同 来源信息 callout 的 URL 处理）：Markdown 链接目标含空格时必须用
   // <...> 包裹——来源文件名（如 "Screenshot (1).png"、"my file.pdf"）空格合法，
-  // 裸拼会把链接截断成坏链。无空格时保持裸路径，避免改变既有输出。
-  const mdDestination = (p: string): string => (/\s/.test(p) ? `<${p}>` : p);
+  // 裸拼会把链接截断成坏链。无以上字符时保持裸路径，避免改变既有输出。
+  // 除空白外，不成对括号（`shot)2.png` 在 `)` 处截断目标）、`#`（Obsidian 解析为
+  // 标题锚点）、`%`（Obsidian 按百分号解码）同样必须包裹——`<`/`>` 已被
+  // sanitizeFilename 替换，角括号内的这些字符是安全的。
+  const mdDestination = (p: string): string => (/[\s()#%]/.test(p) ? `<${p}>` : p);
 
   const lines: string[] = [];
 
@@ -157,19 +163,27 @@ export function renderBody(i: RenderBodyInput): string {
   return lines.join('\n');
 }
 
+/** 前缀 → 显示标签表：集中维护来源适配器的实例 ID 命名约定（仅显示用，
+ * 不参与任何持久化决策）；未命中时显示原始 ID。 */
+const SOURCE_LABELS: ReadonlyArray<readonly [prefix: string, label: string]> = [
+  ['toutiao', '今日头条'],
+  ['evernote', 'Evernote'],
+];
+
 /** 从 sourceInstanceId 推导中文来源标签（仅用于显示）。 */
 function sourceLabel(item: SourceItem): string {
   const id = item.ref.sourceInstanceId;
-  if (id.startsWith('toutiao')) return '今日头条';
-  if (id.startsWith('evernote')) return 'Evernote';
-  return id;
+  const hit = SOURCE_LABELS.find(([prefix]) => id.startsWith(prefix));
+  return hit !== undefined ? hit[1] : id;
 }
 
 /** 把 ISO 8601 时间格式化为 "YYYY-MM-DD HH:mm" 显示。 */
 function formatDateLine(iso: string): string {
-  // 保持时区信息：直接切片 "2025-12-20T10:35:00+08:00" → "2025-12-20 10:35"。
-  // Z 结尾的 UTC 时间补 " UTC" 标记，避免读者把 UTC 墙上时间误当本地时间
-  // （+08:00 用户会差 8 小时）。
+  // 呈现来源时区的墙上时间：直接切片 "2025-12-20T10:35:00+08:00" →
+  // "2025-12-20 10:35"（显示 +08:00 时区的时刻，不折算读者本地时区）。
+  // 仅 Z 结尾的 UTC 补 " UTC" 标记，避免读者把 UTC 墙上时间误当本地时间
+  // （+08:00 用户会差 8 小时）；数字时区不追加偏移量——显示格式已被测试与
+  // 既有笔记固化，保持原样。
   const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(.*)$/.exec(iso);
   if (!m) return iso;
   const zone = m[3] === 'Z' ? ' UTC' : '';

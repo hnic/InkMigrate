@@ -28,8 +28,8 @@ import {
 } from './paths.js';
 import { stringifyFrontmatter } from './frontmatter.js';
 import { renderBody, htmlToMarkdown, convertEvernoteWikilinks } from './body.js';
-import { atomicWrite, readTargetIfExists } from './atomic-write.js';
-import { decideOverwrite } from './overwrite-policy.js';
+import { atomicWrite } from './atomic-write.js';
+import { decideOverwrite, type OverwriteAction } from './overwrite-policy.js';
 import { writeAsset, verifyAsset, deriveMimeExtension } from './assets.js';
 import {
   generateShardIndexes,
@@ -270,13 +270,24 @@ async function planNote(
       // matchKey 必须锚定到 URL 末尾（其后仅允许 ?query/#fragment）：否则 matchKey
       // 只是另一 URL 的子串时（如 img.png 与 img@2x.png 前缀碰撞），先处理的资产
       // 会静默吞掉后者在正文中的引用，顺序相关且错位。
+      // 前缀类排除 `?`（`[^)?\s]*`）：matchKey 出现在另一 URL 的 query 里时
+      // （如 .../img?u=/tos-cn-i-x/<hash>），`[^)\s]*` 会吃掉 query 前缀造成伪匹配
+      // ——本资产吞掉别人的引用、真正拥有该 URL 的资产反被丢弃。contentPath/
+      // baseUrl 本身不含 `?`，合法匹配不受影响；兼容 `![](<url>)` 角括号形式。
       markdownBody = markdownBody.replace(
-        new RegExp(`!\\[[^\\]]*\\]\\([^)\\s]*${escaped}(?:[?#][^)\\s]*)?\\)`, 'g'),
+        new RegExp(
+          `!\\[[^\\]]*\\]\\((?:<)?[^)?\\s]*${escaped}(?:[?#][^)\\s>]*)?>?\\)`,
+          'g',
+        ),
         placeholder,
       );
-      // 匹配 <img src="url..."> HTML 标签形式（turndown 未转换的残留），同样锚定。
+      // 匹配 <img src=...> HTML 标签形式（turndown 未转换的残留），同样锚定。
+      // 引号类双兼容：真实 HTML 常用单引号或双引号包 src，回引引用保证开闭一致。
       markdownBody = markdownBody.replace(
-        new RegExp(`<img[^>]*src="[^"]*${escaped}(?:[?#][^"]*)?"[^>]*>`, 'g'),
+        new RegExp(
+          `<img[^>]*src=(["'])[^"']*${escaped}(?:[?#][^"']*)?\\1[^>]*>`,
+          'g',
+        ),
         placeholder,
       );
       if (markdownBody !== before) {
@@ -306,6 +317,10 @@ async function planNote(
           config, sourceInstanceId: item.ref.sourceInstanceId, itemKey, filename,
         }));
         if (existsSync(abs)) {
+          // C6 一致性：读取磁盘既有附件前做符号链接校验（与 verifyAsset /
+          // verifyNote 对齐），避免 Attachments/<name> 被换成指向 Vault 外的
+          // 链接时把外部文件哈希嵌入生成的附件文件名。
+          assertSymlinkSafe(config.vaultPath, abs);
           const existing = createHash('sha256').update(readFileSync(abs)).digest('hex');
           const mine = asset.sha256!.replace(/^sha256:/, '');
           if (existing !== mine) {
@@ -360,20 +375,24 @@ async function writeNote(
   // §13.2 走 noteAbsolutePath（resolveWithin）确保路径不逃逸 Vault。
   const absPath = noteAbsolutePath(config.vaultPath, oplan.relativePath);
 
-  const existing = readTargetIfExists(absPath);
-  const targetExists = existing !== undefined;
+  const targetExists = existsSync(absPath);
   let observedPrewriteFileHash: string | undefined;
   let userModified = false;
-  if (targetExists && expectedWrittenFileHash !== undefined) {
-    observedPrewriteFileHash = writtenFileHash(Buffer.from(existing!, 'utf8'));
-    userModified = observedPrewriteFileHash !== expectedWrittenFileHash;
-  } else if (targetExists && expectedWrittenFileHash === undefined) {
-    // §缺陷1（数据丢失防护）：目标已存在但 DB 无 writtenFileHash 记录（首次迁移
-    // 遇到用户手写同名笔记 / DB 损坏后重跑）。无法判定文件归属 → 保守视为"用户/
-    // 外来所有"，userModified=true 使 preserve/metadata-only 走 mark_conflict
-    // 挂起保护，绝不默认 write_canonical 静默覆写用户数据。
-    observedPrewriteFileHash = writtenFileHash(Buffer.from(existing!, 'utf8'));
-    userModified = true;
+  if (targetExists) {
+    // 哈希原始字节（不做 utf8 解码→重编码）：非 UTF-8 文件（GBK/Latin-1 旧笔记、
+    // 碰撞路径上的二进制杂物）经有损往返后坏字节变 U+FFFD，落库 written_file_hash
+    // / 冲突审计会与磁盘真实字节永久不符（verifyNote 按原始字节重算 → 幻影
+    // "userModified"）。两个分支原本重复同一表达式，此处合并为一次读取。
+    observedPrewriteFileHash = writtenFileHash(readFileSync(absPath));
+    if (expectedWrittenFileHash === undefined) {
+      // §缺陷1（数据丢失防护）：目标已存在但 DB 无 writtenFileHash 记录（首次迁移
+      // 遇到用户手写同名笔记 / DB 损坏后重跑）。无法判定文件归属 → 保守视为"用户/
+      // 外来所有"，userModified=true 使 preserve/metadata-only 走 mark_conflict
+      // 挂起保护，绝不默认 write_canonical 静默覆写用户数据。
+      userModified = true;
+    } else {
+      userModified = observedPrewriteFileHash !== expectedWrittenFileHash;
+    }
   }
 
   const decideInput: Parameters<typeof decideOverwrite>[0] = {
@@ -417,8 +436,10 @@ async function writeNote(
     };
   }
 
-  // §13.7 先写附件（content-addressed，覆写语义），再写 note，
-  // 保证 note 里的 ![[...]] 引用在 Obsidian 打开时附件已落盘。
+  // §13.7 先写全部附件，再统一验证，最后写 note——note 里的 ![[...]] 引用在
+  // Obsidian 打开时附件已落盘。写/验分两段循环：单条 verify 失败不会停在
+  // 「写了一半、验了一半」的中间态（内容寻址幂等使重跑可自愈）；writeAsset
+  // 返回的哈希在此不消费，验证以 verifyAsset 重读磁盘为准（纵深防御）。
   if (oplan.assets !== undefined && oplan.assets.length > 0) {
     for (const a of oplan.assets) {
       writeAsset({
@@ -426,6 +447,8 @@ async function writeNote(
         relativePath: a.relativePath,
         bytes: Buffer.from(a.data),
       });
+    }
+    for (const a of oplan.assets) {
       verifyAsset({
         vaultPath: config.vaultPath,
         relativePath: a.relativePath,
@@ -475,12 +498,7 @@ async function writeNote(
     sourceContentHash: oplan.sourceContentHash,
     wasForcedOverwrite: decision.action === 'forced_overwrite',
     overwritePolicy: config.overwritePolicy,
-    actionCode:
-      decision.action === 'forced_overwrite'
-        ? 'forced_overwrite'
-        : decision.action === 'write_new_variant'
-          ? 'write_new_variant'
-          : 'stage_attempt',
+    actionCode: actionCodeFor(decision.action),
   };
   if (decision.observedPrewriteFileHash !== undefined) {
     result.observedPrewriteFileHash = decision.observedPrewriteFileHash;
@@ -586,9 +604,33 @@ function parseConfig(ctx: TargetContext): ObsidianTargetConfig {
   return ObsidianTargetConfigSchema.parse(ctx.targetConfig);
 }
 
-/** §13.9 sourceContentHash 输入：标准化的来源正文 + 链接 + 资源清单。 */
+/** §13.9 decision.action → actionCode：审计关注的两个动作（forced_overwrite /
+ * write_new_variant）同名透传，其余（write_canonical / update_metadata_only）为
+ * staging 阶段常规写入，统一落 stage_attempt。 */
+function actionCodeFor(action: OverwriteAction): string {
+  switch (action) {
+    case 'forced_overwrite':
+    case 'write_new_variant':
+      return action;
+    default:
+      return 'stage_attempt';
+  }
+}
+
+/**
+ * §13.9 sourceContentHash 输入：标准化的来源正文 + 元数据 + 资源清单。
+ * 必须覆盖一切影响渲染结果或目标路径的字段——遗漏会造成「源已变而哈希未变」，
+ * 下游变更检测静默跳过（例：仅改标题 → 新文件名/新 frontmatter 永不落盘；
+ * 质量升级重下同一 URL 的新字节 → 附件内容不更新）：
+ * - title：进 frontmatter 与笔记文件名；
+ * - 附件 sha256/fileName：字节身份与命名（同 URL 换字节、重命名都是真实变更）；
+ * - notePathSegments：目标目录段（Evernote Stack/笔记本层级）。
+ * 注意：扩充字段会改变既有条目的哈希值（含 frontmatter 的 source_content_hash），
+ * 升级后首轮重跑会多一次幂等重写，属一次性代价。
+ */
 function canonicalContentForHash(item: SourceItem): unknown {
   return {
+    title: item.title,
     bodyHtml: item.bodyHtml ?? '',
     bodyText: item.bodyText ?? '',
     links: item.links.map((l) => ({ url: l.url, text: l.text, kind: l.kind })),
@@ -596,8 +638,12 @@ function canonicalContentForHash(item: SourceItem): unknown {
       externalId: a.externalId,
       originalUrl: a.originalUrl,
       mimeType: a.mimeType,
+      sha256: a.sha256,
+      fileName: a.fileName,
     })),
     tags: item.tags,
     collections: item.collections,
+    notePathSegments: (item.sourceMetadata as { notePathSegments?: unknown })
+      .notePathSegments,
   };
 }

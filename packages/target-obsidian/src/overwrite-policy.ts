@@ -13,9 +13,14 @@ export interface OverwriteDecision {
   artifactKind: ArtifactKind;
   /** §13.9 是否需要 forced_overwrite 审计。 */
   requiresForcedOverwriteAudit: boolean;
-  /** §13.9 覆盖前观察到的磁盘哈希（若 targetExists 且调用方传入）。 */
+  /**
+   * §13.9 覆盖前观察到的磁盘哈希（若 targetExists 且调用方传入）。
+   * 仅 replace/write-new 破坏性分支携带（copyAuditHashes）；mark_conflict /
+   * update_metadata_only 路径不携带——冲突记录所需的 prewrite 哈希由调用方
+   * （writeNote）自行观测并落库，见 adapter 的 mark_conflict 分支。
+   */
   observedPrewriteFileHash?: string;
-  /** §13.9 数据库记录的期望哈希（若调用方传入）。 */
+  /** §13.9 数据库记录的期望哈希（若调用方传入；仅 replace/write-new 分支携带）。 */
   expectedWrittenFileHash?: string;
 }
 
@@ -46,6 +51,35 @@ export interface DecideInput {
  * 不经过这里，故 artifactKind 固定为 'note' / 'note_variant'。
  */
 export function decideOverwrite(i: DecideInput): OverwriteDecision {
+  // 入口统一校验：未知策略在【所有】分支快速失败。下方 switch 的 default 穷尽性
+  // 守卫只覆盖 userModified 路径——targetExists 且未修改的分支会无条件落
+  // write_canonical，垃圾策略串（跳过 schema parse 的原始 config，如 'preservee'）
+  // 恰在此静默覆写用户文件，违背守卫"快速失败"的初衷，故校验必须前置到入口。
+  if (
+    i.config.overwritePolicy !== 'preserve' &&
+    i.config.overwritePolicy !== 'replace' &&
+    i.config.overwritePolicy !== 'write-new' &&
+    i.config.overwritePolicy !== 'metadata-only'
+  ) {
+    throw new Error(
+      `decideOverwrite: unknown overwritePolicy: ${String(i.config.overwritePolicy)}`,
+    );
+  }
+
+  // 双哈希齐备时以实测为准，不信任调用方可能过期的 userModified 标志：
+  // 未来调用方误传标志会把用户改过的文件路由进 write_canonical（数据丢失），
+  // 或把未修改文件误挂 mark_conflict；本层既然拿到了推导该标志的原始数据，
+  // 就在入口交叉复核。仅单个哈希（§缺陷1 的 expected 缺失路径）时保留调用方判定。
+  if (
+    i.observedPrewriteFileHash !== undefined &&
+    i.expectedWrittenFileHash !== undefined
+  ) {
+    i = {
+      ...i,
+      userModified: i.observedPrewriteFileHash !== i.expectedWrittenFileHash,
+    };
+  }
+
   // 首次写入
   if (!i.targetExists) {
     return {

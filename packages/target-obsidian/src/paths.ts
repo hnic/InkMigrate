@@ -58,10 +58,31 @@ export interface NotePathInput {
 }
 
 /**
+ * §13.4 笔记文件名主体（标题清洗 + 截断 + shortId 后缀拼接）。
+ *
+ * #623：noteRelativePath（磁盘文件名）与 body.ts convertEvernoteWikilinks
+ * （wikilink 目标）【必须】共用此推导——链接目标与文件名逐字节一致是链接可
+ * 解析的前提，任一侧独自加工（历史上 wikilink 侧单独剔括号）都会让含 `[`/`]`
+ * 的标题产生悬空链接（Obsidian 点击即新建空笔记）。sanitizeFilename 不替换
+ * `[` `]`，而 `]]` 会提前终止 wikilink，故拼接后统一剔除；剔空（标题仅剩
+ * 括号的病态情况）回退 '_'，保证文件名与链接目标都非空且一致。
+ */
+export function noteFilenameBody(
+  title: string,
+  opts: { suffix: string; maxFilenameLength: number },
+): string {
+  const combined = `${sanitizeFilename(title, {
+    maxLength: Math.max(1, opts.maxFilenameLength - opts.suffix.length),
+  })}${opts.suffix}`.replace(/[[\]]/g, '');
+  return combined || '_';
+}
+
+/**
  * §13.3/§13.4 笔记相对路径（相对 Vault 根）：
  * `<importSubdir>/<sourceInstanceId>/<contentKindDir>/<title>-<shortId>.md`
  *
- * 文件名由 `sanitizeFilename(title)` + `-` + `stableShortId` 组成。stableShortId
+ * 文件名由 noteFilenameBody(title)（sanitize + 截断 + 括号剔除）+ `-` +
+ * stableShortId 组成（见该函数注释的链接一致性要求）。stableShortId
  * 后缀是断点续跑/重跑幂等的关键：同一指纹始终落到同一稳定路径，不依赖 planNote
  * 的 `pathInUse` stat 兜底（后者会在重跑时把已存在文件误判为冲突，生成 -2/-3 冗余副本）。
  *
@@ -77,10 +98,11 @@ export function noteRelativePath(i: NotePathInput): string {
   const suffix = i.config.filenameShortId
     ? `-${sanitizeFilename(i.stableShortId, { maxLength: 32 })}`
     : '';
-  const body = sanitizeFilename(i.title, {
-    maxLength: Math.max(1, i.config.maxFilenameLength - suffix.length),
+  const body = noteFilenameBody(i.title, {
+    suffix,
+    maxFilenameLength: i.config.maxFilenameLength,
   });
-  const filename = `${body}${suffix}.md`;
+  const filename = `${body}.md`;
   const safeSourceId = sanitizePathSegment(i.sourceInstanceId);
   // importSubdir 为空 = 省略该段（笔记位于 <sourceInstanceId>/... 下），
   // 不再回退为 Vault 根平铺（索引生成器同语义）
@@ -129,7 +151,14 @@ export interface AssetPathInput {
  * by-note（默认）：`<attachmentsSubdir>/<sourceInstanceId>/<itemKey>/<filename>`。
  * flat：`<attachmentsSubdir>/<filename>` 平铺（同名异内容冲突由 plan 阶段消解）。 */
 export function assetRelativePath(i: AssetPathInput): string {
-  const safeName = sanitizeFilename(i.filename, { maxLength: 200 });
+  // wikilink 嵌入安全（与 body.ts 的 ![[...]]/[[...]] 渲染同源）：sanitizeFilename
+  // 不替换 `[` `]` `#` `^`——`]]` 会提前终止嵌入，`#`/`^` 被 Obsidian 解析为
+  // 标题/块引用（链接指向不存在的锚点）。在路径分配的单一出口处统一剔除，
+  // 保证链接目标与磁盘文件名逐字节一致；剔空回退 'asset'。同名剔除后碰撞由
+  // planNote 的 allocAssetPath -2/-3 消歧兜底。
+  const safeName =
+    sanitizeFilename(i.filename, { maxLength: 200 }).replace(/[[\]#^]/g, '') ||
+    'asset';
   if (i.config.attachmentPathLayout === 'flat') {
     return [i.config.attachmentsSubdir, safeName].filter(Boolean).join('/');
   }

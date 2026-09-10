@@ -1,6 +1,6 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 
 /** 创建一个临时 Vault 目录，可选模拟 `.obsidian` 标记。 */
 export function makeTempVault(
@@ -35,7 +35,10 @@ export function writeVaultFile(
   const fullPath = join(vaultPath, relativePath);
   // 防御：join 会归一化 `..` 段，误写的 relativePath 会逃出临时 Vault，
   // 把测试文件写到 OS 临时目录之外的位置。
-  if (relative(vaultPath, fullPath).startsWith('..')) {
+  // 首段精确比较（与 core resolveWithin 一致）：`..drafts/note.md` 这类以 ..
+  // 开头的合法文件名不能被 startsWith('..') 误判为逃逸。
+  const rel = relative(vaultPath, fullPath);
+  if (rel === '..' || rel.startsWith(`..${sep}`)) {
     throw new Error(
       `writeVaultFile: relativePath escapes vault root: ${relativePath}`,
     );

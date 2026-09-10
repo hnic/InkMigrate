@@ -1,4 +1,5 @@
 import {
+  constants,
   existsSync,
   readFileSync,
   openSync,
@@ -36,6 +37,12 @@ export interface WriteAssetResult {
  * （I17 修复）一致，消除半写风险。
  */
 export function writeAsset(i: WriteAssetInput): WriteAssetResult {
+  // 诊断一致性：空内容在 atomicWriteRaw 里只会得到无上下文的 'content is empty'，
+  // 批量迁移时无法归因到具体附件；此处提前拦截并附上 relativePath（与
+  // verifyAsset 的失败诊断格式对齐）。
+  if (i.bytes.length === 0) {
+    throw new Error(`asset content is empty: "${i.relativePath}"`);
+  }
   const abs = resolveWithin(i.vaultPath, i.relativePath);
   const hash = atomicWriteRaw(abs, i.bytes, i.vaultPath);
   return {
@@ -63,12 +70,20 @@ export function verifyAsset(i: VerifyAssetInput): void {
   }
   assertSymlinkSafe(i.vaultPath, abs);
   // C6/H4: 校验后用同一文件描述符读取（open 一次、read 走 fd）——路径在两次
-  // 系统调用之间被替换为指向 Vault 外的符号链接时（TOCTOU 竞态，见 core
-  // assertWriteDirSafe 的 H4 声明），读到的仍是校验过的那个 inode。
-  // fs 错误统一附上 relativePath，与本函数其它失败路径的诊断格式一致。
+  // 系统调用之间被替换时读到的仍是校验过的那个 inode。fd-pinning 只保护
+  // open 之后的读取，check→open 窗口由 O_NOFOLLOW 关闭（POSIX）：终组件在
+  // assertSymlinkSafe 之后、open 之前被换成指向 Vault 外的符号链接时，
+  // openSync 解引用会拿到外部 fd，而 O_NOFOLLOW 使 open 直接 ELOOP 失败。
+  // 工具写入的附件经 rename 落盘，终组件必为普通文件，ELOOP 即按不安全路径
+  // 失败处理。Windows 无此标志（undefined），维持 core H4 声明的残留窗口。
+  // fs 错误统一附上 relativePath + cause（保留原始 errno 与堆栈），与本函数
+  // 其它失败路径的诊断格式一致。
   let bytes: Buffer;
   try {
-    const fd = openSync(abs, 'r');
+    const flags =
+      constants.O_RDONLY |
+      (typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0);
+    const fd = openSync(abs, flags);
     try {
       bytes = readFileSync(fd);
     } finally {
@@ -77,20 +92,21 @@ export function verifyAsset(i: VerifyAssetInput): void {
   } catch (e) {
     throw new Error(
       `asset unreadable during verification "${i.relativePath}": ${(e as Error).message}`,
+      { cause: e },
     );
   }
-  // 先比对哈希再判空：内容寻址的空附件（哈希恰为空字节的 SHA-256）也应通过
-  // 哈希比对路径，零字节检查不能先于它使哈希校验不可达。
+  // §13.7 附件必须非空：atomicWriteRaw 拒绝空内容，此处防御的是写入后磁盘被
+  // 外部清空/截断的情况。先判空再比对哈希：合法附件内容非空（哈希必不等于
+  // 空字节 SHA-256），空文件先撞零字节检查得到精确诊断，而不是误导性的
+  // "hash mismatch ... got e3b0c442..."。
+  if (bytes.length === 0) {
+    throw new Error(`asset is zero bytes after write: "${i.relativePath}"`);
+  }
   const actual = writtenFileHash(bytes);
   if (actual !== i.expectedSha256) {
     throw new Error(
       `asset hash mismatch for "${i.relativePath}": expected ${i.expectedSha256}, got ${actual}`,
     );
-  }
-  // §13.7 附件必须非空：atomicWriteRaw 本就拒绝空内容（'content is empty'），
-  // 此处防御的是写入后磁盘被外部替换为零字节文件的情况。
-  if (bytes.length === 0) {
-    throw new Error(`asset is zero bytes after write: "${i.relativePath}"`);
   }
 }
 
@@ -110,7 +126,10 @@ const MIME_EXT: Record<string, string> = {
   'video/webm': 'webm',
 };
 
-/** §13.7 从 MIME 推导扩展名（用于无扩展名的来源 URL）。 */
+/** §13.7 从 MIME 推导扩展名（用于无扩展名的来源 URL）。
+ * 未知类型确定性地回退 'bin'：扩展名是磁盘命名契约（改动映射会改变既有
+ * Vault 内的附件路径，破坏重跑幂等），不在运行时告警或自动扩展；需要支持
+ * 新类型时在此显式补条目并评估对已迁移路径的影响。 */
 export function deriveMimeExtension(mime: string): string {
   if (!mime) return 'bin';
   const base = mime.split(';')[0]!.trim().toLowerCase();
