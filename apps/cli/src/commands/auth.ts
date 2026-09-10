@@ -7,7 +7,10 @@ import {
   ToutiaoBrowserSession,
 } from '@inkmigrate/source-toutiao';
 import { rmSync } from 'node:fs';
-import { parsePositiveInt } from '../util.js';
+import { parsePositiveInt, errorMessage } from '../util.js';
+
+/** 收藏页默认 URL：选项帮助文案与登录回退共用，避免两处硬编码漂移。 */
+const DEFAULT_FAVORITES_URL = 'https://www.toutiao.com/favorites';
 
 /**
  * §12.2 `inkmigrate auth login/clear` 命令。
@@ -27,7 +30,7 @@ export function createAuthCommand(): Command {
     .requiredOption('--state-dir <path>', 'workspace stateDir')
     .option(
       '--favorites-url <url>',
-      '收藏列表 URL（默认 https://www.toutiao.com/favorites）',
+      `收藏列表 URL（默认 ${DEFAULT_FAVORITES_URL}）`,
     )
     .option(
       '--timeout <ms>',
@@ -56,8 +59,7 @@ export function createAuthCommand(): Command {
 
         const result = await runLoginFlow({
           session,
-          favoritesUrl:
-            opts.favoritesUrl ?? 'https://www.toutiao.com/favorites',
+          favoritesUrl: opts.favoritesUrl ?? DEFAULT_FAVORITES_URL,
           loginTimeoutMs: parsePositiveInt(opts.timeout, 'timeout'),
         });
 
@@ -91,8 +93,18 @@ export function createAuthCommand(): Command {
         return;
       }
       // §12.3 只删除该来源实例的工具专用 Profile
-      rmSync(path, { recursive: true, force: true });
-      console.log(`已删除 Profile：${path}`);
+      try {
+        // Windows 上 Profile 仍被浏览器占用（如 auth login 未关的窗口）时会
+        // EPERM/EBUSY，maxRetries/retryDelay 针对性重试；仍失败给出可操作提示
+        rmSync(path, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+        console.log(`已删除 Profile：${path}`);
+      } catch (err) {
+        console.error(`删除 Profile 失败：${errorMessage(err)}`);
+        console.error(
+          '请先关闭正在使用该 Profile 的浏览器窗口（如 auth login 打开的窗口）后重试。',
+        );
+        process.exitCode = 1;
+      }
     });
 
   return auth;

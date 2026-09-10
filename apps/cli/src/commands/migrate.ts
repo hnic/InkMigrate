@@ -23,7 +23,14 @@ import { createObsidianTarget } from '@inkmigrate/target-obsidian';
 import { readFileSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { parsePositiveInt, parseOptionalPositiveInt, DB_FILENAME } from '../util.js';
+import {
+  parsePositiveInt,
+  parseOptionalPositiveInt,
+  DB_FILENAME,
+  CONFIG_FILENAME,
+  REPORTS_DIR_NAME,
+  REPORT_FILENAME,
+} from '../util.js';
 import { buildToutiaoSource, resolveEvernoteSource, resolveTargetConfig } from '@inkmigrate/wiring';
 
 /**
@@ -43,7 +50,7 @@ export function createMigrateCommand(): Command {
     .requiredOption('--state-dir <path>', 'workspace stateDir')
     .requiredOption('--vault-path <path>', 'Obsidian Vault 路径')
     .option('--fixture-dir <path>', 'fixture HTML 目录（测试模式，不启动浏览器）')
-    .option('--config <path>', 'inkmigrate.yaml 配置路径（按 adapter 选择来源类型）', 'inkmigrate.yaml')
+    .option('--config <path>', 'inkmigrate.yaml 配置路径（按 adapter 选择来源类型）', CONFIG_FILENAME)
     .option('--favorites-url <url>', '收藏列表 URL（真实模式）')
     .option('--max-items <n>', '限制扫描+迁移条目数（用于测试）')
     .option('--interval <ms>', '条目间请求间隔毫秒数（默认 1500，防风控）')
@@ -69,7 +76,7 @@ export function createMigrateCommand(): Command {
         const jobId = `mig-${Date.now()}-${randomUUID().slice(0, 8)}`;
         const now = new Date().toISOString();
         // commander 选项已带默认值，这里归一一次供下方各处复用
-        const configPath = opts.config ?? 'inkmigrate.yaml';
+        const configPath = opts.config ?? CONFIG_FILENAME;
         // max-items 解析一次，fixture 与浏览器模式共用
         const maxItems = parseOptionalPositiveInt(opts.maxItems, 'max-items');
 
@@ -163,7 +170,7 @@ export function createMigrateCommand(): Command {
             targetInstanceId: opts.target,
             targetContext,
             workspaceDir: opts.stateDir,
-            reportsDir: join(opts.stateDir, 'reports'),
+            reportsDir: join(opts.stateDir, REPORTS_DIR_NAME),
             isCancelled: () => cancelled,
             // L17: parseInt 可能产生 NaN（用户传非数字），校验后再传入，避免 NaN 直达
             // 速率控制（I25：NaN interval → 最快速率 → 封号）。
@@ -179,7 +186,7 @@ export function createMigrateCommand(): Command {
           if (result.reconciliationReason) {
             console.log(`  reason: ${result.reconciliationReason}`);
           }
-          console.log(`\n报告：${join(opts.stateDir, 'reports', jobId, 'summary.md')}`);
+          console.log(`\n报告：${join(opts.stateDir, REPORTS_DIR_NAME, jobId, REPORT_FILENAME)}`);
         } catch (err) {
           // runMigrationJob 内部只有 finally（无 catch）：错误上抛时 Job 行停留在
           // running。CLI 每次生成新 jobId，core 的孤儿自愈（同 jobId 重跑触发）

@@ -1,14 +1,15 @@
 import { Command } from 'commander';
 import { readFileSync } from 'node:fs';
 import { loadConfigFromString, ConfigValidationError } from '@inkmigrate/core';
+import { CONFIG_FILENAME } from '../util.js';
 
 export function createConfigCommand(): Command {
   const config = new Command('config').description('配置管理');
 
   config
     .command('validate')
-    .description('校验 inkmigrate.yaml 配置文件')
-    .option('--file <path>', '配置文件路径', 'inkmigrate.yaml')
+    .description(`校验 ${CONFIG_FILENAME} 配置文件`)
+    .option('--file <path>', '配置文件路径', CONFIG_FILENAME)
     .action((opts: { file: string }) => {
       try {
         const raw = readFileSync(opts.file, 'utf8');

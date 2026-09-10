@@ -11,7 +11,13 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveSourceWiring, resolveTargetConfig } from '@inkmigrate/wiring';
-import { DB_FILENAME } from '../util.js';
+import {
+  DB_FILENAME,
+  CONFIG_FILENAME,
+  REPORTS_DIR_NAME,
+  REPORT_FILENAME,
+  parseOptionalPositiveInt,
+} from '../util.js';
 
 /**
  * §22 `inkmigrate resume` 命令。
@@ -32,7 +38,7 @@ export function createResumeCommand(): Command {
     .requiredOption('--vault-path <path>', 'Obsidian Vault 路径')
     .option('--favorites-url <url>', '收藏列表 URL（真实模式）')
     .option('--max-items <n>', '限制迁移条目数')
-    .option('--config <path>', 'inkmigrate.yaml 配置路径（按 adapter 选择来源类型）', 'inkmigrate.yaml')
+    .option('--config <path>', 'inkmigrate.yaml 配置路径（按 adapter 选择来源类型）', CONFIG_FILENAME)
     .action(async (opts: {
       job: string;
       stateDir: string;
@@ -41,6 +47,10 @@ export function createResumeCommand(): Command {
       maxItems?: string;
       config?: string;
     }) => {
+      // --max-items 校验前置（与 migrate 一致）：parseInt 对非数字给出 NaN，
+      // 会绕过 wiring 的 !== undefined 检查以 maxScanItems: NaN 直达驱动，
+      // 数值比较恒假等于限额被静默关闭
+      const maxItems = parseOptionalPositiveInt(opts.maxItems, 'max-items');
       const dbPath = join(opts.stateDir, DB_FILENAME);
       if (!existsSync(dbPath)) {
         console.error(`数据库不存在：${dbPath}`);
@@ -49,11 +59,15 @@ export function createResumeCommand(): Command {
 
       const db: DB = openDatabase({ path: dbPath });
       try {
+        const jobs = new MigrationJobs(db);
         // 读取原 Job 信息
-        const oldJob = new MigrationJobs(db).get(opts.job);
+        const oldJob = jobs.get(opts.job);
         if (oldJob === undefined) {
           console.error(`Job ${opts.job} 不存在，无法续跑`);
-          process.exit(1);
+          // 用 exitCode+return 而非 process.exit：同步 exit 会跳过外层
+          // finally { db.close() }，丢弃本命令显式安排的清理
+          process.exitCode = 1;
+          return;
         }
         const sourceInstanceId = oldJob.sourceInstanceId;
         const targetInstanceId = oldJob.targetInstanceId;
@@ -84,7 +98,18 @@ export function createResumeCommand(): Command {
         // 创建新 Job（随机后缀免疫毫秒碰撞/时钟回拨，与 migrate 一致）
         const jobId = `mig-${Date.now()}-${randomUUID().slice(0, 8)}`;
         const now = new Date().toISOString();
-        new MigrationJobs(db).create({
+        // 确定性关闭旧 Job：原 Job 若因崩溃/SIGKILL 停留在非终态，直接另建后继
+        // 会让同一实例对出现两个 running 行，正确性只能靠 stale-running 兜底。
+        // 终态（completed/failed）状态机不可再转换，跳过
+        if (
+          oldJob.status === 'created' ||
+          oldJob.status === 'running' ||
+          oldJob.status === 'paused' ||
+          oldJob.status === 'interrupted'
+        ) {
+          jobs.updateStatus(opts.job, { status: 'failed', updatedAt: now });
+        }
+        jobs.create({
           id: jobId,
           sourceInstanceId,
           targetInstanceId,
@@ -97,13 +122,11 @@ export function createResumeCommand(): Command {
         // 构造 source adapter：与 migrate 同一接线（yaml 命中 evernote → 文件源，
         // 否则 toutiao 浏览器 + Profile 校验）
         const wiring = resolveSourceWiring({
-          config: opts.config ?? 'inkmigrate.yaml',
+          config: opts.config ?? CONFIG_FILENAME,
           sourceId: sourceInstanceId,
           stateDir: opts.stateDir,
           ...(opts.favoritesUrl !== undefined ? { favoritesUrl: opts.favoritesUrl } : {}),
-          ...(opts.maxItems !== undefined
-            ? { maxItems: Number.parseInt(opts.maxItems, 10) }
-            : {}),
+          ...(maxItems !== undefined ? { maxItems } : {}),
         });
         const sourceAdapter = wiring.adapter;
 
@@ -113,7 +136,7 @@ export function createResumeCommand(): Command {
           workspaceDir: opts.stateDir,
           vaultPath: opts.vaultPath,
           targetConfig: resolveTargetConfig(
-            opts.config ?? 'inkmigrate.yaml',
+            opts.config ?? CONFIG_FILENAME,
             targetInstanceId,
             opts.vaultPath,
           ),
@@ -139,7 +162,7 @@ export function createResumeCommand(): Command {
             targetInstanceId,
             targetContext,
             workspaceDir: opts.stateDir,
-            reportsDir: join(opts.stateDir, 'reports'),
+            reportsDir: join(opts.stateDir, REPORTS_DIR_NAME),
             isCancelled: () => cancelled,
           });
 
@@ -150,13 +173,13 @@ export function createResumeCommand(): Command {
           if (result.reconciliationReason) {
             console.log(`  reason: ${result.reconciliationReason}`);
           }
-          console.log(`\n报告：${join(opts.stateDir, 'reports', jobId, 'summary.md')}`);
+          console.log(`\n报告：${join(opts.stateDir, REPORTS_DIR_NAME, jobId, REPORT_FILENAME)}`);
         } catch (err) {
           // runMigrationJob 内部只有 finally（无 catch）：错误上抛时 Job 行停留在
           // running。CLI 每次生成新 jobId，core 的孤儿自愈覆盖不到，显式落库
           // failed（与 migrate 命令一致），否则只能等 stale-running 兜底。
           try {
-            new MigrationJobs(db).updateStatus(jobId, {
+            jobs.updateStatus(jobId, {
               status: 'failed',
               updatedAt: new Date().toISOString(),
             });

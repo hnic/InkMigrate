@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { openDatabase, MigrationJobs, type DB } from '@inkmigrate/core';
 import { join } from 'node:path';
-import { DB_FILENAME } from '../util.js';
+import { DB_FILENAME, errorMessage } from '../util.js';
 
 export function createStatusCommand(): Command {
   return new Command('status')
@@ -15,9 +15,7 @@ export function createStatusCommand(): Command {
         db = openDatabase({ path: dbPath });
       } catch (e) {
         // L18: 区分「DB 不可读」与「Job 不存在」（原 catch 混淆两者）。
-        console.error(
-          `无法打开数据库 ${dbPath}：${e instanceof Error ? e.message : String(e)}`,
-        );
+        console.error(`无法打开数据库 ${dbPath}：${errorMessage(e)}`);
         process.exitCode = 1;
         return;
       }
@@ -38,14 +36,18 @@ export function createStatusCommand(): Command {
         console.log(`  conflict: ${job.conflictCount}`);
         console.log(`  skipped: ${job.skippedCount}`);
       } catch (e) {
-        console.error(
-          `读取 Job ${opts.job} 失败：${e instanceof Error ? e.message : String(e)}`,
-        );
+        console.error(`读取 Job ${opts.job} 失败：${errorMessage(e)}`);
         process.exitCode = 1;
-        return;
       } finally {
         // 无论成败都关库，避免读取异常时泄漏连接（WAL 未 checkpoint）
-        db.close();
+        try {
+          db.close();
+        } catch (e) {
+          // close 自身失败（如 WAL checkpoint 撞 SQLITE_BUSY）不应让已成功的
+          // 输出被顶层 catch 改判为失败命令；如实提示并置非零退出码
+          console.error(`关闭数据库 ${dbPath} 失败：${errorMessage(e)}`);
+          process.exitCode = 1;
+        }
       }
     });
 }
