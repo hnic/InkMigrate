@@ -34,7 +34,8 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "resources/sidecar/**/*"
+      "resources/sidecar/**/*",
+      "resources/package.json"
     ]
   }
 }
