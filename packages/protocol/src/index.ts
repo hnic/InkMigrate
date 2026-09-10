@@ -8,6 +8,10 @@
  * Engine 的 protocol.ts re-export 本文件 + 保留 RpcRequest/RpcResponse 等传输层
  * 类型（仅 Engine 侧需要）；GUI 从本包导入结果/通知类型。
  */
+import type { JobStatus as CoreJobStatus, SourceContentKind } from '@inkmigrate/core';
+
+/** 对齐 core 的 JobStatus（type-only re-export，单一真相源，core 加状态即同步）。 */
+export type JobStatus = CoreJobStatus;
 
 // ─── 通用 RPC 传输类型（仅 Engine 内部用，但定义在此供双方引用） ───
 
@@ -21,10 +25,12 @@ export interface RpcRequest<P = Record<string, unknown>> {
 /**
  * JSON-RPC 2.0 规定响应只能携带 result 或 error 之一——用可辨识联合在类型层面
  * 强制该不变量（error?: undefined / result?: undefined 标记保持字段可探测）。
+ * parse error(-32700)/invalid request(-32600) 的响应按规范必须携带 id: null。
  */
 export type RpcResponse<T = unknown> =
   | { jsonrpc: '2.0'; id: string | number; result: T; error?: undefined }
-  | { jsonrpc: '2.0'; id: string | number; result?: undefined; error: RpcError };
+  | { jsonrpc: '2.0'; id: string | number; result?: undefined; error: RpcError }
+  | { jsonrpc: '2.0'; id: null; result?: undefined; error: RpcError };
 
 export interface RpcError {
   code: number;
@@ -72,12 +78,14 @@ export interface ScanStartParams {
 
 export interface ScanStartResult {
   uniqueItems: number;
+  /** 扫描终止原因（词表在 toutiao scanner：unknown/cancelled/no_load_more/
+   * max_items_reached_<n>/no_new_items_after_<n>_cycles，含动态后缀，保持 string）。 */
   terminationReason: string;
   items: Array<{
     externalId?: string;
     canonicalUrl: string;
     title: string;
-    contentKind: string;
+    contentKind: SourceContentKind;
   }>;
 }
 
@@ -111,23 +119,16 @@ export interface MigrateResumableParams {
   stateDir: string;
 }
 
-/** 可续跑 Job 的摘要。`job` 为 null 表示没有可续跑的 Job。 */
-export interface MigrateResumableResult {
-  job: string | null;
-  status?: JobStatus;
-  total?: number;
-  verified?: number;
-  targetInstanceId?: string;
-}
-
-/** 对齐 core 的 JobStatus（packages/core/src/domain/states.ts），单一真相源。 */
-export type JobStatus =
-  | 'created'
-  | 'running'
-  | 'paused'
-  | 'interrupted'
-  | 'completed'
-  | 'failed';
+/** 可续跑 Job 的摘要。判别联合：`job: null` 表示没有可续跑的 Job（不携带其他字段）。 */
+export type MigrateResumableResult =
+  | { job: null }
+  | {
+      job: string;
+      status: JobStatus;
+      total: number;
+      verified: number;
+      targetInstanceId?: string;
+    };
 
 export interface MigrateResult {
   status: JobStatus;
@@ -164,6 +165,7 @@ export interface StatusQueryParams {
 
 export interface StatusQueryResult {
   status: JobStatus;
+  /** 管线阶段（规范词表在 core 的 §11.1 current_stage 定义：preflight/scan/…）。 */
   currentStage: string;
   scanCount: number;
   verifiedCount: number;

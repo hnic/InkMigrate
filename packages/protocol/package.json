@@ -15,7 +15,9 @@
     "build": "tsc -b",
     "typecheck": "tsc -b"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@inkmigrate/core": "workspace:*"
+  },
   "devDependencies": {
     "typescript": "^5.7.0"
   }

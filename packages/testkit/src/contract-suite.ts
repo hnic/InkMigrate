@@ -10,17 +10,20 @@ function runAdapterDeclarationContract(
   makeAdapter: () => { adapterApiVersion: string; kind: string; version: string },
 ): void {
   it('declares a valid adapterApiVersion in the supported range', () => {
-    expect(isAdapterApiCompatible(makeAdapter().adapterApiVersion)).toBe(true);
+    const { adapterApiVersion } = makeAdapter();
+    expect(isAdapterApiCompatible(adapterApiVersion)).toBe(true);
   });
 
   it('declares a non-empty stable kind', () => {
-    expect(typeof makeAdapter().kind).toBe('string');
-    expect(makeAdapter().kind.length).toBeGreaterThan(0);
+    const { kind } = makeAdapter();
+    expect(typeof kind).toBe('string');
+    expect(kind.length).toBeGreaterThan(0);
   });
 
   it('declares a non-empty impl version', () => {
-    expect(typeof makeAdapter().version).toBe('string');
-    expect(makeAdapter().version.length).toBeGreaterThan(0);
+    const { version } = makeAdapter();
+    expect(typeof version).toBe('string');
+    expect(version.length).toBeGreaterThan(0);
   });
 }
 
@@ -65,18 +68,28 @@ export function runSourceAdapterContract(
       }
     });
 
-    it('scan is an async generator (§8.2)', () => {
+    it('scan is an async generator (§8.2)', async () => {
       // 不实际驱动 scan；只校验返回 AsyncGenerator。
       // 注意：调用方应在自己的 fixture 测试中驱动真实扫描。
-      const result = adapter.scan({
-        config: {},
-        workspaceDir: '.',
-      });
+      // 契约只承诺"返回 AsyncGenerator"，但同步校验 config 的适配器会在返回前
+      // 抛错——用清晰的契约错误包装，避免泄漏适配器自身的校验信息造成困惑。
+      const result = (() => {
+        try {
+          return adapter.scan({ config: {}, workspaceDir: '.' });
+        } catch (err) {
+          throw new Error(
+            `scan must not throw synchronously for the fixture context (got: ${String(err)})`,
+          );
+        }
+      })();
       try {
         expect(typeof result[Symbol.asyncIterator]).toBe('function');
       } finally {
-        // 关闭未驱动的生成器，释放适配器在返回生成器前可能已获取的资源。
-        void result.return(undefined);
+        // 未启动的生成器调用 return() 不会执行函数体（含其 finally 块），这里仅是
+        // 防御性关闭；await 并捕获 rejection，避免不可归因的 unhandled rejection。
+        if (typeof result.return === 'function') {
+          await result.return(undefined).catch(() => {});
+        }
       }
     });
 
