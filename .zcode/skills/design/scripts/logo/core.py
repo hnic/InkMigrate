@@ -50,7 +50,9 @@ class BM25:
     def tokenize(self, text):
         """Lowercase, split, remove punctuation, filter short words"""
         text = re.sub(r'[^\w\s]', ' ', str(text).lower())
-        return [w for w in text.split() if len(w) > 2]
+        # Keep 2-char tokens ("ai", "3d", "it") so such queries can match;
+        # dropping them makes these queries silently return nothing
+        return [w for w in text.split() if len(w) >= 2]
 
     def fit(self, documents):
         """Build BM25 index from documents"""
@@ -154,7 +156,12 @@ def search(query, domain=None, max_results=MAX_RESULTS):
     if domain is None:
         domain = detect_domain(query)
 
-    config = CSV_CONFIG.get(domain, CSV_CONFIG["style"])
+    # Reject unknown domains explicitly: silently searching the "style"
+    # dataset while reporting the caller-supplied (invalid) domain masks
+    # typos at the library boundary
+    if domain not in CSV_CONFIG:
+        return {"error": f"Unknown domain: {domain}. Available: {', '.join(CSV_CONFIG.keys())}", "domain": domain}
+    config = CSV_CONFIG[domain]
     filepath = DATA_DIR / config["file"]
 
     if not filepath.exists():

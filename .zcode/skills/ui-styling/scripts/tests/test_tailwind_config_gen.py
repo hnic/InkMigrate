@@ -3,7 +3,6 @@
 import re
 import shutil
 import subprocess
-from pathlib import Path
 
 import pytest
 
@@ -269,7 +268,8 @@ class TestTailwindConfigGenerator:
         generator = TailwindConfigGenerator(output_path=output_path)
         generator.add_colors({"brand": "#3b82f6"})
 
-        generator.write_config()
+        success, message = generator.write_config()
+        assert success is True, message
 
         content = output_path.read_text()
         assert "import type { Config }" in content

@@ -15,7 +15,6 @@ Usage:
 """
 
 import argparse
-import json
 import os
 import re
 import sys
@@ -168,20 +167,25 @@ def apply_color(svg_code, color):
     if color:
         # Replace currentColor with the specified color
         svg_code = svg_code.replace('currentColor', color)
-        # If no currentColor was present, add fill/stroke color
+        # If no currentColor was present, rewrite hardcoded paint values
+        # instead: a 'color' attribute on the root only affects elements
+        # that reference currentColor, so it would be a silent no-op here
         if color not in svg_code:
-            svg_code = svg_code.replace('<svg', f'<svg color="{color}"', 1)
+            svg_code = re.sub(r'(fill|stroke)="(?!none)[^"]*"', rf'\1="{color}"', svg_code)
     return svg_code
 
 
 def apply_viewbox_size(svg_code, size):
     """Adjust SVG viewBox to target size"""
     if size:
-        # Update width/height attributes if present
-        svg_code = re.sub(r'width="[^"]*"', f'width="{size}"', svg_code)
-        svg_code = re.sub(r'height="[^"]*"', f'height="{size}"', svg_code)
-        # Add width/height if not present
-        if 'width=' not in svg_code:
+        # Anchor on the attribute start so 'width="..."' doesn't also match
+        # the substring inside 'stroke-width="..."' (which would rewrite
+        # stroke widths to the display size and corrupt stroke-based icons)
+        svg_code = re.sub(r'(?<![-\w])width="[^"]*"', f'width="{size}"', svg_code)
+        svg_code = re.sub(r'(?<![-\w])height="[^"]*"', f'height="{size}"', svg_code)
+        # Add width/height if not present (same anchor: 'stroke-width='
+        # must not satisfy the check for a real width attribute)
+        if not re.search(r'(?<![-\w])width=', svg_code):
             svg_code = svg_code.replace('<svg', f'<svg width="{size}" height="{size}"', 1)
     return svg_code
 
@@ -242,10 +246,20 @@ def generate_icon(prompt, style=None, category=None, name=None,
         )
 
         # Extract SVG from response
-        response_text = response.text if hasattr(response, 'text') else ""
+        # (response.text is a property that raises ValueError on blocked or
+        # empty responses, so probe it defensively instead of via hasattr)
+        try:
+            response_text = response.text
+        except ValueError:
+            response_text = ""
         if not response_text:
-            for part in response.candidates[0].content.parts:
-                if hasattr(part, 'text') and part.text:
+            candidates = getattr(response, "candidates", None) or []
+            parts = getattr(getattr(candidates[0], "content", None), "parts", None) if candidates else None
+            if not parts:
+                print("No valid SVG generated. Empty or blocked model response.")
+                return None
+            for part in parts:
+                if getattr(part, "text", None):
                     response_text += part.text
 
         svgs = extract_svgs(response_text)
@@ -263,24 +277,32 @@ def generate_icon(prompt, style=None, category=None, name=None,
         # Apply size
         svg_code = apply_viewbox_size(svg_code, size)
 
-        # Determine output path
-        if output_path is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            slug = name or prompt.split()[0] if prompt else "icon"
-            slug = re.sub(r'[^a-zA-Z0-9_-]', '_', slug.lower())
-            style_suffix = f"_{style}" if style else ""
-            output_path = f"{slug}{style_suffix}_{timestamp}.svg"
-
-        # Save SVG
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(svg_code)
-
-        print(f"Icon saved to: {output_path}")
-        return output_path
-
     except Exception as e:
         print(f"Error generating icon: {e}")
         return None
+
+    # Determine output path
+    if output_path is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Parenthesize: 'name or x if cond else y' parses as
+        # '(name or x) if cond else y', discarding name on an empty prompt;
+        # the split() guard covers whitespace-only prompts
+        slug = name or (prompt.split()[0] if prompt.split() else "icon")
+        slug = re.sub(r'[^a-zA-Z0-9_-]', '_', slug.lower())
+        style_suffix = f"_{style}" if style else ""
+        output_path = f"{slug}{style_suffix}_{timestamp}.svg"
+
+    # Save SVG (kept out of the API try/except so filesystem failures aren't
+    # misreported as generation errors)
+    try:
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(svg_code)
+    except OSError as e:
+        print(f"Error writing icon file {output_path}: {e}")
+        return None
+
+    print(f"Icon saved to: {output_path}")
+    return output_path
 
 
 def generate_batch(prompt, count, output_dir, style=None, color=None,
@@ -329,10 +351,19 @@ def generate_batch(prompt, count, output_dir, style=None, color=None,
             )
         )
 
-        response_text = response.text if hasattr(response, 'text') else ""
+        # response.text raises ValueError on blocked/empty responses
+        try:
+            response_text = response.text
+        except ValueError:
+            response_text = ""
         if not response_text:
-            for part in response.candidates[0].content.parts:
-                if hasattr(part, 'text') and part.text:
+            candidates = getattr(response, "candidates", None) or []
+            parts = getattr(getattr(candidates[0], "content", None), "parts", None) if candidates else None
+            if not parts:
+                print("No valid SVGs generated. Empty or blocked model response.")
+                return []
+            for part in parts:
+                if getattr(part, "text", None):
                     response_text += part.text
 
         svgs = extract_svgs(response_text)
@@ -342,30 +373,39 @@ def generate_batch(prompt, count, output_dir, style=None, color=None,
             print(response_text[:500])
             return []
 
-        results = []
-        slug = name or re.sub(r'[^a-zA-Z0-9_-]', '_', prompt.split()[0].lower())
-        style_suffix = f"_{style}" if style else ""
-
-        for i, svg_code in enumerate(svgs[:count]):
-            svg_code = apply_color(svg_code, color)
-            filename = f"{slug}{style_suffix}_{i+1:02d}.svg"
-            filepath = os.path.join(output_dir, filename)
-
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(svg_code)
-
-            results.append(filepath)
-            print(f"  [{i+1}/{len(svgs[:count])}] Saved: {filename}")
-
-        print(f"\n{'='*60}")
-        print(f"  BATCH COMPLETE: {len(results)}/{count} icons generated")
-        print(f"{'='*60}\n")
-
-        return results
-
     except Exception as e:
         print(f"Error generating icons: {e}")
         return []
+
+    # Guard the split: a whitespace-only prompt would otherwise raise
+    # IndexError after the (billed) API call has already been made
+    first_word = prompt.split()[0] if prompt.split() else "icon"
+    results = []
+    slug = name or re.sub(r'[^a-zA-Z0-9_-]', '_', first_word.lower())
+    style_suffix = f"_{style}" if style else ""
+
+    for i, svg_code in enumerate(svgs[:count]):
+        svg_code = apply_color(svg_code, color)
+        filename = f"{slug}{style_suffix}_{i+1:02d}.svg"
+        filepath = os.path.join(output_dir, filename)
+
+        # Separate from the API try/except so filesystem failures aren't
+        # misreported as generation errors
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(svg_code)
+        except OSError as e:
+            print(f"Error writing icon file {filepath}: {e}")
+            continue
+
+        results.append(filepath)
+        print(f"  [{i+1}/{len(svgs[:count])}] Saved: {filename}")
+
+    print(f"\n{'='*60}")
+    print(f"  BATCH COMPLETE: {len(results)}/{count} icons generated")
+    print(f"{'='*60}\n")
+
+    return results
 
 
 def generate_sizes(prompt, sizes, style=None, color=None, output_dir=None, name=None):
@@ -375,7 +415,10 @@ def generate_sizes(prompt, sizes, style=None, color=None, output_dir=None, name=
     os.makedirs(output_dir, exist_ok=True)
 
     results = []
-    slug = name or re.sub(r'[^a-zA-Z0-9_-]', '_', prompt.split()[0].lower())
+    # Guard the split: a whitespace-only prompt would otherwise raise
+    # IndexError here, outside any try/except
+    first_word = prompt.split()[0] if prompt.split() else "icon"
+    slug = name or re.sub(r'[^a-zA-Z0-9_-]', '_', first_word.lower())
     style_suffix = f"_{style}" if style else ""
 
     for size in sizes:

@@ -302,7 +302,7 @@ module.exports = {{
         Returns:
             Tuple of (valid, message)
         """
-        # Check content paths exist
+        # Check content paths are specified
         if not self.config["content"]:
             return False, "No content paths specified"
 
@@ -411,6 +411,10 @@ Examples:
         for color_spec in args.colors:
             try:
                 name, value = color_spec.split(":", 1)
+                # Reject empty parts: split(":", 1) succeeds on ":value"/"name:"
+                # and would otherwise write "" keys/values into the config
+                if not name or not value:
+                    raise ValueError(f"empty name or value in {color_spec!r}")
                 colors[name] = value
             except ValueError:
                 print(f"Invalid color spec: {color_spec}", file=sys.stderr)
@@ -423,6 +427,8 @@ Examples:
         for font_spec in args.fonts:
             try:
                 font_type, family = font_spec.split(":", 1)
+                if not font_type or not family:
+                    raise ValueError(f"empty type or family in {font_spec!r}")
                 fonts[font_type] = [f.strip().strip("'\"") for f in family.split(",")]
             except ValueError:
                 print(f"Invalid font spec: {font_spec}", file=sys.stderr)
@@ -435,6 +441,8 @@ Examples:
         for spacing_spec in args.spacing:
             try:
                 name, value = spacing_spec.split(":", 1)
+                if not name or not value:
+                    raise ValueError(f"empty name or value in {spacing_spec!r}")
                 spacing[name] = value
             except ValueError:
                 print(f"Invalid spacing spec: {spacing_spec}", file=sys.stderr)
@@ -447,6 +455,8 @@ Examples:
         for bp_spec in args.breakpoints:
             try:
                 name, width = bp_spec.split(":", 1)
+                if not name or not width:
+                    raise ValueError(f"empty name or width in {bp_spec!r}")
                 breakpoints[name] = width
             except ValueError:
                 print(f"Invalid breakpoint spec: {bp_spec}", file=sys.stderr)

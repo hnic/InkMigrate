@@ -114,7 +114,10 @@ def get_deliverable_info(filename):
     # or 'van' don't match inside unrelated words ('canvas-tote', 'cards')
     tokens = set(re.split(r"[-_]", filename_lower))
     for key, info in DELIVERABLE_INFO.items():
-        if set(key.split()) <= tokens:
+        # Split keys on the same delimiters as filenames: a whitespace-only
+        # split leaves "t-shirt" as one token, which can never be a subset of
+        # the {"t", "shirt"} tokens produced from "t-shirt.png"
+        if set(re.split(r"[-_ ]", key)) <= tokens:
             return info
     # Default info
     return {
@@ -141,6 +144,9 @@ def generate_html(brand_name, industry, images_dir, output_path=None, style=None
 
     # Get CIP brief for brand info
     brief = get_cip_brief(brand_name, industry, style)
+    if "error" in brief:
+        # Don't silently render placeholder values when the data setup is broken
+        print(f"Warning: CIP brief unavailable ({brief['error']}); using default style info")
     style_info = brief.get("style", {})
     industry_info = brief.get("industry", {})
 
@@ -356,7 +362,11 @@ def generate_html(brand_name, industry, images_dir, output_path=None, style=None
             img_src = f"data:image/png;base64,{img_base64}"
         else:
             # Fallback: path relative to the generated HTML file
-            img_src = Path(os.path.relpath(image_path, output_path.parent)).as_posix()
+            try:
+                img_src = Path(os.path.relpath(image_path, output_path.parent)).as_posix()
+            except ValueError:
+                # relpath raises when paths are on different drives (Windows)
+                img_src = image_path.resolve().as_posix()
 
         html_parts.append(f'''
         <div class="deliverable">
@@ -387,9 +397,15 @@ def generate_html(brand_name, industry, images_dir, output_path=None, style=None
 
     html_content = "".join(html_parts)
 
-    # Save HTML
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(html_content)
+    # Save HTML (create missing parent dirs and report write failures
+    # instead of crashing with a raw traceback after the full render)
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(html_content)
+    except OSError as e:
+        print(f"Error: Cannot write output file {output_path}: {e}")
+        return None
 
     print(f"✅ HTML presentation generated: {output_path}")
     return str(output_path)

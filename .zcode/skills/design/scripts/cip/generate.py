@@ -19,6 +19,7 @@ import json
 import os
 import re
 import sys
+import traceback
 from pathlib import Path
 from datetime import datetime
 
@@ -44,13 +45,13 @@ def load_logo_image(logo_path):
     try:
         from PIL import Image
     except ImportError:
-        print("Error: pillow package not installed.")
-        print("Install with: pip install pillow")
+        print("Error: pillow package not installed.", file=sys.stderr)
+        print("Install with: pip install pillow", file=sys.stderr)
         return None
 
     logo_path = Path(logo_path)
     if not logo_path.exists():
-        print(f"Error: Logo file not found: {logo_path}")
+        print(f"Error: Logo file not found: {logo_path}", file=sys.stderr)
         return None
 
     try:
@@ -68,7 +69,7 @@ def load_logo_image(logo_path):
             img = img.convert('RGB')
         return img
     except Exception as e:
-        print(f"Error loading logo: {e}")
+        print(f"Error loading logo: {e}", file=sys.stderr)
         return None
 
 # Load environment variables
@@ -86,7 +87,12 @@ def load_env():
                     line = line.strip()
                     if line and not line.startswith("#") and "=" in line:
                         key, value = line.split("=", 1)
-                        if key not in os.environ:
+                        # Tolerate shell-style 'export KEY=value' lines and
+                        # padded 'KEY = value' pairs
+                        key = key.strip()
+                        if key.startswith("export "):
+                            key = key[len("export "):].strip()
+                        if key and key not in os.environ:
                             os.environ[key] = value.strip('"\'')
 
 load_env()
@@ -108,12 +114,14 @@ def build_cip_prompt(deliverable, brand_name, style=None, industry=None, mockup=
     deliverable_info = search(deliverable, "deliverable", 1)
     deliverable_data = deliverable_info.get("results", [{}])[0] if deliverable_info.get("results") else {}
 
-    # Get style details
-    style_info = search(style or "corporate minimal", "style", 1) if style else {}
+    # Get style details (search unconditionally with the fallback so the
+    # default style's colors/typography/mood are actually looked up instead
+    # of degrading to bare string defaults when style is None)
+    style_info = search(style or "corporate minimal", "style", 1)
     style_data = style_info.get("results", [{}])[0] if style_info.get("results") else {}
 
     # Get industry details
-    industry_info = search(industry or "technology", "industry", 1) if industry else {}
+    industry_info = search(industry or "technology", "industry", 1)
     industry_data = industry_info.get("results", [{}])[0] if industry_info.get("results") else {}
 
     # Get mockup context
@@ -228,15 +236,17 @@ def generate_with_nano_banana(prompt_data, output_dir=None, model_key="flash", a
     # Determine mode
     mode = "image-editing" if logo_image else "text-to-image"
 
-    print(f"\n🎨 Generating CIP mockup...")
-    print(f"   Mode: {mode}")
-    print(f"   Deliverable: {prompt_data['deliverable']}")
-    print(f"   Brand: {prompt_data['brand']}")
-    print(f"   Style: {prompt_data['style']}")
-    print(f"   Model: {model_name}")
-    print(f"   Context: {prompt_data['mockup_context']}")
+    # Progress/diagnostics go to stderr so stdout stays a clean JSON
+    # payload under --json (e.g. `... --json | jq`)
+    print(f"\n🎨 Generating CIP mockup...", file=sys.stderr)
+    print(f"   Mode: {mode}", file=sys.stderr)
+    print(f"   Deliverable: {prompt_data['deliverable']}", file=sys.stderr)
+    print(f"   Brand: {prompt_data['brand']}", file=sys.stderr)
+    print(f"   Style: {prompt_data['style']}", file=sys.stderr)
+    print(f"   Model: {model_name}", file=sys.stderr)
+    print(f"   Context: {prompt_data['mockup_context']}", file=sys.stderr)
     if logo_image:
-        print(f"   Logo: Using provided image ({logo_image.size[0]}x{logo_image.size[1]})")
+        print(f"   Logo: Using provided image ({logo_image.size[0]}x{logo_image.size[1]})", file=sys.stderr)
 
     try:
         # Build contents: either just prompt or [prompt, image] for image editing
@@ -282,18 +292,24 @@ def generate_with_nano_banana(prompt_data, output_dir=None, model_key="flash", a
                     with open(filepath, "wb") as f:
                         f.write(image_data)
 
-                    print(f"\n✅ Generated: {filepath}")
+                    print(f"\n✅ Generated: {filepath}", file=sys.stderr)
                     return str(filepath)
 
-        print("No image generated in response")
+        # Report why nothing came back (safety block / recitation / empty
+        # candidate are the common causes)
+        reason = getattr(candidate, "finish_reason", None) if candidate else "no candidate"
+        print(f"No image generated in response (finish_reason={reason})", file=sys.stderr)
         return None
 
     except Exception as e:
-        print(f"Error generating image: {e}")
+        # Keep the traceback: auth/quota/config and local write failures all
+        # collapse into the same message otherwise
+        print(f"Error generating image: {e}", file=sys.stderr)
+        traceback.print_exc()
         return None
 
 
-def generate_cip_set(brand_name, industry, style=None, deliverables=None, output_dir=None, model_key="flash", logo_path=None, aspect_ratio="1:1"):
+def generate_cip_set(brand_name, industry, style=None, deliverables=None, output_dir=None, model_key="flash", logo_path=None, aspect_ratio="1:1", mockup=None):
     """Generate a complete CIP set for a brand
 
     Args:
@@ -305,6 +321,7 @@ def generate_cip_set(brand_name, industry, style=None, deliverables=None, output
         model_key: 'flash' (fast) or 'pro' (quality)
         logo_path: Path to brand logo image for image editing mode
         aspect_ratio: Output aspect ratio
+        mockup: Optional mockup context override (forwarded to build_cip_prompt)
     """
 
     # Load logo image if provided
@@ -312,7 +329,7 @@ def generate_cip_set(brand_name, industry, style=None, deliverables=None, output
     if logo_path:
         logo_image = load_logo_image(logo_path)
         if not logo_image:
-            print("Warning: Could not load logo, falling back to text-to-image mode")
+            print("Warning: Could not load logo, falling back to text-to-image mode", file=sys.stderr)
 
     # Get CIP brief for the brand
     brief = get_cip_brief(brand_name, industry, style)
@@ -328,6 +345,7 @@ def generate_cip_set(brand_name, industry, style=None, deliverables=None, output
             brand_name=brand_name,
             style=brief.get("style", {}).get("Style Name"),
             industry=industry,
+            mockup=mockup,
             use_logo_image=(logo_image is not None)
         )
 
@@ -338,12 +356,14 @@ def generate_cip_set(brand_name, industry, style=None, deliverables=None, output
             aspect_ratio=aspect_ratio,
             logo_image=logo_image
         )
-        if filepath:
-            results.append({
-                "deliverable": deliverable,
-                "filepath": filepath,
-                "prompt": prompt_data["prompt"]
-            })
+        # Record a per-deliverable outcome so --json consumers can tell
+        # "5 requested, 2 failed" apart from "3 requested"
+        results.append({
+            "deliverable": deliverable,
+            "filepath": filepath,
+            "status": "ok" if filepath else "failed",
+            "prompt": prompt_data["prompt"]
+        })
 
     return results
 
@@ -467,13 +487,15 @@ Image Editing Mode:
         else:
             results = generate_cip_set(
                 args.brand, args.industry, args.style, deliverables, args.output,
-                model_key=args.model, logo_path=args.logo, aspect_ratio=args.ratio
+                model_key=args.model, logo_path=args.logo, aspect_ratio=args.ratio,
+                mockup=args.mockup
             )
             if args.json:
                 print(json.dumps(results, indent=2))
             else:
-                print(f"\n✅ Generated {len(results)} CIP mockups" if results else "\n❌ No CIP mockups were generated")
-            if not results:
+                ok_count = sum(1 for r in results if r.get("filepath"))
+                print(f"\n✅ Generated {ok_count} CIP mockups" if ok_count else "\n❌ No CIP mockups were generated")
+            if not any(r.get("filepath") for r in results):
                 sys.exit(1)
     else:
         # Generate single deliverable

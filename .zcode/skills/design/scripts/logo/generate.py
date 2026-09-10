@@ -20,6 +20,7 @@ Batch mode (generates multiple variants):
 
 import argparse
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -40,9 +41,18 @@ def load_env():
                 for line in f:
                     line = line.strip()
                     if line and not line.startswith('#') and '=' in line:
-                        key, value = line.split('=', 1)
-                        if key not in os.environ:
-                            os.environ[key] = value.strip('"\'')
+                        # Tolerate shell-style 'export KEY=value' lines
+                        if line.startswith('export '):
+                            line = line[len('export '):].strip()
+                        key, _, value = line.partition('=')
+                        key, value = key.strip(), value.strip()
+                        if key and key not in os.environ:
+                            # Strip one matching pair of quotes only:
+                            # strip("\"'") would mangle values like "it's"
+                            # or mixed-quote values
+                            if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                                value = value[1:-1]
+                            os.environ[key] = value
 
 load_env()
 
@@ -77,7 +87,7 @@ Style requirements:
 - Centered composition on plain white or transparent background
 - No text unless specifically requested
 - High contrast and clear edges
-- Square format, perfectly centered
+- {format_hint}
 - Output as a clean, high-quality logo image
 """
 
@@ -116,7 +126,8 @@ INDUSTRY_PROMPTS = {
 }
 
 
-def enhance_prompt(base_prompt, style=None, industry=None, brand_name=None):
+def enhance_prompt(base_prompt, style=None, industry=None, brand_name=None,
+                   aspect_ratio=DEFAULT_ASPECT_RATIO):
     """Enhance the logo prompt with style and industry modifiers"""
     prompt_parts = [base_prompt]
 
@@ -130,7 +141,12 @@ def enhance_prompt(base_prompt, style=None, industry=None, brand_name=None):
         prompt_parts.insert(0, f"Logo for '{brand_name}':")
 
     combined = ", ".join(prompt_parts)
-    return LOGO_PROMPT_TEMPLATE.format(prompt=combined)
+    # Keep the text prompt in sync with the requested aspect ratio so the
+    # model isn't told "square" while ImageConfig asks for 16:9
+    format_hint = ("Square format, perfectly centered"
+                   if aspect_ratio == DEFAULT_ASPECT_RATIO
+                   else f"{aspect_ratio} format, centered composition")
+    return LOGO_PROMPT_TEMPLATE.format(prompt=combined, format_hint=format_hint)
 
 
 def generate_logo(prompt, style=None, industry=None, brand_name=None,
@@ -150,15 +166,15 @@ def generate_logo(prompt, style=None, industry=None, brand_name=None,
     # Initialize client
     client = genai.Client(api_key=GEMINI_API_KEY)
 
+    # Set aspect ratio (default to 1:1 for logos)
+    ratio = aspect_ratio if aspect_ratio in ASPECT_RATIOS else DEFAULT_ASPECT_RATIO
+
     # Enhance the prompt
-    full_prompt = enhance_prompt(prompt, style, industry, brand_name)
+    full_prompt = enhance_prompt(prompt, style, industry, brand_name, aspect_ratio=ratio)
 
     # Select model
     model = GEMINI_PRO if use_pro else GEMINI_FLASH
     model_label = "Nano Banana Pro (gemini-3-pro-image-preview)" if use_pro else "Nano Banana (gemini-2.5-flash-image)"
-
-    # Set aspect ratio (default to 1:1 for logos)
-    ratio = aspect_ratio if aspect_ratio in ASPECT_RATIOS else DEFAULT_ASPECT_RATIO
 
     print(f"Generating logo with {model_label}...")
     print(f"Aspect ratio: {ratio}")
@@ -216,22 +232,29 @@ def generate_logo(prompt, style=None, industry=None, brand_name=None,
             print("Try a different prompt or check if the model supports image generation.")
             return None
 
-        # Determine output path
-        if output_path is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            brand_slug = brand_name.lower().replace(" ", "_") if brand_name else "logo"
-            output_path = f"{brand_slug}_{timestamp}.png"
+    except Exception as e:
+        print(f"Error calling Gemini API: {e}")
+        return None
 
-        # Save image
+    # Determine output path
+    if output_path is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Sanitize the slug: a '/' in the brand name would create a nested
+        # path whose parent doesn't exist (and '../' could escape the cwd)
+        brand_slug = re.sub(r"[^\w-]+", "_", (brand_name or "logo").lower()).strip("_") or "logo"
+        output_path = f"{brand_slug}_{timestamp}.png"
+
+    # Save image (kept out of the API try/except so local write failures
+    # aren't misreported as API errors)
+    try:
         with open(output_path, "wb") as f:
             f.write(image_data)
-
-        print(f"Logo saved to: {output_path}")
-        return output_path
-
-    except Exception as e:
-        print(f"Error generating logo: {e}")
+    except OSError as e:
+        print(f"Error writing output file {output_path}: {e}")
         return None
+
+    print(f"Logo saved to: {output_path}")
+    return output_path
 
 
 def generate_batch(prompt, brand_name, count, output_dir, use_pro=False, brand_context=None, aspect_ratio=None, industry=None):
@@ -253,6 +276,8 @@ def generate_batch(prompt, brand_name, count, output_dir, use_pro=False, brand_c
     # Cap the count at the number of available styles and use the capped
     # total consistently (header, progress, rate limiting, summary)
     total = min(count, len(batch_styles))
+    if count > len(batch_styles):
+        print(f"Note: only {len(batch_styles)} styles available; generating {total} variants")
 
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
@@ -260,6 +285,9 @@ def generate_batch(prompt, brand_name, count, output_dir, use_pro=False, brand_c
     results = []
     model_label = "Pro" if use_pro else "Flash"
     ratio = aspect_ratio if aspect_ratio in ASPECT_RATIOS else DEFAULT_ASPECT_RATIO
+    # Sanitize the slug: a '/' in the brand name would create a nested path
+    # whose parent doesn't exist (and '../' could escape output_dir)
+    brand_slug = re.sub(r"[^\w-]+", "_", (brand_name or "logo").lower()).strip("_") or "logo"
 
     print(f"\n{'='*60}")
     print(f"  BATCH LOGO GENERATION: {brand_name}")
@@ -278,7 +306,7 @@ def generate_batch(prompt, brand_name, count, output_dir, use_pro=False, brand_c
             enhanced_prompt = f"{brand_context}, {enhanced_prompt}"
 
         # Generate filename
-        filename = f"{(brand_name or 'logo').lower().replace(' ', '_')}_{style_key}_{i+1:02d}.png"
+        filename = f"{brand_slug}_{style_key}_{i+1:02d}.png"
         output_path = os.path.join(output_dir, filename)
 
         print(f"[{i+1}/{total}] Generating {style_key} variant...")
@@ -342,6 +370,12 @@ def main():
 
     if not args.prompt and not args.brand:
         parser.error("Either --prompt or --brand is required")
+
+    # Reject non-positive batch counts up front (a count of 0 is falsy and
+    # would otherwise silently fall through to single-logo mode; a negative
+    # count would produce a confusing "0/-N logos generated" run)
+    if args.batch is not None and args.batch < 1:
+        parser.error("--batch must be a positive integer")
 
     prompt = args.prompt or "professional logo"
 

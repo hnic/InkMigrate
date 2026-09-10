@@ -6,6 +6,7 @@ CIP Design Core - BM25 search engine for Corporate Identity Program design guide
 
 import csv
 import re
+import sys
 from pathlib import Path
 from math import log
 from collections import defaultdict
@@ -119,7 +120,9 @@ def _search_csv(filepath, search_cols, output_cols, query, max_results):
     data = _load_csv(filepath)
 
     # Build documents from search columns
-    documents = [" ".join(str(row.get(col, "")) for col in search_cols) for row in data]
+    # (row.get(col) or "" also coerces the None values DictReader produces
+    # for short rows, which would otherwise index a literal "None" token)
+    documents = [" ".join(str(row.get(col) or "") for col in search_cols) for row in data]
 
     # BM25 search
     bm25 = BM25()
@@ -131,7 +134,7 @@ def _search_csv(filepath, search_cols, output_cols, query, max_results):
     for idx, score in ranked[:max_results]:
         if score > 0:
             row = data[idx]
-            results.append({col: row.get(col, "") for col in output_cols if col in row})
+            results.append({col: row.get(col) or "" for col in output_cols if col in row})
 
     return results
 
@@ -163,7 +166,17 @@ def search(query, domain=None, max_results=MAX_RESULTS):
     filepath = DATA_DIR / config["file"]
 
     if not filepath.exists():
-        return {"error": f"File not found: {filepath}", "domain": domain}
+        # Uniform result shape plus "error": callers can rely on
+        # result["results"] existing while still detecting failures via
+        # "error" in result
+        return {
+            "domain": domain,
+            "query": query,
+            "file": config["file"],
+            "count": 0,
+            "results": [],
+            "error": f"File not found: {filepath}"
+        }
 
     results = _search_csv(filepath, config["search_cols"], config["output_cols"], query, max_results)
 
@@ -181,6 +194,11 @@ def search_all(query, max_results=2):
     all_results = {}
     for domain in CSV_CONFIG.keys():
         result = search(query, domain, max_results)
+        if "error" in result:
+            # Surface data/config problems instead of silently dropping
+            # the domain (indistinguishable from "no matches" otherwise)
+            print(f"[cip] {domain} search failed: {result['error']}", file=sys.stderr)
+            continue
         if result.get("results"):
             all_results[domain] = result["results"]
     return all_results

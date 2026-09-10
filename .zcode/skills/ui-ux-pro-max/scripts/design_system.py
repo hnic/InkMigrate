@@ -161,8 +161,10 @@ class DesignSystemGenerator:
         # Parse decision rules JSON
         decision_rules = {}
         try:
-            decision_rules = json.loads(rule.get("Decision_Rules", "{}"))
-        except json.JSONDecodeError:
+            # 'or "{}"' coerces the None DictReader produces for short rows:
+            # json.loads(None) raises TypeError, which JSONDecodeError doesn't catch
+            decision_rules = json.loads(rule.get("Decision_Rules") or "{}")
+        except (json.JSONDecodeError, TypeError):
             pass
 
         return {
@@ -187,11 +189,13 @@ class DesignSystemGenerator:
             return results[0]
 
         # First: try exact style name match
+        # (skip blank names: '' is 'in' every string and would shadow
+        # better matches, same as the blank-category fix in _find_reasoning_rule)
         for priority in priority_keywords:
             priority_lower = priority.lower().strip()
             for result in results:
-                style_name = result.get("Style Category", "").lower()
-                if priority_lower in style_name or style_name in priority_lower:
+                style_name = (result.get("Style Category") or "").strip().lower()
+                if style_name and (priority_lower in style_name or style_name in priority_lower):
                     return result
 
         # Second: score by keyword match in all fields
@@ -233,6 +237,11 @@ class DesignSystemGenerator:
 
         # Step 1: First search product to get category
         product_result = search(query, "product", 1)
+        if "error" in product_result:
+            # Missing/broken data files must fail loudly instead of rendering
+            # an all-defaults design system that looks like success (the CLI
+            # catches this and exits non-zero)
+            raise RuntimeError(f"product search failed: {product_result['error']}")
         product_results = product_result.get("results", [])
         category = "General"
         if product_results:
@@ -379,7 +388,9 @@ def ansi_ljust(s: str, width: int) -> str:
 def section_header(name: str, width: int) -> str:
     """Create a Unicode section separator: ├─── NAME ───...┤"""
     label = f"─── {name} "
-    fill = "─" * (width - len(label) - 1)
+    # -2 for the two border characters so the total visible width equals
+    # 'width' (matching the box borders and .ljust(BOX_WIDTH) content lines)
+    fill = "─" * (width - len(label) - 2)
     return f"├{label}{fill}┤"
 
 

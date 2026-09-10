@@ -22,6 +22,7 @@ Persistence (Master + Overrides pattern):
 
 import argparse
 import sys
+from pathlib import Path
 from core import CSV_CONFIG, AVAILABLE_STACKS, MAX_RESULTS, search, search_stack
 from design_system import generate_design_system, persist_design_system, safe_slug
 
@@ -84,39 +85,59 @@ if __name__ == "__main__":
         for dial in ("variance", "motion", "density"):
             if getattr(args, dial) is not None:
                 parser.error(f"--{dial} requires --design-system")
+    else:
+        # These flags have no effect on the design-system branch; reject them
+        # instead of silently discarding them (same policy as above)
+        if args.json:
+            parser.error("--json is not supported with --design-system")
+        if args.domain:
+            parser.error("--domain is not supported with --design-system")
+        if args.stack:
+            parser.error("--stack is not supported with --design-system")
     if not args.persist:
-        if args.page:
+        # is not None (not truthiness) so empty-string values still fail fast
+        if args.page is not None:
             parser.error("--page requires --persist")
-        if args.output_dir:
+        if args.output_dir is not None:
             parser.error("--output-dir requires --persist")
 
     # Design system takes priority
     if args.design_system:
-        result = generate_design_system(
-            args.query,
-            args.project_name,
-            args.format,
-            persist=args.persist,
-            page=args.page,
-            output_dir=args.output_dir,
-            variance=args.variance,
-            motion=args.motion,
-            density=args.density
-        )
+        try:
+            result = generate_design_system(
+                args.query,
+                args.project_name,
+                args.format,
+                persist=args.persist,
+                page=args.page,
+                output_dir=args.output_dir,
+                variance=args.variance,
+                motion=args.motion,
+                density=args.density
+            )
+        except Exception as e:
+            # Fail loudly with a non-zero exit like the stack/domain branches
+            # do, instead of letting a broken generation look like success
+            print(f"Error: failed to generate design system: {e}", file=sys.stderr)
+            sys.exit(1)
         print(result)
 
         # Print persistence confirmation
         if args.persist:
+            # Mirror persist_design_system's path construction (Path-joined,
+            # relative to cwd by default) so the advertised paths match what
+            # was actually written, instead of re-deriving them by hand
             project_slug = safe_slug(args.project_name or args.query.upper())
-            out_prefix = f"{args.output_dir.rstrip('/')}/" if args.output_dir else ""
+            base_dir = Path(args.output_dir) if args.output_dir else Path.cwd()
+            ds_dir = base_dir / "design-system" / project_slug
             print("\n" + "=" * 60)
-            print(f"✅ Design system persisted to {out_prefix}design-system/{project_slug}/")
-            print(f"   📄 {out_prefix}design-system/{project_slug}/MASTER.md (Global Source of Truth)")
+            print(f"✅ Design system persisted to {ds_dir}/")
+            print(f"   📄 {ds_dir}/MASTER.md (Global Source of Truth)")
             if args.page:
                 page_filename = safe_slug(args.page, 'page')
-                print(f"   📄 {out_prefix}design-system/{project_slug}/pages/{page_filename}.md (Page Overrides)")
+                print(f"   📄 {ds_dir}/pages/{page_filename}.md (Page Overrides)")
             print("")
-            print(f"📖 Usage: When building a page, check {out_prefix}design-system/{project_slug}/pages/[page].md first.")
+            print(f"📖 Usage: When building a page, check {ds_dir}/pages/[page].md first.")
             print(f"   If exists, its rules override MASTER.md. Otherwise, use MASTER.md.")
             print("=" * 60)
     # Stack search

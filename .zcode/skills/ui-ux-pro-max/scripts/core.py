@@ -132,6 +132,10 @@ class BM25:
 
     def fit(self, documents):
         """Build BM25 index from documents"""
+        # Reset state so re-fitting an instance doesn't merge stale stats
+        # (df from the previous corpus could even exceed N, giving negative IDF)
+        self.doc_freqs = defaultdict(int)
+        self.idf = {}
         self.corpus = [self.tokenize(doc) for doc in documents]
         self.N = len(self.corpus)
         if self.N == 0:
@@ -190,7 +194,9 @@ def _search_csv(filepath, search_cols, output_cols, query, max_results):
     data = _load_csv(filepath)
 
     # Build documents from search columns
-    documents = [" ".join(str(row.get(col, "")) for col in search_cols) for row in data]
+    # (row.get(col) or "" also coerces the None values DictReader produces
+    # for short rows, which would otherwise index a literal "None" token)
+    documents = [" ".join(str(row.get(col) or "") for col in search_cols) for row in data]
 
     # BM25 search
     bm25 = BM25()

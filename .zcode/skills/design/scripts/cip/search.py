@@ -57,7 +57,10 @@ def format_brief(brief):
     if brief.get("recommended_deliverables"):
         output.append(f"\n📦 RECOMMENDED DELIVERABLES:")
         for d in brief["recommended_deliverables"]:
-            output.append(f"   • {d.get('Deliverable', 'N/A')}: {d.get('Description', '')[:60]}...")
+            # (d.get('Description') or '') neutralizes None values from short
+            # CSV rows; the .get default only covers a *missing* key
+            desc = (d.get('Description') or '')[:60]
+            output.append(f"   • {d.get('Deliverable', 'N/A')}: {desc}...")
 
     return "\n".join(output)
 
@@ -111,6 +114,10 @@ Examples:
         if args.json:
             print(json.dumps(results, indent=2))
         else:
+            # Empty-result fallback so --all never exits silently (matches
+            # the feedback every other branch gives)
+            if not results:
+                print("No results found.")
             for domain, items in results.items():
                 print(f"\n{'#'*60}")
                 print(f"# {domain.upper()}")

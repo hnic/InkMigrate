@@ -8,11 +8,52 @@ Wraps shadcn CLI for programmatic component installation.
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import List, Optional
+
+
+def _strip_jsonc_comments(text: str) -> str:
+    """Remove // and /* */ comments outside string literals.
+
+    A plain regex can't do this: tsconfig path values legitimately contain
+    '/*' (e.g. "@/*": ["./src/*"]), which a regex would treat as the start
+    of a block comment.
+    """
+    out = []
+    i, n = 0, len(text)
+    in_string = False
+    while i < n:
+        c = text[i]
+        if in_string:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if c == '"':
+                in_string = False
+            i += 1
+        elif c == '"':
+            in_string = True
+            out.append(c)
+            i += 1
+        elif c == "/" and i + 1 < n and text[i + 1] == "/":
+            i += 2
+            while i < n and text[i] != "\n":
+                i += 1
+        elif c == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i = min(i + 2, n)
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
 
 
 class ShadcnInstaller:
@@ -86,16 +127,33 @@ class ShadcnInstaller:
         tsconfig = self.project_root / "tsconfig.json"
         if tsconfig.exists():
             try:
-                ts = json.loads(tsconfig.read_text())
-                paths = ts.get("compilerOptions", {}).get("paths", {})
+                text = tsconfig.read_text()
+                # tsconfig is JSONC: strip comments and trailing commas
+                # before json.loads, or the common commented tsconfig would
+                # fail to parse and silently fall back to the project root
+                text = _strip_jsonc_comments(text)
+                text = re.sub(r",\s*([}\]])", r"\1", text)
+                ts = json.loads(text)
+                compiler = ts.get("compilerOptions", {})
+                base_url = str(compiler.get("baseUrl", "."))
+                paths = compiler.get("paths", {})
                 for pattern, targets in paths.items():
                     if pattern == f"{prefix}/*" and targets:
                         target = str(targets[0])
-                        # './src/*' -> './src'; non-wildcard targets map directly
-                        base = target[:-2] if target.endswith("/*") else target
+                        # './src/*' -> './src'; non-wildcard targets map
+                        # directly; a bare '*' target resolves to baseUrl
+                        if target.endswith("/*"):
+                            target = target[:-2]
+                        elif target == "*":
+                            target = ""
+                        base = str(Path(base_url) / target) if target else base_url
                         break
-            except (json.JSONDecodeError, OSError, TypeError):
-                pass
+            except (json.JSONDecodeError, OSError, TypeError) as e:
+                print(
+                    f"Warning: could not parse tsconfig.json ({e}); "
+                    f"assuming '{alias}' maps to the project root",
+                    file=sys.stderr,
+                )
 
         return self.project_root / base / rest
 
@@ -108,7 +166,12 @@ class ShadcnInstaller:
                 for section in ("dependencies", "devDependencies"):
                     version = pkg.get(section, {}).get("shadcn")
                     if version:
-                        return version.lstrip("^~>=<").split()[0]
+                        # Extract the semver core: non-semver specifiers
+                        # ("workspace:*", git URLs, ...) can't be resolved by
+                        # npx, so fall through to the pinned default instead
+                        m = re.search(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", version)
+                        if m:
+                            return m.group(0)
             except (json.JSONDecodeError, KeyError):
                 pass
         return "2.3.0"  # pinned fallback; update when newer stable release is needed
