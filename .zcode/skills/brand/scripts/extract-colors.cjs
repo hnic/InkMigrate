@@ -21,8 +21,9 @@
 const fs = require("fs");
 const path = require("path");
 
-// Default brand guidelines path
-const DEFAULT_GUIDELINES_PATH = "docs/brand-guidelines.md";
+// Default brand guidelines path (overridable via environment)
+const DEFAULT_GUIDELINES_PATH =
+  process.env.BRAND_GUIDELINES_PATH || "docs/brand-guidelines.md";
 
 // Brand compliance distance threshold (out of max ~441 for RGB)
 const BRAND_DISTANCE_THRESHOLD = 50;
@@ -35,6 +36,12 @@ const BRAND_DISTANCE_THRESHOLD = 50;
  */
 function extractHexColors(text) {
   const hexPattern = /#(?:[0-9A-Fa-f]{8}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{3})\b/g;
+  // Only scan lines that look like palette entries (markdown table rows or
+  // lines labelled color/hex/rgb), so prose hashtags like "#fad" are ignored.
+  const candidateText = text
+    .split("\n")
+    .filter((line) => /\|/.test(line) || /colou?r|hex|rgb/i.test(line))
+    .join("\n");
   const normalize = (hex) => {
     if (hex.length === 4) {
       // Expand shorthand: #abc -> #aabbcc
@@ -48,7 +55,7 @@ function extractHexColors(text) {
     // 8-digit form carries alpha; keep the RGB channels
     return "#" + hex.slice(1, 7).toUpperCase();
   };
-  return [...new Set((text.match(hexPattern) || []).map(normalize))];
+  return [...new Set((candidateText.match(hexPattern) || []).map(normalize))];
 }
 
 /**
@@ -67,8 +74,9 @@ function parseBrandColors(guidelinesPath) {
   try {
     content = fs.readFileSync(resolvedPath, "utf-8");
   } catch (err) {
-    console.error(`Failed to read brand guidelines: ${resolvedPath} (${err.message})`);
-    return null;
+    // Distinguish "missing" (returns null) from "unreadable" (throws) so the
+    // caller reports the accurate reason.
+    throw new Error(`Failed to read brand guidelines: ${resolvedPath} (${err.message})`);
   }
 
   const palette = {
@@ -134,12 +142,21 @@ function rgbToHex(r, g, b) {
 
 /**
  * Calculate color distance (Euclidean in RGB space)
+ *
+ * Accepts hex strings, {r,g,b} objects, or histogram entries ({hex, count}
+ * from parseImageMagickOutput), so the exported helpers compose safely.
  */
 function colorDistance(color1, color2) {
-  const rgb1 = typeof color1 === "string" ? hexToRgb(color1) : color1;
-  const rgb2 = typeof color2 === "string" ? hexToRgb(color2) : color2;
+  const toRgb = (c) =>
+    typeof c === "string" || (c && typeof c.hex === "string")
+      ? hexToRgb(typeof c === "string" ? c : c.hex)
+      : c;
+  const rgb1 = toRgb(color1);
+  const rgb2 = toRgb(color2);
+  const valid = (rgb) =>
+    rgb && ["r", "g", "b"].every((k) => Number.isFinite(rgb[k]));
 
-  if (!rgb1 || !rgb2) return Infinity;
+  if (!valid(rgb1) || !valid(rgb2)) return Infinity;
 
   return Math.sqrt(
     Math.pow(rgb1.r - rgb2.r, 2) +
@@ -191,10 +208,12 @@ function calculateCompliance(
 }
 
 /**
- * Escape a value for safe interpolation into a double-quoted shell string
+ * Quote a value for safe interpolation into a shell command.
+ * Single quotes are safe for every character except a single quote,
+ * which is closed, escaped and reopened as '\''.
  */
-function escapeShellDoubleQuoted(value) {
-  return String(value).replace(/[\\"`$!]/g, "\\$&");
+function escapeShellArg(value) {
+  return "'" + String(value).replace(/'/g, "'\\''") + "'";
 }
 
 /**
@@ -203,7 +222,7 @@ function escapeShellDoubleQuoted(value) {
 function generateImageMagickCommand(imagePath, numColors = 10) {
   const colors = Number.parseInt(numColors, 10);
   const safeColors = Number.isInteger(colors) ? colors : 10;
-  return `magick "${escapeShellDoubleQuoted(imagePath)}" -colors ${safeColors} -depth 8 -format "%c" histogram:info:`;
+  return `magick ${escapeShellArg(imagePath)} -colors ${safeColors} -depth 8 -format "%c" histogram:info:`;
 }
 
 /**
@@ -275,24 +294,33 @@ function main() {
   const args = process.argv.slice(2);
   const jsonOutput = args.includes("--json");
   const showPalette = args.includes("--palette");
-  const brandFileIdx = args.indexOf("--brand-file");
   let brandFile = DEFAULT_GUIDELINES_PATH;
-  let brandFileValue = null;
-  if (brandFileIdx !== -1) {
-    const value = args[brandFileIdx + 1];
-    if (!value || value.startsWith("--")) {
-      console.error("Error: --brand-file requires a path argument");
-      process.exit(1);
+  // Parse positionally: consume --brand-file's value while scanning, so the
+  // first remaining non-flag token is unambiguously the image path.
+  const positional = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--brand-file") {
+      const value = args[i + 1];
+      if (!value || value.startsWith("--")) {
+        console.error("Error: --brand-file requires a path argument");
+        process.exit(1);
+      }
+      brandFile = value;
+      i += 1;
+    } else if (!args[i].startsWith("--")) {
+      positional.push(args[i]);
     }
-    brandFile = value;
-    brandFileValue = value;
   }
-  const imagePath = args.find(
-    (a) => !a.startsWith("--") && a !== brandFileValue
-  );
+  const imagePath = positional[0];
 
   // Load brand palette
-  const brandPalette = parseBrandColors(brandFile);
+  let brandPalette;
+  try {
+    brandPalette = parseBrandColors(brandFile);
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
 
   if (!brandPalette) {
     console.error(`Brand guidelines not found at: ${brandFile}`);
@@ -329,22 +357,39 @@ function main() {
 
   // Generate extraction instructions
   const extractionCommand = generateImageMagickCommand(resolvedPath);
+  const instructions = [
+    "1. Run the ImageMagick command to extract colors:",
+    `   ${extractionCommand}`,
+    "",
+  ];
+
+  // The ai-multimodal skill's location varies by project layout — only
+  // suggest it when the script is actually present.
+  const multimodalScript = [
+    ".zcode/skills/ai-multimodal/scripts/gemini_batch_process.py",
+    ".claude/skills/ai-multimodal/scripts/gemini_batch_process.py",
+  ]
+    .map((p) => path.resolve(process.cwd(), p))
+    .find((p) => fs.existsSync(p));
+  if (multimodalScript) {
+    instructions.push(
+      "2. Or use the ai-multimodal skill:",
+      `   python "${multimodalScript}" \\`,
+      `     --files "${resolvedPath}" \\`,
+      `     --task analyze \\`,
+      `     --prompt "Extract the 10 most dominant colors as hex values"`,
+      ""
+    );
+  }
+  instructions.push(
+    `${multimodalScript ? "3" : "2"}. Then compare extracted colors against brand palette`
+  );
+
   const result = {
     image: resolvedPath,
     brandPalette: brandPalette,
     extractionCommand,
-    instructions: [
-      "1. Run the ImageMagick command to extract colors:",
-      `   ${extractionCommand}`,
-      "",
-      "2. Or use the ai-multimodal skill:",
-      `   python .claude/skills/ai-multimodal/scripts/gemini_batch_process.py \\`,
-      `     --files "${resolvedPath}" \\`,
-      `     --task analyze \\`,
-      `     --prompt "Extract the 10 most dominant colors as hex values"`,
-      "",
-      "3. Then compare extracted colors against brand palette",
-    ],
+    instructions,
     complianceCheck: {
       threshold: BRAND_DISTANCE_THRESHOLD,
       description: `Colors within distance ${BRAND_DISTANCE_THRESHOLD} (RGB space) are considered brand-compliant`,
@@ -369,6 +414,7 @@ function main() {
     console.log(`  Primary: ${brandPalette.primary.join(", ") || "none"}`);
     console.log(`  Secondary: ${brandPalette.secondary.join(", ") || "none"}`);
     console.log(`  Neutral: ${brandPalette.neutral.join(", ") || "none"}`);
+    console.log(`  Semantic: ${brandPalette.semantic.join(", ") || "none"}`);
     console.log("=".repeat(60) + "\n");
   }
 }

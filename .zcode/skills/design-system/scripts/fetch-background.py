@@ -28,10 +28,15 @@ def resolve_token_reference(ref: str, tokens: dict) -> str:
             current = current.get(key)
         else:
             return None  # Invalid path
-    # Return $value if it's a token object
-    if isinstance(current, dict) and '$value' in current:
-        return current['$value']
-    return current
+    # Return $value only if this is a leaf token node; group nodes, missing
+    # keys and unresolved nested references are invalid — return None so the
+    # caller's falsy guards fall back safely instead of interpolating a dict.
+    if isinstance(current, dict):
+        value = current.get('$value')
+        if isinstance(value, str) and value.startswith('{'):
+            return None  # nested reference — not resolvable here
+        return value
+    return current if isinstance(current, str) else None
 
 
 def load_brand_colors():
@@ -119,20 +124,41 @@ def load_backgrounds_config():
         with open(BACKGROUNDS_CSV, newline='') as f:
             reader = csv.DictReader(f)
             for row in reader:
-                config[row['slide_type']] = row
+                # Missing/renamed 'slide_type' column or short rows should
+                # skip that row, not crash the script
+                slide_type = row.get('slide_type')
+                if not slide_type:
+                    continue
+                config[slide_type] = row
     except FileNotFoundError:
         print(f"Warning: {BACKGROUNDS_CSV} not found")
     return config
 
 
+def with_alpha(color: str, alpha: str) -> str:
+    """Return `color` as 8-digit hex: expand shorthand (#abc → #aabbcc),
+    strip an existing alpha channel, and fall back to a dark default for
+    non-hex values (rgb()/hsl()/keywords) instead of emitting invalid CSS."""
+    fallback = '#0D0D0D' + alpha
+    if not (isinstance(color, str) and color.startswith('#')):
+        return fallback
+    hex_part = color[1:]
+    if len(hex_part) in (3, 4):
+        hex_part = ''.join(ch * 2 for ch in hex_part[:3])
+    elif len(hex_part) == 8:
+        hex_part = hex_part[:6]
+    return '#' + hex_part + alpha if len(hex_part) == 6 else fallback
+
+
 def get_overlay_css(style: str, brand_colors: dict) -> str:
     """Generate overlay CSS using brand colors from design-tokens.json."""
+    bg = brand_colors['background']
     overlays = {
-        'gradient-dark': f"linear-gradient(135deg, {brand_colors['background']}E6, {brand_colors['background']}B3)",
-        'gradient-brand': f"linear-gradient(135deg, {brand_colors['primary']}CC, {brand_colors['secondary']}99)",
-        'gradient-accent': f"linear-gradient(135deg, {brand_colors['accent']}99, transparent)",
-        'blur-dark': f"rgba(13,13,13,0.8)",
-        'desaturate-dark': f"rgba(13,13,13,0.7)",
+        'gradient-dark': f"linear-gradient(135deg, {with_alpha(bg, 'E6')}, {with_alpha(bg, 'B3')})",
+        'gradient-brand': f"linear-gradient(135deg, {with_alpha(brand_colors['primary'], 'CC')}, {with_alpha(brand_colors['secondary'], '99')})",
+        'gradient-accent': f"linear-gradient(135deg, {with_alpha(brand_colors['accent'], '99')}, transparent)",
+        'blur-dark': f"linear-gradient(0deg, {with_alpha(bg, 'CC')}, {with_alpha(bg, 'CC')})",
+        'desaturate-dark': f"linear-gradient(0deg, {with_alpha(bg, 'B3')}, {with_alpha(bg, 'B3')})",
     }
     return overlays.get(style, overlays['gradient-dark'])
 
@@ -209,8 +235,12 @@ def get_background_image(slide_type: str) -> dict:
     keywords = slide_type
 
     if slide_config:
-        keywords = slide_config.get('search_keywords', slide_config.get('image_category', slide_type))
-        overlay_style = slide_config.get('overlay_style', 'gradient-dark')
+        # `or` chaining (not .get defaults): DictReader yields '' for empty
+        # cells and None for short rows, and those must fall through too.
+        keywords = (slide_config.get('search_keywords')
+                    or slide_config.get('image_category')
+                    or slide_type)
+        overlay_style = slide_config.get('overlay_style') or 'gradient-dark'
 
     # Get curated images (get_curated_images always returns a non-empty
     # list: unknown types fall back to the 'hero' entries)

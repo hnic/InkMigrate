@@ -22,14 +22,15 @@ function parseArgs() {
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--dir' || args[i] === '-d') {
-      options.dir = args[++i];
-      if (typeof options.dir !== 'string') {
+      const dir = args[++i];
+      if (typeof dir !== 'string' || (dir.startsWith('-') && dir !== '-')) {
         console.error('Error: --dir requires a path argument');
         process.exit(1);
       }
+      options.dir = dir;
     } else if (args[i] === '--ignore' || args[i] === '-i') {
       const ignoreDir = args[++i];
-      if (typeof ignoreDir !== 'string') {
+      if (typeof ignoreDir !== 'string' || (ignoreDir.startsWith('-') && ignoreDir !== '-')) {
         console.error('Error: --ignore requires a directory argument');
         process.exit(1);
       }
@@ -49,6 +50,8 @@ Checks for:
   - Hardcoded rem values in CSS
       `);
       process.exit(0);
+    } else {
+      console.warn(`Warning: unknown argument '${args[i]}' ignored`);
     }
   }
 
@@ -60,8 +63,9 @@ Checks for:
  */
 const patterns = {
   hexColor: {
-    // (?![\w-]) avoids matching inside longer identifiers
-    regex: /#([0-9A-Fa-f]{3}){1,2}(?![\w-])/g,
+    // Alternation ordered longest-first so 4/8-digit hex is not rejected by
+    // the lookahead; 5/7-digit strings (invalid CSS) stay excluded.
+    regex: /#(?:[0-9A-Fa-f]{8}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{3,4})(?![\w-])/g,
     message: 'Hardcoded hex color',
     suggestion: 'Use var(--color-*) token'
   },
@@ -72,14 +76,15 @@ const patterns = {
     suggestion: 'Use var(--color-*) token'
   },
   pixelValue: {
-    // Allow optional quote (inline styles), sign, and decimals; 0/1px are
-    // exempted in the exception check below
-    regex: /:\s*['"]?(-?\d+\.?\d*)px['"]?/g,
+    // Match px tokens anywhere on the line so shorthand values
+    // (`padding: 8px 16px`) and functional values (`calc(100% - 16px)`)
+    // are not missed; 0/1px are exempted in the exception check below
+    regex: /['"]?(-?\d+\.?\d*)px\b/g,
     message: 'Hardcoded pixel value',
     suggestion: 'Use var(--space-*) or var(--radius-*) token'
   },
   remValue: {
-    regex: /:\s*['"]?-?\d+\.?\d*rem['"]?/g,
+    regex: /['"]?-?\d+\.?\d*rem\b/g,
     message: 'Hardcoded rem value',
     suggestion: 'Use var(--space-*) or var(--font-size-*) token'
   }
@@ -87,9 +92,6 @@ const patterns = {
 
 // Hex colors that are often intentional (pure black/white)
 const HEX_COLOR_WHITELIST = ['#000', '#FFF', '#000000', '#FFFFFF'];
-
-// URL fragments/anchors (href="#...", url(#...)) are not colors
-const ANCHOR_REF_LINE = /(?:href|url|xlink:href)\s*[=(]\s*['"]?#/;
 
 /**
  * File extensions to scan
@@ -109,7 +111,13 @@ const skipPatterns = [
 /**
  * Get all files recursively
  */
-function getFiles(dir, ignore, files = []) {
+function getFiles(dir, ignore, files = [], visited = new Set()) {
+  // Cycle protection: symlinked directories can loop; skip already-seen
+  // resolved paths.
+  const realDir = fs.realpathSync(dir);
+  if (visited.has(realDir)) return files;
+  visited.add(realDir);
+
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -121,9 +129,20 @@ function getFiles(dir, ignore, files = []) {
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name);
 
-    if (entry.isDirectory()) {
+    // Dirent.isDirectory() is false for symlinks (lstat semantics) — follow
+    // symlinked directories via stat() so they are traversed too.
+    let isDir = entry.isDirectory();
+    if (!isDir && entry.isSymbolicLink()) {
+      try {
+        isDir = fs.statSync(fullPath).isDirectory();
+      } catch {
+        // Broken symlink — nothing to traverse
+      }
+    }
+
+    if (isDir) {
       if (!ignore.includes(entry.name)) {
-        getFiles(fullPath, ignore, files);
+        getFiles(fullPath, ignore, files, visited);
       }
     } else if (entry.isFile()) {
       const ext = path.extname(entry.name);
@@ -170,7 +189,10 @@ function scanFile(filePath) {
       inBlockComment = false;
       line = line.slice(end + 2);
     }
-    line = line.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/, '');
+    line = line
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      // Don't treat '//' in URLs (https://, //cdn...) as a comment start
+      .replace(/(^|[^:'"])\/\/.*$/, '$1');
     const open = line.indexOf('/*');
     if (open !== -1) {
       inBlockComment = true;
@@ -178,8 +200,9 @@ function scanFile(filePath) {
     }
     if (!line.trim()) return;
 
-    // Skip anchor/URL fragment references like href="#fff" or url(#gradient)
-    if (ANCHOR_REF_LINE.test(line)) return;
+    // Remove anchor/URL fragment refs like href="#top" or url(#gradient),
+    // then keep scanning the rest of the line for other violations
+    line = line.replace(/((?:href|xlink:href|url)\s*[=(]\s*['"]?)#[^'")\s]*/gi, '$1');
 
     for (const [name, pattern] of Object.entries(patterns)) {
       const matches = line.match(pattern.regex);
@@ -267,7 +290,9 @@ function main() {
 
   const dirPath = path.resolve(process.cwd(), options.dir);
 
-  if (!fs.existsSync(dirPath)) {
+  // existsSync alone would let a file path through (ENOTDIR is then silently
+  // downgraded to a warning, reporting zero violations and a CI success).
+  if (!fs.existsSync(dirPath) || !fs.statSync(dirPath).isDirectory()) {
     console.error(`Error: Directory not found: ${dirPath}`);
     process.exit(1);
   }

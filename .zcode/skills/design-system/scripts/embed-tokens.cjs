@@ -26,9 +26,11 @@ function findProjectRoot(startDir) {
   return null;
 }
 
-const projectRoot = findProjectRoot(process.cwd());
+// Search from cwd first; when invoked by absolute path from outside the
+// project tree, fall back to the script's own location.
+const projectRoot = findProjectRoot(process.cwd()) || findProjectRoot(__dirname);
 if (!projectRoot) {
-  console.error('Error: Could not find assets/design-tokens.css');
+  console.error('Error: Could not find assets/design-tokens.css (searched from cwd and script directory)');
   process.exit(1);
 }
 
@@ -55,6 +57,14 @@ const MINIMAL_TOKENS = [
   '--card-',
 ];
 
+// A closing quote only ends the string when preceded by an even number of
+// backslashes ('\\"' is an escaped backslash + a real closing quote).
+function closesQuote(text, i) {
+  let backslashes = 0;
+  for (let j = i - 1; text[j] === '\\'; j--) backslashes++;
+  return backslashes % 2 === 0;
+}
+
 // Split on a separator, ignoring separators inside quotes or parentheses
 // (e.g. data URIs like url("data:image/svg+xml;utf8,..."))
 function splitTopLevel(text, separator) {
@@ -67,7 +77,7 @@ function splitTopLevel(text, separator) {
     const ch = text[i];
     if (quote) {
       current += ch;
-      if (ch === quote && text[i - 1] !== '\\') quote = null;
+      if (ch === quote && closesQuote(text, i)) quote = null;
       continue;
     }
     if (ch === '"' || ch === "'") {
@@ -88,16 +98,38 @@ function splitTopLevel(text, separator) {
 }
 
 function extractTokens(css, minimal = false) {
-  // Extract :root block
-  const rootMatch = css.match(/:root\s*\{([^}]+)\}/g);
-  if (!rootMatch) {
+  // Quote-aware block extraction: `[^}]+` would truncate at a '}' inside a
+  // quoted value (e.g. url("data:image/svg+xml,<svg>…</svg>")).
+  const bodies = [];
+  const re = /:root\s*\{/g;
+  let m;
+  while ((m = re.exec(css))) {
+    let depth = 1;
+    let quote = null;
+    let i = m.index + m[0].length;
+    const start = i;
+    for (; i < css.length && depth > 0; i++) {
+      const ch = css[i];
+      if (quote) {
+        if (ch === quote && closesQuote(css, i)) quote = null;
+      } else if (ch === '"' || ch === "'") {
+        quote = ch;
+      } else if (ch === '{') {
+        depth++;
+      } else if (ch === '}') {
+        depth--;
+      }
+    }
+    bodies.push(css.slice(start, i - 1));
+  }
+  if (bodies.length === 0) {
     throw new Error(`No :root block found in ${tokensPath}`);
   }
 
   let allVars = [];
-  for (const block of rootMatch) {
-    const body = block.replace(/^:root\s*\{/, '').replace(/\}\s*$/, '');
-    const vars = splitTopLevel(body, ';')
+  for (const body of bodies) {
+    // Strip comments first so a ';' inside /* ... */ cannot split mid-comment
+    const vars = splitTopLevel(body.replace(/\/\*[\s\S]*?\*\//g, ''), ';')
       .map(d => d.trim())
       .filter(d => /^--[\w-]+\s*:/.test(d))
       .map(d => (d.endsWith(';') ? d : d + ';'));
@@ -111,8 +143,14 @@ function extractTokens(css, minimal = false) {
     });
   }
 
-  // Dedupe
-  allVars = [...new Set(allVars)];
+  // Dedupe: keep the LAST definition of each name (CSS cascade — later
+  // declarations override earlier ones, e.g. theme overrides in a second
+  // :root block).
+  const byName = new Map();
+  for (const v of allVars) {
+    byName.set(v.slice(0, v.indexOf(':')), v);
+  }
+  allVars = [...byName.values()];
 
   return `:root {\n  ${allVars.join('\n  ')}\n}`;
 }

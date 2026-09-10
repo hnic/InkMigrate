@@ -139,7 +139,10 @@
         "secondary-foreground": { "$value": "{primitive.color.gray.50}", "$type": "color" },
         "muted": { "$value": "{primitive.color.gray.800}", "$type": "color" },
         "muted-foreground": { "$value": "{primitive.color.gray.400}", "$type": "color" },
-        "border": { "$value": "{primitive.color.gray.800}", "$type": "color" }
+        "border": { "$value": "{primitive.color.gray.800}", "$type": "color" },
+        "destructive": { "$value": "{primitive.color.red.600}", "$type": "color" },
+        "destructive-foreground": { "$value": "{primitive.color.white}", "$type": "color" },
+        "ring": { "$value": "{primitive.color.blue.500}", "$type": "color" }
       }
     }
   }

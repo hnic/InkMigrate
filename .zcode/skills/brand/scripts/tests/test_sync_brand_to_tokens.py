@@ -10,6 +10,7 @@ the expected base colors. It is pytest-based so the existing pytest CI runs it.
 """
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -27,6 +28,10 @@ TOKENS_STARTER = (
 def test_sync_parses_bundled_starter_template(tmp_path):
     node = shutil.which("node")
     if not node:
+        # node is required for this regression test; in CI its absence is a
+        # failure, not a silent skip.
+        if os.environ.get("CI"):
+            pytest.fail("node is required for this regression test in CI")
         pytest.skip("node not available")
 
     for fixture in (SCRIPT, BRAND_STARTER, TOKENS_STARTER):
@@ -50,7 +55,9 @@ def test_sync_parses_bundled_starter_template(tmp_path):
     # Must not crash (an unhandled exception in Node exits non-zero).
     assert result.returncode == 0, result.stderr + result.stdout
 
-    tokens = json.loads((tmp_path / "assets" / "design-tokens.json").read_text())
+    tokens = json.loads(
+        (tmp_path / "assets" / "design-tokens.json").read_text(encoding="utf-8")
+    )
     primitive = tokens["primitive"]["color"]
     # Expected values mirror templates/brand-guidelines-starter.md — update
     # both together if the starter's brand colors change.

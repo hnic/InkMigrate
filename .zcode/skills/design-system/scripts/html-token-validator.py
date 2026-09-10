@@ -30,12 +30,16 @@ ASSET_DIRS = {
 # Patterns that indicate hardcoded values (should use tokens)
 FORBIDDEN_PATTERNS = [
     (r'#[0-9A-Fa-f]{3,8}\b', 'hex color'),
-    (r'rgb\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)', 'rgb color'),
-    (r'rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*[\d.]+\s*\)', 'rgba color'),
-    (r'hsl\([^)]+\)', 'hsl color'),
+    # Modern rgb()/rgba() syntax: comma or space separated, percentages and
+    # slash alpha (var()-based calls don't match — the first component must
+    # be numeric)
+    (r'rgba?\(\s*[\d.]+%?\s*[,/ ]\s*[\d.]+%?\s*[,/ ]\s*[\d.]+%?[^)]*\)', 'rgb color'),
+    # Exclude hsl() calls that contain var() (e.g. hsl(var(--hue), 70%, 50%))
+    (r'hsl\((?![^)]*var\()[^)]+\)', 'hsl color'),
     (r"font-family:\s*'(?!var\()[^']+'\s*[;,]", 'hardcoded font'),  # Exclude var()
     (r'font-family:\s*"(?!var\()[^"]+"\s*[;,]', 'hardcoded font'),
-    (r'font-family:\s*(?!var\()[A-Za-z][\w-]*\s*[,;]', 'hardcoded font (unquoted)'),
+    # Exclude generic-family keywords and CSS-wide values (inherit/initial/...)
+    (r'font-family:\s*(?!var\(|(?:inherit|initial|unset|revert|system-ui|sans-serif|serif|monospace|cursive|fantasy|math|emoji)[\s,;])[A-Za-z][\w-]*\s*[,;]', 'hardcoded font (unquoted)'),
 ]
 
 # Allowed rgba patterns (brand colors with transparency - CSS limitation)
@@ -77,11 +81,14 @@ class ValidationResult:
 def load_css_variables() -> Dict[str, str]:
     """Load CSS variables from design-tokens.css."""
     variables = {}
-    if TOKENS_CSS_PATH.exists():
-        content = TOKENS_CSS_PATH.read_text()
-        # Extract --var-name: value patterns
-        for match in re.finditer(r'(--[\w-]+):\s*([^;]+);', content):
-            variables[match.group(1)] = match.group(2).strip()
+    if not TOKENS_CSS_PATH.exists():
+        print(f"Warning: design tokens not found at {TOKENS_CSS_PATH}; check PROJECT_ROOT.",
+              file=sys.stderr)
+        return variables
+    content = TOKENS_CSS_PATH.read_text(encoding='utf-8')
+    # Extract --var-name: value patterns
+    for match in re.finditer(r'(--[\w-]+):\s*([^;]+);', content):
+        variables[match.group(1)] = match.group(2).strip()
     return variables
 
 
@@ -96,11 +103,15 @@ def is_inside_block(content: str, match_pos: int, open_tag: str, close_tag: str)
 def is_allowed_exception(content: str, match_pos: int) -> bool:
     """Skip only when the match itself sits inside an external URL value
     (inside url(...) or a src/href attribute), not merely near one."""
-    prefix = content[max(0, match_pos - 300):match_pos]
-    opener = re.search(r'(url\(|(?:src|href)\s*=\s*["\'])[^"\')]*$', prefix)
+    # Search the entire preceding text (the [^"')]*$ anchor limits it to the
+    # nearest unclosed opener, however long the URL is) and bound the value
+    # at the next closing quote/paren instead of a char count.
+    opener = re.search(r'(?:url\(|(?:src|href)\s*=\s*["\'])[^"\')]*$', content[:match_pos])
     if not opener:
         return False
-    value = (opener.group(0) + content[match_pos:match_pos + 200]).lower()
+    closer = re.search(r'["\')]', content[match_pos:])
+    end = match_pos + closer.start() if closer else match_pos + 200
+    value = (opener.group(0) + content[match_pos:end]).lower()
     return any(exc in value for exc in ALLOWED_EXCEPTIONS)
 
 
@@ -121,8 +132,9 @@ def validate_html(content: str, file_path: Path, verbose: bool = False) -> Valid
     """
     result = ValidationResult(file_path)
 
-    # 1. Check for design-tokens.css import
-    if 'design-tokens.css' not in content:
+    # 1. Check for design-tokens.css import (a bare substring match would be
+    # satisfied by a comment that merely mentions the filename)
+    if not re.search(r'(@import[^;]*|<link[^>]+href=["\'][^"\']*)design-tokens\.css', content):
         result.add_error("Missing design-tokens.css import")
 
     # 2. Check for forbidden patterns in CSS
@@ -144,17 +156,19 @@ def validate_html(content: str, file_path: Path, verbose: bool = False) -> Valid
                 continue
 
             # Skip rgba using brand colors (needed for transparency effects)
-            if description == 'rgba color' and is_allowed_rgba(match_text):
+            if match_text.startswith('rgba') and is_allowed_rgba(match_text):
                 if verbose:
                     result.add_warning(f"Allowed brand rgba: {match_text}")
                 continue
 
-            # Skip only if this occurrence itself sits inside a var(...) fallback
-            last_var = content.rfind('var(', 0, match_pos)
-            if last_var != -1:
-                close_paren = content.find(')', last_var)
-                if close_paren != -1 and match_pos < close_paren:
-                    continue
+            # Skip only if this occurrence itself sits inside a var(...)
+            # fallback of the SAME declaration — an unclosed var( in
+            # unrelated earlier text must not suppress a real violation.
+            decl_start = max(content.rfind(';', 0, match_pos),
+                             content.rfind('{', 0, match_pos),
+                             content.rfind('}', 0, match_pos)) + 1
+            if re.search(r'var\([^)]*$', content[decl_start:match_pos]):
+                continue
 
             # Error if in <style> or inline style
             if is_inside_block(content, match_pos, '<style', '</style>'):
@@ -187,7 +201,14 @@ def validate_file(file_path: Path, verbose: bool = False) -> ValidationResult:
         result.add_error("File not found")
         return result
 
-    content = file_path.read_text()
+    try:
+        content = file_path.read_text(encoding='utf-8')
+    except (OSError, UnicodeDecodeError) as e:
+        # One unreadable/undecodable file degrades to a failed result for
+        # that file only — the rest of the run continues
+        result = ValidationResult(file_path)
+        result.add_error(f"Unreadable file: {e}")
+        return result
     return validate_html(content, file_path, verbose)
 
 

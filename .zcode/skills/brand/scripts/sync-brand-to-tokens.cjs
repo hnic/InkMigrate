@@ -17,7 +17,9 @@ const { execFileSync } = require('child_process');
 const BRAND_GUIDELINES = 'docs/brand-guidelines.md';
 const DESIGN_TOKENS_JSON = 'assets/design-tokens.json';
 const DESIGN_TOKENS_CSS = 'assets/design-tokens.css';
-const GENERATE_TOKENS_SCRIPT = '.claude/skills/design-system/scripts/generate-tokens.cjs';
+// Resolve the generator relative to this script so it works regardless of
+// repo layout (.zcode vs .claude) or the caller's cwd.
+const GENERATE_TOKENS_SCRIPT = path.resolve(__dirname, '../../design-system/scripts/generate-tokens.cjs');
 
 /**
  * Extract color info from brand guidelines markdown
@@ -120,67 +122,83 @@ function updateDesignTokens(tokens, colors) {
   tokens.primitive = tokens.primitive || {};
   const primitiveColors = tokens.primitive.color || {};
 
-  // Remove old color keys, add new ones
-  delete primitiveColors.coral;
-  delete primitiveColors.purple;
-  delete primitiveColors.mint;
+  // Remove old color keys, add new ones. Removing a legacy scale can strand
+  // references elsewhere in the file (semantic/component/alias sections);
+  // that is detected and warned about below rather than silently emitted
+  // as unresolved references.
+  const legacyColors = ['coral', 'purple', 'mint'];
+  for (const legacy of legacyColors) {
+    delete primitiveColors[legacy];
+  }
 
-  // Add new named colors. Skip any role with no base hex rather than crashing
-  // on an unexpected guidelines format.
+  // Add new named colors. main() already fails fast when a role has no base
+  // hex; throw here too so the invariant "every role has a primitive scale
+  // before semantic references are written" holds for any caller.
   for (const role of ['primary', 'secondary', 'accent']) {
     const c = colors[role];
     if (!c.base) {
-      console.warn(`⚠️  No base hex found for ${role} color — skipping its token scale.`);
-      continue;
+      throw new Error(`No base hex found for ${role} — refusing to emit dangling semantic references.`);
     }
     primitiveColors[c.name] = generateColorScale(c.base, c.dark, c.light);
   }
 
   tokens.primitive.color = primitiveColors;
 
-  // Update ALL semantic color references
-  if (tokens.semantic?.color) {
-    const sem = tokens.semantic.color;
-    const p = colors.primary.name;
-    const s = colors.secondary.name;
-    const a = colors.accent.name;
-
-    // Primary variants
-    sem.primary = { "$value": `{primitive.color.${p}.500}`, "$type": "color" };
-    sem['primary-hover'] = { "$value": `{primitive.color.${p}.600}`, "$type": "color" };
-    sem['primary-active'] = { "$value": `{primitive.color.${p}.700}`, "$type": "color" };
-    sem['primary-light'] = { "$value": `{primitive.color.${p}.400}`, "$type": "color" };
-    sem['primary-lighter'] = { "$value": `{primitive.color.${p}.100}`, "$type": "color" };
-    sem['primary-dark'] = { "$value": `{primitive.color.${p}.600}`, "$type": "color" };
-
-    // Secondary variants
-    sem.secondary = { "$value": `{primitive.color.${s}.500}`, "$type": "color" };
-    sem['secondary-hover'] = { "$value": `{primitive.color.${s}.600}`, "$type": "color" };
-    sem['secondary-light'] = { "$value": `{primitive.color.${s}.300}`, "$type": "color" };
-    sem['secondary-dark'] = { "$value": `{primitive.color.${s}.600}`, "$type": "color" };
-
-    // Accent variants
-    sem.accent = { "$value": `{primitive.color.${a}.500}`, "$type": "color" };
-    sem['accent-hover'] = { "$value": `{primitive.color.${a}.600}`, "$type": "color" };
-    sem['accent-light'] = { "$value": `{primitive.color.${a}.300}`, "$type": "color" };
-
-    // Status colors (use accent for success, primary for error/info)
-    sem.success = { "$value": `{primitive.color.${a}.500}`, "$type": "color" };
-    sem['success-light'] = { "$value": `{primitive.color.${a}.300}`, "$type": "color" };
-    sem.error = { "$value": `{primitive.color.${p}.500}`, "$type": "color" };
-    sem['error-light'] = { "$value": `{primitive.color.${p}.300}`, "$type": "color" };
-    sem.info = { "$value": `{primitive.color.${s}.500}`, "$type": "color" };
-    sem['info-light'] = { "$value": `{primitive.color.${s}.300}`, "$type": "color" };
+  // Warn if removed legacy scales are still referenced anywhere in the file
+  const tokensJson = JSON.stringify(tokens);
+  const dangling = legacyColors.filter((name) => tokensJson.includes(`{primitive.color.${name}.`));
+  if (dangling.length) {
+    console.warn(`⚠️  Removed primitives still referenced in tokens: ${dangling.join(', ')} — update those references manually.`);
   }
 
-  // Update component references (button uses primary color with opacity)
-  if (tokens.component?.button?.secondary && colors.primary.base) {
-    const primaryBase = colors.primary.base;
-    tokens.component.button.secondary['bg-hover'] = {
-      "$value": `${primaryBase}1A`,
-      "$type": "color"
-    };
-  }
+  // Update ALL semantic color references (create the section if absent so a
+  // first run against an empty/missing tokens file still emits them)
+  tokens.semantic = tokens.semantic || {};
+  tokens.semantic.color = tokens.semantic.color || {};
+  const sem = tokens.semantic.color;
+  const p = colors.primary.name;
+  const s = colors.secondary.name;
+  const a = colors.accent.name;
+
+  // Primary variants
+  sem.primary = { "$value": `{primitive.color.${p}.500}`, "$type": "color" };
+  sem['primary-hover'] = { "$value": `{primitive.color.${p}.600}`, "$type": "color" };
+  sem['primary-active'] = { "$value": `{primitive.color.${p}.700}`, "$type": "color" };
+  sem['primary-light'] = { "$value": `{primitive.color.${p}.400}`, "$type": "color" };
+  sem['primary-lighter'] = { "$value": `{primitive.color.${p}.100}`, "$type": "color" };
+  sem['primary-dark'] = { "$value": `{primitive.color.${p}.600}`, "$type": "color" };
+
+  // Secondary variants
+  sem.secondary = { "$value": `{primitive.color.${s}.500}`, "$type": "color" };
+  sem['secondary-hover'] = { "$value": `{primitive.color.${s}.600}`, "$type": "color" };
+  sem['secondary-light'] = { "$value": `{primitive.color.${s}.300}`, "$type": "color" };
+  sem['secondary-dark'] = { "$value": `{primitive.color.${s}.600}`, "$type": "color" };
+
+  // Accent variants
+  sem.accent = { "$value": `{primitive.color.${a}.500}`, "$type": "color" };
+  sem['accent-hover'] = { "$value": `{primitive.color.${a}.600}`, "$type": "color" };
+  sem['accent-light'] = { "$value": `{primitive.color.${a}.300}`, "$type": "color" };
+
+  // Status colors: deliberate placeholders that inherit brand hues (success
+  // = accent, error/info = primary/secondary) until dedicated status
+  // primitives are defined in the guidelines.
+  sem.success = { "$value": `{primitive.color.${a}.500}`, "$type": "color" };
+  sem['success-light'] = { "$value": `{primitive.color.${a}.300}`, "$type": "color" };
+  sem.error = { "$value": `{primitive.color.${p}.500}`, "$type": "color" };
+  sem['error-light'] = { "$value": `{primitive.color.${p}.300}`, "$type": "color" };
+  sem.info = { "$value": `{primitive.color.${s}.500}`, "$type": "color" };
+  sem['info-light'] = { "$value": `{primitive.color.${s}.300}`, "$type": "color" };
+
+  // Update component references (button uses primary color with opacity).
+  // Ensure the nested structure exists — a first run may start from an
+  // empty tokens file.
+  tokens.component = tokens.component || {};
+  tokens.component.button = tokens.component.button || {};
+  tokens.component.button.secondary = tokens.component.button.secondary || {};
+  tokens.component.button.secondary['bg-hover'] = {
+    "$value": `${colors.primary.base}1A`,
+    "$type": "color"
+  };
 
   return tokens;
 }
@@ -238,15 +256,17 @@ function main() {
     return;
   }
 
-  // Write updated tokens
-  fs.writeFileSync(tokensPath, JSON.stringify(tokens, null, 2));
+  // Write updated tokens atomically (temp file + rename) so a mid-write
+  // crash cannot leave a truncated file behind
+  const tmpPath = `${tokensPath}.tmp`;
+  fs.writeFileSync(tmpPath, JSON.stringify(tokens, null, 2));
+  fs.renameSync(tmpPath, tokensPath);
   console.log(`✅ Updated: ${DESIGN_TOKENS_JSON}`);
 
   // Regenerate CSS
-  const generateScript = path.resolve(process.cwd(), GENERATE_TOKENS_SCRIPT);
-  if (fs.existsSync(generateScript)) {
+  if (fs.existsSync(GENERATE_TOKENS_SCRIPT)) {
     try {
-      execFileSync('node', [generateScript, '--config', DESIGN_TOKENS_JSON, '-o', DESIGN_TOKENS_CSS], {
+      execFileSync(process.execPath, [GENERATE_TOKENS_SCRIPT, '--config', DESIGN_TOKENS_JSON, '-o', DESIGN_TOKENS_CSS], {
         cwd: process.cwd(),
         stdio: 'inherit'
       });
@@ -257,7 +277,11 @@ function main() {
       return;
     }
   } else {
-    console.warn(`⚠️  ${GENERATE_TOKENS_SCRIPT} not found — CSS was not regenerated.`);
+    // Drifting JSON/CSS defeats the script's purpose — fail loudly instead
+    // of reporting success.
+    console.error(`❌ ${GENERATE_TOKENS_SCRIPT} not found — CSS was not regenerated; tokens and CSS are out of sync.`);
+    process.exitCode = 1;
+    return;
   }
 
   console.log('\n✨ Brand sync complete!');

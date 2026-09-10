@@ -4,13 +4,10 @@
 Slide Search CLI - Search slide design databases for strategies, layouts, copy, and charts
 """
 
-import sys
 import json
 import argparse
 from slide_search_core import (
-    search, search_all, AVAILABLE_DOMAINS,
-    search_with_context, get_layout_for_goal, get_typography_for_slide,
-    get_color_for_emotion, get_background_config
+    search, search_all, AVAILABLE_DOMAINS, search_with_context
 )
 
 

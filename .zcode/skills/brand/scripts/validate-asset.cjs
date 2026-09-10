@@ -3,12 +3,11 @@
  * validate-asset.cjs
  *
  * Validates marketing assets against brand guidelines.
- * Checks: file naming, dimensions, file size, metadata.
+ * Checks: file naming, file format, file size.
  *
  * Usage:
  *   node validate-asset.cjs <asset-path>
  *   node validate-asset.cjs <asset-path> --json
- *   node validate-asset.cjs <asset-path> --fix
  *
  * For color validation of images, use with extract-colors.cjs
  */
@@ -27,13 +26,7 @@ const RULES = {
       "logo_brand-refresh_horizontal_20251209_dark.svg",
     ],
   },
-  dimensions: {
-    banner: { minWidth: 600, minHeight: 300 },
-    logo: { minWidth: 100, minHeight: 100 },
-    design: { minWidth: 800, minHeight: 600 },
-    video: { minWidth: 640, minHeight: 480 },
-    default: { minWidth: 100, minHeight: 100 },
-  },
+  types: ["banner", "logo", "design", "video", "infographic", "icon", "photo"],
   fileSize: {
     image: { max: 5 * 1024 * 1024, recommended: 1 * 1024 * 1024 },
     video: { max: 100 * 1024 * 1024, recommended: 50 * 1024 * 1024 },
@@ -99,15 +92,7 @@ function validateFilename(filename) {
     }
 
     // Check valid type
-    const validTypes = [
-      "banner",
-      "logo",
-      "design",
-      "video",
-      "infographic",
-      "icon",
-      "photo",
-    ];
+    const validTypes = RULES.types;
     if (!validTypes.includes(parsed.type)) {
       suggestions.push(`Consider using type: ${validTypes.join(", ")}`);
     }
@@ -123,7 +108,27 @@ function validateFileSize(filepath, extension) {
   const issues = [];
   const warnings = [];
 
-  const stats = fs.statSync(filepath);
+  // Handle stat failures (TOCTOU/unreadable) and non-regular files cleanly
+  // instead of crashing with a raw stack trace.
+  let stats;
+  try {
+    stats = fs.statSync(filepath);
+  } catch (err) {
+    return {
+      valid: false,
+      issues: [`Unable to read file stats (${err.code || err.message})`],
+      warnings,
+      size: 0,
+    };
+  }
+  if (!stats.isFile()) {
+    return {
+      valid: false,
+      issues: ["Path is not a regular file"],
+      warnings,
+      size: 0,
+    };
+  }
   const size = stats.size;
 
   let limits;
@@ -193,9 +198,13 @@ function checkManifest(filepath) {
 
   try {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
-    const relativePath = path.relative(process.cwd(), filepath);
-    const found = manifest.assets?.find(
-      (a) => a.path === relativePath || a.path === filepath
+    // Normalize both sides (resolved, forward slashes) so Windows separators
+    // and relative-path spellings don't cause false "not registered" hits.
+    const normalize = (p) =>
+      path.resolve(process.cwd(), p).split(path.sep).join("/");
+    const target = normalize(filepath);
+    const found = (manifest.assets || []).find(
+      (a) => a?.path && normalize(a.path) === target
     );
 
     return {
@@ -215,12 +224,17 @@ function suggestFilename(original, parsed) {
   if (!parsed) return null;
 
   const today = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-  const type = parsed.type || "asset";
-  const campaign = parsed.campaign || "general";
-  const description = parsed.description || "untitled";
-  const ext = parsed.extension || "png";
+  // Normalize components so the suggestion itself satisfies the naming
+  // pattern, and reuse the original timestamp/variant when already valid.
+  const kebab = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  const type = kebab(parsed.type || "asset");
+  const campaign = kebab(parsed.campaign || "general");
+  const description = kebab(parsed.description || "untitled");
+  const timestamp = /^\d{8}$/.test(parsed.timestamp || "") ? parsed.timestamp : today;
+  const variant = parsed.variant ? `_${kebab(parsed.variant)}` : "";
+  const ext = (parsed.extension || "png").toLowerCase();
 
-  return `${type}_${campaign}_${description}_${today}.${ext}`;
+  return `${type}_${campaign}_${description}_${timestamp}${variant}.${ext}`;
 }
 
 /**
@@ -336,7 +350,7 @@ function formatOutput(results) {
   }
 
   // File size info
-  if (results.checks.fileSize?.size) {
+  if (typeof results.checks.fileSize?.size === "number") {
     lines.push(`\nFile Size: ${formatBytes(results.checks.fileSize.size)}`);
   }
 

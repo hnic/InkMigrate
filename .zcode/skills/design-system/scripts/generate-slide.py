@@ -9,6 +9,7 @@ NO hardcoded colors, fonts, or spacing allowed
 import argparse
 import json
 import os
+import sys
 from html import escape
 from pathlib import Path
 from datetime import datetime
@@ -23,14 +24,21 @@ def _safe_url(url, default='#'):
     """Validate and escape a URL for use in href attributes.
 
     Only allows http://, https://, #, and / schemes to prevent
-    javascript: URI injection (CWE-79).
+    javascript: URI injection (CWE-79). Protocol-relative URLs (//host)
+    are rejected too — they resolve to http(s) and bypass the restriction.
     """
-    if url and str(url).strip().lower().startswith(('http://', 'https://', '#', '/')):
-        return escape(str(url), quote=True)
+    if url:
+        candidate = str(url).strip()
+        lowered = candidate.lower()
+        is_safe = lowered.startswith(('http://', 'https://', '#')) or (
+            lowered.startswith('/') and not lowered.startswith('//'))
+        if is_safe:
+            return escape(candidate, quote=True)
+        print(f"Warning: blocked unsafe or malformed URL {url!r}, using '#' instead",
+              file=sys.stderr)
     return default
 
 # Paths
-SCRIPT_DIR = Path(__file__).parent
 TOKENS_CSS = Path(__file__).resolve().parents[4] / "assets" / "design-tokens.css"
 OUTPUT_DIR = Path(__file__).resolve().parents[4] / "assets" / "designs" / "slides"
 
@@ -506,7 +514,7 @@ def generate_solution_slide(data):
             </div>
             <div style="flex: 1;" class="card flex items-center justify-center">
                 <div class="text-center">
-                    <div class="text-accent" style="font-size: 80px; margin-bottom: var(--primitive-spacing-4);">&#9670;</div>
+                    <div class="text-accent" style="font-size: var(--primitive-fontSize-6xl); margin-bottom: var(--primitive-spacing-4);">&#9670;</div>
                     <p class="text-muted">Product screenshot or demo</p>
                 </div>
             </div>
@@ -616,11 +624,11 @@ def generate_cta_slide(data):
     return f'''
     <section class="slide slide--gradient flex flex-col items-center justify-center text-center">
         <h2 class="slide-heading mb-6" style="color: var(--color-foreground);">{_e(data.get('headline', 'Ready to get started?'))}</h2>
-        <p class="slide-body mb-8" style="color: rgba(255,255,255,0.8);">{_e(data.get('subheadline', 'Join thousands of teams already using our solution.'))}</p>
+        <p class="slide-body mb-8" style="color: var(--color-foreground-muted);">{_e(data.get('subheadline', 'Join thousands of teams already using our solution.'))}</p>
         <div class="flex gap-4">
             <a href="{_safe_url(data.get('cta_url', '#'))}" class="btn" style="background: var(--color-foreground); color: var(--color-primary);">{_e(data.get('cta', 'Start Free Trial'))}</a>
         </div>
-        <div class="slide-footer" style="border-color: rgba(255,255,255,0.2); color: rgba(255,255,255,0.6);">
+        <div class="slide-footer" style="border-color: var(--color-border); color: var(--color-foreground-muted);">
             <span>{_e(data.get('contact', 'contact@example.com'))}</span>
             <span>{_e(data.get('website', 'www.example.com'))}</span>
         </div>
@@ -648,10 +656,16 @@ def generate_deck(slides_data, title="Pitch Deck", output_dir=OUTPUT_DIR):
     for slide in slides_data:
         slide_type = slide.get('type', 'title')
         generator = SLIDE_GENERATORS.get(slide_type)
-        if generator:
-            slides_html += generator(slide)
-        else:
-            print(f"Warning: Unknown slide type '{slide_type}'")
+        if generator is None:
+            # Fail fast: silently dropping slides produces an incomplete deck
+            # with a success exit code
+            print(
+                f"Error: Unknown slide type '{slide_type}'. "
+                f"Valid types: {', '.join(sorted(SLIDE_GENERATORS))}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        slides_html += generator(slide)
 
     # Resolve tokens CSS relative to where the deck is actually written
     tokens_rel_path = Path(os.path.relpath(TOKENS_CSS, start=output_dir)).as_posix()
@@ -760,8 +774,16 @@ def main():
         print(f"Demo deck generated: {output_path}")
 
     elif args.json:
-        with open(args.json, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        try:
+            with open(args.json, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            parser.exit(1, f"Error: cannot read JSON input '{args.json}': {exc}\n")
+        if not isinstance(data, dict):
+            parser.exit(
+                1,
+                f"Error: expected a JSON object at the top level, got {type(data).__name__}\n",
+            )
 
         output_path = Path(args.output) if args.output else OUTPUT_DIR / f"deck-{datetime.now().strftime('%y%m%d-%H%M')}.html"
         html = generate_deck(data.get('slides', []), data.get('title', 'Presentation'), output_path.parent)

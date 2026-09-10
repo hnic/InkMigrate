@@ -14,22 +14,28 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).resolve().parent.parent / "validate-tokens.cjs"
-assert SCRIPT.is_file(), f"validator script not found at {SCRIPT}"
+if not SCRIPT.is_file():
+    # Explicit check (survives `python -O`, unlike an assert) so a mislocated
+    # script skips with a clear message instead of failing with Node errors.
+    pytest.skip(f"validator script not found at {SCRIPT}", allow_module_level=True)
 
 
 def _run(tmp_path: Path, css: str) -> subprocess.CompletedProcess:
     node = shutil.which("node")
     if not node:
         pytest.skip("node not available")
-    (tmp_path / "sample.css").write_text(css)
-    return subprocess.run(
-        [node, str(SCRIPT), "--dir", str(tmp_path)],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=30,
-    )
+    (tmp_path / "sample.css").write_text(css, encoding="utf-8")
+    try:
+        return subprocess.run(
+            [node, str(SCRIPT), "--dir", str(tmp_path)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        pytest.fail(f"validator timed out after 30s on {tmp_path}: {exc}")
 
 
 def test_flags_hardcoded_hex_sharing_line_with_token(tmp_path):
@@ -66,7 +72,7 @@ def test_recurses_into_nested_subdirectories(tmp_path):
     """Violations in nested subdirectories are found."""
     nested = tmp_path / "components"
     nested.mkdir()
-    (nested / "sample.css").write_text(".a { color: #ABC; }\n")
+    (nested / "sample.css").write_text(".a { color: #ABC; }\n", encoding="utf-8")
     result = _run(tmp_path, "")  # root file stays clean
     assert "#ABC" in result.stdout, result.stdout + result.stderr
     assert result.returncode == 1, result.stdout + result.stderr

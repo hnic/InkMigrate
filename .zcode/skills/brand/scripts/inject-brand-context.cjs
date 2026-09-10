@@ -29,15 +29,37 @@ function extractHexColors(text) {
 
 /**
  * Isolate a "### <title>" section: from the heading line up to the next
- * #/##/### heading. Prevents matches bleeding into unrelated sections.
+ * heading (any level). Lines inside fenced code blocks are skipped so a
+ * '#' comment within ``` cannot truncate the section (which would break
+ * fenced-content extraction such as base/example prompts).
  */
 function findSection(content, title) {
-  const startRe = new RegExp(`^###\\s+${title}\\b[^\\n]*$`, "im");
+  const escapedTitle = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const startRe = new RegExp(`^###\\s+${escapedTitle}\\b[^\\n]*$`, "im");
   const start = startRe.exec(content);
   if (!start) return "";
   const rest = content.slice(start.index + start[0].length);
-  const end = rest.search(/^#{1,3}\s/m);
-  return end === -1 ? rest : rest.slice(0, end);
+  let inFence = false;
+  let offset = 0;
+  for (const line of rest.split("\n")) {
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence;
+    } else if (!inFence && /^#{1,6}\s/.test(line)) {
+      return rest.slice(0, offset);
+    }
+    offset += line.length + 1;
+  }
+  return rest;
+}
+
+/**
+ * Parse a markdown table: return its rows with the separator row removed.
+ * Callers drop the header row via slice(1) as appropriate.
+ */
+function parseMarkdownTable(section) {
+  return (section.match(/^\|.+\|$/gm) || []).filter(
+    (row) => !/^\|[\s:|-]+\|$/.test(row)
+  );
 }
 
 /**
@@ -72,7 +94,7 @@ function extractTypography(content) {
   if (stackText) {
     // Keep the gap on a single line and free of quotes/pipes so the match
     // cannot jump to an unrelated quoted string further away.
-    const headingAlt = stackText.match(/heading[^'"\n|]{0,80}['"]([^'"\n]+)['"]/i);
+    const headingAlt = stackText.match(/\bheading[^'"\n|]{0,80}['"]([^'"\n]+)['"]/i);
     const bodyAlt = stackText.match(/\bbody[^'"\n|]{0,80}['"]([^'"\n]+)['"]/i);
 
     if (headingAlt) typography.heading = headingAlt[1];
@@ -115,9 +137,7 @@ function extractVoice(content) {
   // labels are never emitted as terms.
   const prohibitedSection = findSection(content, "Prohibited");
   if (prohibitedSection) {
-    const tableRows = prohibitedSection.match(/^\|.+\|$/gm) || [];
-    voice.prohibited = tableRows
-      .filter((row) => !/^\|[\s:|-]+\|$/.test(row)) // separator row
+    voice.prohibited = parseMarkdownTable(prohibitedSection)
       .slice(1) // header row
       .map((row) => row.split("|")[1]?.trim())
       .filter(Boolean);
@@ -215,9 +235,7 @@ function extractImageStyle(content) {
   // separator and header rows) instead of filtering by content substrings.
   const dontsSection = findSection(content, "Visual Don'ts");
   if (dontsSection) {
-    const dontRows = dontsSection.match(/^\|.+\|$/gm) || [];
-    dontRows
-      .filter((row) => !/^\|[\s:|-]+\|$/.test(row)) // separator row
+    parseMarkdownTable(dontsSection)
       .slice(1) // header row
       .forEach((row) => {
         const cell = row.split("|")[1]?.trim();
@@ -260,7 +278,9 @@ BRAND CONTEXT:
 VISUAL IDENTITY:
 - Primary Colors: ${colors.primary.join(", ") || "Not specified"}
 - Secondary Colors: ${colors.secondary.join(", ") || "Not specified"}
-- Typography: ${typography.heading || typography.body || "System fonts"}
+- Neutral Colors: ${colors.neutral.join(", ") || "Not specified"}
+- Semantic Colors: ${colors.semantic.join(", ") || "Not specified"}
+- Typography: ${typography.heading || typography.body || "System fonts"}${typography.mono ? ` (mono: ${typography.mono})` : ""}
 
 BRAND VOICE:
 - Personality: ${voice.personality || "Professional"}

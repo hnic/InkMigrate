@@ -21,11 +21,12 @@ def main():
     """Delegate to unified html-token-validator.py with --type slides."""
     args = sys.argv[1:]
 
-    # If no files specified, default to slides type
-    if not args or all(arg.startswith('-') for arg in args):
-        cmd = [sys.executable, str(UNIFIED_VALIDATOR), '--type', 'slides'] + args
-    else:
-        cmd = [sys.executable, str(UNIFIED_VALIDATOR)] + args
+    # Default to slides type only when the caller hasn't chosen one (the
+    # child ignores --type when specific files are given)
+    has_type = any(a in ('-t', '--type') or a.startswith('--type=') for a in args)
+    if not has_type:
+        args = ['--type', 'slides'] + args
+    cmd = [sys.executable, str(UNIFIED_VALIDATOR)] + args
 
     result = subprocess.run(cmd)
     sys.exit(result.returncode)

@@ -61,6 +61,9 @@ class BM25:
 
     def fit(self, documents):
         """Build BM25 index from documents"""
+        # Reset accumulated state so fit() is idempotent on reuse
+        self.doc_freqs = defaultdict(int)
+        self.idf = {}
         self.corpus = [self.tokenize(doc) for doc in documents]
         self.N = len(self.corpus)
         if self.N == 0:
@@ -150,7 +153,12 @@ def detect_domain(query):
                   "visualization", "kpi", "trend", "comparison", "heatmap", "gauge"]
     }
 
-    scores = {domain: sum(1 for kw in keywords if kw in query_lower) for domain, keywords in domain_keywords.items()}
+    # Word-boundary matching: raw substring tests misroute queries like
+    # "headline" (contains 'line'), "barrier" (contains 'bar'), etc.
+    scores = {
+        domain: sum(1 for kw in keywords if re.search(rf"\b{re.escape(kw)}\b", query_lower))
+        for domain, keywords in domain_keywords.items()
+    }
     best = max(scores, key=scores.get)
     return best if scores[best] > 0 else "strategy"
 
@@ -322,7 +330,7 @@ def should_use_full_bleed(slide_index, total_slides, emotion):
     return slide_index in strategic_positions
 
 
-def calculate_pattern_break(slide_index, total_slides, previous_emotion=None):
+def calculate_pattern_break(slide_index, total_slides, previous_emotion=None, current_emotion=None):
     """
     Determine if this slide should break the visual pattern.
     Used for emotional contrast (Duarte Sparkline technique).
@@ -336,14 +344,14 @@ def calculate_pattern_break(slide_index, total_slides, previous_emotion=None):
     if slide_index in [third, third * 2]:
         return True
 
-    # Break when switching between frustration and hope
+    # Break when switching between contrasting emotions
     contrasting_emotions = {
         "frustration": ["hope", "relief"],
         "hope": ["frustration", "fear"],
         "fear": ["hope", "relief"],
     }
 
-    if previous_emotion in contrasting_emotions:
+    if previous_emotion and current_emotion in contrasting_emotions.get(previous_emotion, []):
         return True
 
     return False
@@ -365,8 +373,11 @@ def search_with_context(query, slide_position=1, total_slides=9, previous_emotio
     # Get base results from existing BM25 search
     base_results = search_all(query, max_results=2)
 
-    # Detect likely slide goal from query
-    goal = detect_domain(query.lower())
+    # Detect likely slide goal from query. The default must be a valid goal
+    # key in slide-layout-logic.csv (hook/problem/.../features) — NOT a
+    # search-domain name from detect_domain(), which would always miss and
+    # silently fall back to the 'features' layout.
+    goal = "features"
     if "problem" in query.lower():
         goal = "problem"
     elif "solution" in query.lower():
@@ -416,7 +427,7 @@ def search_with_context(query, slide_position=1, total_slides=9, previous_emotio
 
     # Calculate pattern breaking
     context["should_break_pattern"] = calculate_pattern_break(
-        slide_position, total_slides, previous_emotion
+        slide_position, total_slides, previous_emotion, emotion
     )
     context["should_use_full_bleed"] = should_use_full_bleed(
         slide_position, total_slides, emotion

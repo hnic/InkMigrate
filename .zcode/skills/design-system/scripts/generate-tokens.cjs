@@ -23,17 +23,19 @@ function parseArgs() {
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--config' || args[i] === '-c') {
-      options.config = args[++i];
-      if (options.config === undefined) {
+      const val = args[++i];
+      if (val === undefined || val.startsWith('-')) {
         console.error('Error: --config requires a file path value');
         process.exit(1);
       }
+      options.config = val;
     } else if (args[i] === '--output' || args[i] === '-o') {
-      options.output = args[++i];
-      if (options.output === undefined) {
+      const val = args[++i];
+      if (val === undefined || val.startsWith('-')) {
         console.error('Error: --output requires a file path value');
         process.exit(1);
       }
+      options.output = val;
     } else if (args[i] === '--format' || args[i] === '-f') {
       const format = args[++i];
       if (!['css', 'tailwind'].includes(format)) {
@@ -52,6 +54,9 @@ Options:
   -h, --help            Show this help
       `);
       process.exit(0);
+    } else {
+      console.error(`Error: unknown option "${args[i]}"`);
+      process.exit(1);
     }
   }
 
@@ -92,6 +97,14 @@ function resolveReference(value, tokens, seen = new Set()) {
     seen.add(value);
     return resolveReference(result.$value, tokens, seen);
   }
+  if (typeof result === 'string' && result.startsWith('{') && result.endsWith('}')) {
+    // Target stored a bare reference without $value — keep resolving it
+    if (seen.has(value)) {
+      throw new Error(`Circular token reference detected: ${value}`);
+    }
+    seen.add(value);
+    return resolveReference(result, tokens, seen);
+  }
   return result; // preserves valid falsy values like 0 or ''
 }
 
@@ -114,6 +127,12 @@ function flattenTokens(obj, tokens, prefix = [], result = {}) {
         // This is a token
         const cssVar = toCssVarName(currentPath);
         const resolvedValue = resolveReference(value.$value, tokens);
+        // Unvalidated values could break out of the CSS declaration and
+        // inject arbitrary rules — refuse unsafe characters instead.
+        if (typeof resolvedValue === 'string' && /[;{}]|\/\*|\*\//.test(resolvedValue)) {
+          console.warn(`Warning: token "${cssVar}" contains unsafe CSS characters, skipping: ${resolvedValue}`);
+          continue;
+        }
         result[cssVar] = resolvedValue;
       } else {
         // Recurse into nested object
@@ -166,23 +185,48 @@ ${Object.entries(darkSemantic).map(([k, v]) => `  ${k}: ${v};`).join('\n')}
 }
 
 /**
+ * Insert a (possibly hierarchical) color name into the Tailwind colors map.
+ * Uses Tailwind's DEFAULT convention so `primary` and `primary-action`
+ * coexist regardless of the order the keys are visited.
+ */
+function insertColorKey(colors, name, value) {
+  const parts = name.split('-');
+  let node = colors;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const part = parts[i];
+    if (typeof node[part] !== 'object' || node[part] === null) {
+      // A previously stored leaf occupies this level — move it under DEFAULT
+      node[part] = typeof node[part] === 'string' ? { DEFAULT: node[part] } : {};
+    }
+    node = node[part];
+  }
+  const leaf = parts[parts.length - 1];
+  if (typeof node[leaf] === 'object' && node[leaf] !== null) {
+    node[leaf] = { ...node[leaf], DEFAULT: value };
+  } else {
+    node[leaf] = value;
+  }
+}
+
+/**
  * Generate Tailwind config output
  */
 function generateTailwind(tokens) {
-  const semantic = flattenTokens(tokens.semantic || {}, tokens, []);
+  const semantic = flattenTokens(tokens.semantic || {}, tokens);
   const COLOR_PREFIX = '--color-';
 
   // Extract colors for Tailwind
   const colors = {};
   for (const [key, value] of Object.entries(semantic)) {
     if (key.startsWith(COLOR_PREFIX)) {
-      const name = key.slice(COLOR_PREFIX.length).replace(/-/g, '.');
-      colors[name] = `var(${key})`;
+      // Build nested keys (Tailwind expects nested objects, and a blanket
+      // '-' → '.' conversion would conflate hyphenated names with hierarchy)
+      insertColorKey(colors, key.slice(COLOR_PREFIX.length), `var(${key})`);
     }
   }
 
   return `// Tailwind color config - Auto-generated
-// Add to tailwind.config.ts theme.extend.colors
+// Add to tailwind.config.js (CJS) theme.extend.colors
 
 module.exports = {
   colors: ${JSON.stringify(colors, null, 2)}
@@ -219,19 +263,29 @@ function main() {
     process.exit(1);
   }
 
-  // Generate output
+  // Generate output (circular references / malformed token trees throw —
+  // surface them as clean CLI errors instead of raw stack traces)
   let output;
-  if (options.format === 'tailwind') {
-    output = generateTailwind(tokens);
-  } else {
-    output = generateCSS(tokens);
+  try {
+    output = options.format === 'tailwind'
+      ? generateTailwind(tokens)
+      : generateCSS(tokens);
+  } catch (err) {
+    console.error(`Error: Failed to generate tokens: ${err.message}`);
+    process.exit(1);
   }
 
   // Write output
   if (options.output) {
     const outputPath = path.resolve(process.cwd(), options.output);
-    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-    fs.writeFileSync(outputPath, output);
+    try {
+      fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+      fs.writeFileSync(outputPath, output);
+    } catch (err) {
+      console.error(`Error: Failed to write output file: ${outputPath}`);
+      console.error(`  ${err.message}`);
+      process.exit(1);
+    }
     console.log(`Generated: ${outputPath}`);
   } else {
     console.log(output);
