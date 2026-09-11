@@ -17,7 +17,7 @@
     "check:stdio": "node scripts/check-no-stdout-log.mjs",
     "inkmigrate": "node apps/cli/dist/index.js",
     "sidecar:build": "node scripts/build-sidecar.mjs",
-    "bundle": "node scripts/build-sidecar.mjs && pnpm --filter @inkmigrate/gui run tauri build"
+    "bundle": "pnpm -r run build && node scripts/build-sidecar.mjs && pnpm --filter @inkmigrate/gui run tauri build"
   },
   "devDependencies": {
     "esbuild": "0.28.2"

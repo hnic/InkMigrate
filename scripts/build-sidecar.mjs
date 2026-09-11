@@ -16,7 +16,7 @@
  *   以及 resources/package.json（core 的 CORE_VERSION 运行时读取目标，
  *   tauri.conf.json 的 bundle.resources 一并打包）
  *
- * 用法：node scripts/build-sidecar.mjs [--skip-node] [--skip-chromium] [--skip-smoke]
+ * 用法：node scripts/build-sidecar.mjs [--skip-node] [--skip-chromium] [--skip-smoke] [--skip-freshness]
  */
 import { execSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, cpSync, readdirSync, readFileSync } from "node:fs";
@@ -51,12 +51,31 @@ function du(path) {
   catch { return "?"; }
 }
 
-// ── 步骤 1: 确保 engine + packages 最新 build ──
-log("步骤 1/6: 检查 engine dist");
+// ── 步骤 1: 确保 engine + packages dist 存在且未过期 ──
+log("步骤 1/6: 检查 engine + packages dist 存在性与新鲜度");
 if (!existsSync(join(ROOT, "apps/engine/dist/index.js"))) {
-  throw new Error("apps/engine/dist/index.js 不存在，请先运行 pnpm -r run build");
+  throw new Error("apps/engine/dist/index.js 不存在，请先运行 pnpm -r run build（或直接 pnpm bundle，其已自动先行编译）");
 }
-log("  ✓ engine dist 存在");
+// stale dist 防护：engine bundle 从各包 dist 出发打包（不读 src），src 改动若未
+// 重新编译，会把旧行为静默打进 App（2026-09-10 的 maxImageBytes 50MB 回退即由此
+// 漏网：src 已改 150MB、dist 仍旧值，构建照常成功）。
+const SKIP_FRESHNESS = args.includes("--skip-freshness");
+if (!SKIP_FRESHNESS) {
+  const stale = findStaleDistPackages();
+  if (stale.length > 0) {
+    throw new Error(
+      [
+        "dist 过期：以下包的 src 晚于 dist（源码改动未重新编译，重打包会把旧行为打进 App）:",
+        ...stale.map(({ pkg, files }) => `  ${pkg}: ${files.join(", ")}`),
+        "请先运行 pnpm -r run build（pnpm bundle 已自动先行编译）；",
+        "若确认是仅 touch 未改内容等误报，可加 --skip-freshness 跳过本检查。",
+      ].join("\n"),
+    );
+  }
+  log("  ✓ engine dist 存在，各包 dist 经 tsc -b --dry 判定为最新");
+} else {
+  log("  ✓ engine dist 存在（跳过新鲜度检查 --skip-freshness）");
+}
 
 // ── 步骤 2: esbuild bundle engine ──
 log("步骤 2/6: esbuild bundle engine");
@@ -296,6 +315,64 @@ function findDir(pnpmDir, pkgName) {
     }
   } catch {}
   return null;
+}
+
+/**
+ * dist 新鲜度检查：engine bundle 的打包入口与依赖解析全部走各包 dist（不读 src），
+ * src 改动若未重新编译，旧行为会被静默打进 App（2026-09-10 的 maxImageBytes
+ * 50MB 回退即由此漏网：src 已改、dist 仍旧值，构建照常成功）。检查范围 =
+ * engine 直接依赖的 @inkmigrate/* workspace 包（当前恰为全部运行时包）+
+ * apps/engine 自身；testkit 等纯测试包不入 sidecar 依赖图，不检查。
+ *
+ * 新鲜度裁判是 tsc 自身：对全部受检包一次性跑 `tsc -b --dry`，仅当输出含
+ * "A non-dry build would build project '...'" 才判定过期。实测（TS 5.9）dry 输出
+ * 的另一形态 "would update timestamps for output of ..." 不是过期——它对应 touch
+ * 未改内容、或依赖包重建后级联的 mtime 簿记（内容均正确），拦它会永久误报；
+ * 而本项目引用级联会让依赖方的 dry 输出包含被引用项目的判定，故一次跑全量并
+ * 从输出行反解项目路径归属，逐包跑会级联误报依赖方。tsc -b --dry 与
+ * pnpm -r run build 用同一套判定，真实构建后必然转为 up to date / 仅 timestamps，
+ * 不会死循环。不能用 src/dist mtime 直接比较：tsc 增量判定走 .tsbuildinfo，
+ * 内容未变时 dist mtime 可以合法地早于 src。
+ */
+function findStaleDistPackages() {
+  const tscBin = resolveTscBin();
+  const enginePkg = JSON.parse(readFileSync(join(ROOT, "apps/engine/package.json"), "utf8"));
+  const depNames = Object.keys({ ...enginePkg.dependencies, ...enginePkg.devDependencies })
+    .filter((n) => n.startsWith("@inkmigrate/"));
+  const pkgDirs = [join(ROOT, "apps/engine"), ...depNames.map((n) => join(ROOT, "packages", n.split("/")[1]))]
+    .filter((dir) => existsSync(join(dir, "src")));
+  const missing = pkgDirs.filter((dir) => !existsSync(join(dir, "dist")));
+  if (missing.length > 0) return missing.map((dir) => ({ pkg: relRoot(dir), files: ["dist/ 不存在"] }));
+
+  // 一次 dry 跑全部包：项目引用会让单个包的 dry 输出包含被引用项目的判定，
+  // 逐包跑会级联误报依赖方；从输出行里反解具体项目名精确归属
+  let dryOut;
+  try {
+    dryOut = execSync(
+      `node "${tscBin}" -b --dry ${pkgDirs.map((dir) => `"${join(dir, "tsconfig.json")}"`).join(" ")}`,
+      { encoding: "utf8", cwd: ROOT },
+    );
+  } catch (e) {
+    return [{ pkg: "(tsc -b --dry)", files: [`执行失败: ${String(e.stdout ?? e.message).trim().slice(0, 300)}`] }];
+  }
+  const staleDirs = new Set();
+  for (const m of dryOut.matchAll(/A non-dry build would build project '([^']+)'/g)) {
+    staleDirs.add(dirname(m[1]));
+  }
+  return [...staleDirs].map((dir) => ({ pkg: relRoot(dir), files: ["tsc 判定需要重建（src 变动未编译入 dist）"] }));
+}
+
+/** tsc 二进制：取 packages/core 解析到的 workspace 安装（全仓单一 typescript 版本）。 */
+function resolveTscBin() {
+  const link = join(ROOT, "packages/core/node_modules/typescript");
+  if (!existsSync(link)) {
+    throw new Error("packages/core/node_modules/typescript 不存在，无法执行 tsc -b --dry 新鲜度检查");
+  }
+  return join(realpathSync(link), "bin", "tsc");
+}
+
+function relRoot(p) {
+  return p.startsWith(ROOT + "/") ? p.slice(ROOT.length + 1) : p;
 }
 
 /**
