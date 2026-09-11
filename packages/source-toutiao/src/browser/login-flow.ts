@@ -347,6 +347,14 @@ async function extractFavoritesUrl(page: Page): Promise<string | undefined> {
         try {
           const resolved = new URL(href, TOUTIAO_HOME);
           if (resolved.protocol === 'http:' || resolved.protocol === 'https:') {
+            // 畸形 query 规范化：2026-09 实测页头「我的收藏」href 的参数分隔符是
+            // ？而非 &（?tab=fav?source=feed）。站内 SPA 点击能容错，但把该 URL
+            // 拿去整页导航（扫描器 goto）时 tab 参数值变成 'fav?source=feed' 不被
+            // 服务端识别，落在默认 tab、收藏列表 0 条（2026-09-11 真实 Profile
+            // 实测：双问号 0 条 / 改为 & 后 19 条）。把首 ? 之后的 ? 还原为 &。
+            if (resolved.search.includes('?', 1)) {
+              resolved.search = `?${resolved.search.slice(1).replace(/\?/g, '&')}`;
+            }
             return resolved.href;
           }
         } catch {

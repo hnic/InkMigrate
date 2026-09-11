@@ -84,6 +84,16 @@ export async function driveScanFavorites(
       `toutiao: favorites page redirected to login page (login required): ${afterUrl}`,
     );
   }
+  // 死链/改版迁移的收藏 URL 以 404 页响应但 goto 正常完成（DEFAULT_FAVORITES_URL
+  // 的 /favorites 2026-09 实测已 404），不识别会走空轮循环"正常"终止——调用方
+  // 无法区分「没有收藏」和「URL 已失效」。title 是 404 页的稳定标记（正常收藏页
+  // title 为「我的收藏 - 今日头条」），与 login/passport 重定向同口径快速失败
+  const pageTitle = (await opts.page.title()).trim();
+  if (pageTitle.includes('404') || /not found/i.test(pageTitle)) {
+    throw new Error(
+      `toutiao: favorites page is 404 (URL 已失效?): ${opts.favoritesUrl}`,
+    );
+  }
 
   /**
    * 增量提取：每轮只返回 DOM 中【新出现】的收藏条目 HTML。

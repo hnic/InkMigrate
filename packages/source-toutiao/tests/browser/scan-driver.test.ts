@@ -83,4 +83,35 @@ describe('driveScanFavorites', () => {
 
     await session.close();
   });
+
+  it('fails fast on 404 favorites page instead of silently returning 0 items', async () => {
+    // 死链/改版迁移的收藏 URL（DEFAULT_FAVORITES_URL 的 /favorites 2026-09 实测
+    // 已 404）goto 仍正常完成，若不识别 404 页会走空轮循环"正常"终止——调用方
+    // 无法区分「没有收藏」和「URL 已失效」，必须显式报错
+    const profileDir = createTempProfileDir();
+    const session = new ToutiaoBrowserSession({ profileDir, headless: true });
+    await session.launch();
+    const page = await session.newPage();
+
+    await page.route('**/favorites', (route) =>
+      route.fulfill({
+        status: 404,
+        contentType: 'text/html; charset=utf-8',
+        body: '<!doctype html><html><head><title>404 Not Found</title></head><body>404</body></html>',
+      }),
+    );
+
+    await expect(
+      driveScanFavorites({
+        page,
+        favoritesUrl: 'https://www.toutiao.com/favorites',
+        baseUrl: 'https://www.toutiao.com/',
+        sourceInstanceId: 'toutiao-main',
+        maxEmptyCycles: 1,
+        waitAfterScrollMs: 50,
+      }),
+    ).rejects.toThrow(/404/);
+
+    await session.close();
+  });
 });

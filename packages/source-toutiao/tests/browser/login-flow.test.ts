@@ -122,9 +122,12 @@ describe('runLoginFlow', () => {
     // 等待期不应干等满超时：首页选择器或周期性多信号检测应在数秒内命中
     expect(result.state).toBe('logged-in');
     expect(Date.now() - start).toBeLessThan(20_000);
-    // 「我的收藏」链接应被提取并解析为绝对 https URL（协议相对 → https）
+    // 「我的收藏」链接应被提取并解析为绝对 https URL（协议相对 → https），且
+    // 畸形 query 需规范化：2026-09 实测页头 href 是 ?tab=fav?source=feed（& 写成了
+    // ?），整页导航时 tab 值变成 'fav?source=feed' 不被识别、收藏页落在默认 tab
+    // 扫出 0 条（2026-09-11 实测）；规范化为 & 后同一 Profile 实测可见收藏条目
     expect(result.favoritesUrl).toBe(
-      'https://www.toutiao.com/c/user/token/MOCK_TOKEN_2026_09/?tab=fav?source=feed',
+      'https://www.toutiao.com/c/user/token/MOCK_TOKEN_2026_09/?tab=fav&source=feed',
     );
 
     await session.close();

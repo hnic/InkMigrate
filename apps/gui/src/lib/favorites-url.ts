@@ -17,14 +17,32 @@ export function normalizeFavoritesUrl(raw: string): string {
       .split(/\r?\n/)
       .map((line) => line.trim())
       .find((line) => line.length > 0) ?? '';
-  const cleaned = firstLine.replace(/[\u200B\u200C\u200D\uFEFF]/g, '');
+  let cleaned = firstLine.replace(/[\u200B\u200C\u200D\uFEFF]/g, '');
   if (cleaned === '') return '';
-  if (/^https?:\/\//i.test(cleaned)) return cleaned;
+  if (/^https?:\/\//i.test(cleaned)) {
+    // 已带协议：先过头条畸形 query 自愈再返回
+    return repairToutiaoFavQuery(cleaned);
+  }
   // 缺协议头的域名形态（www.toutiao.com/... 或 toutiao.com/...）：补 https://
   if (/^(www\.|[a-z0-9-]+(?:\.[a-z0-9-]+)+)(?:[:/?#]|$)/i.test(cleaned)) {
-    return `https://${cleaned}`;
+    return repairToutiaoFavQuery(`https://${cleaned}`);
   }
   return cleaned;
+}
+
+/**
+ * 头条 2026-09 页头「我的收藏」链接的参数分隔符是 ? 而非 &（?tab=fav?source=feed），
+ * 站内 SPA 点击能容错，但整页导航时 tab 参数值不被识别、收藏页落在默认 tab 扫出
+ * 0 条（2026-09-11 真实 Profile 实测）。已按原样存进设置的坏值在此自愈：仅对
+ * 头条 token 形态收藏 URL 修复，避免误伤其它来源的粘贴值。引擎侧提取
+ * （login-flow extractFavoritesUrl）已做同一修复，此处兜底存量值。
+ */
+function repairToutiaoFavQuery(url: string): string {
+  const m = /^(https?:\/\/[^/]*toutiao\.com\/c\/user\/token\/[^?#]+)(\?[^#]*)(#.*)?$/i.exec(url);
+  if (!m) return url;
+  // query 首字符是 ?（分隔符），其后的 ? 全部还原为 &（参数分隔符的正确形态）
+  const query = m[2]!.replace(/\?/g, (c, i: number) => (i === 0 ? c : '&'));
+  return m[1]! + query + (m[3] ?? '');
 }
 
 /** 规范化后的值是否是引擎可接受的 http(s) URL（发送前客户端校验）。 */
