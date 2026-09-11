@@ -101,6 +101,15 @@ describe('filenames (§13.4)', () => {
     expect(Array.from(out).length).toBeLessThanOrEqual(50);
   });
 
+  it('# 文件名非法化：wikilink 锚点分隔符无法转义，含 # 的文件名不可被链接', () => {
+    // 2026-09-11 实测：微头条标题带话题标签（#codex 等），文件名保留 # 后
+    // 索引/互链的 wikilink 在 # 处被截断为「文件#锚点」，必然断链
+    expect(sanitizeFilename('几个prompt让你的gpt5.6效率升级#howto入门codex')).toBe(
+      '几个prompt让你的gpt5.6效率升级-howto入门codex',
+    );
+    expect(sanitizeFilename('a#b#c')).toBe('a-b-c');
+  });
+
   it('#331: 不可见/双向格式字符被删除（RLO 文件名欺骗向量）', () => {
     expect(sanitizeFilename('a\u200Bb')).toBe('ab'); // ZWSP
     expect(sanitizeFilename('x\u202Etxt.exe')).toBe('xtxt.exe'); // RLO（双向覆盖）
