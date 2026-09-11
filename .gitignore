@@ -36,6 +36,7 @@ playwright/.auth/
 # build artifacts（dist/ 未锚定，匹配任意层级；如某包需提交 dist 产物，
 # 用 !packages/<pkg>/dist/** 显式取反）
 node_modules/
+.pnpm-store/
 dist/
 *.tsbuildinfo
 
