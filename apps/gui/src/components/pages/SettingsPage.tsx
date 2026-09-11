@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { AppSettings, SourceAdapterKind } from '../../lib/types.js';
+import { getSourceSwitchPatch } from '../../lib/gui-helpers.js';
 import { PathInput } from '../PathInput.js';
 import { Settings, Sliders, RotateCcw } from 'lucide-react';
 
@@ -10,19 +11,19 @@ interface Props {
 
 export function SettingsPage({ settings, update }: Props) {
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(false);
 
   const handleResetDefaults = () => {
-    if (window.confirm('确定要重置所有设置为默认值吗？')) {
-      update({
-        stateDir: '',
-        vaultPath: '',
-        favoritesUrl: '',
-        source: 'toutiao-main',
-        target: 'obsidian-main',
-        sourceAdapter: 'toutiao',
-        configPath: '',
-      });
-    }
+    setConfirmReset(false);
+    update({
+      stateDir: '',
+      vaultPath: '',
+      favoritesUrl: '',
+      source: 'toutiao-main',
+      target: 'obsidian-main',
+      sourceAdapter: 'toutiao',
+      configPath: '',
+    });
   };
 
   return (
@@ -32,15 +33,35 @@ export function SettingsPage({ settings, update }: Props) {
           <Settings size={20} />
           <span>系统设置</span>
         </h2>
-        <button
-          type="button"
-          onClick={handleResetDefaults}
-          className="btn-ghost btn-sm"
-          style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
-        >
-          <RotateCcw size={13} />
-          <span>恢复默认</span>
-        </button>
+        {!confirmReset ? (
+          <button
+            type="button"
+            onClick={() => setConfirmReset(true)}
+            className="btn-ghost btn-sm"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+          >
+            <RotateCcw size={13} />
+            <span>恢复默认</span>
+          </button>
+        ) : (
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+            <span style={{ fontSize: '12px', color: 'var(--warning)' }}>重置所有设置？</span>
+            <button
+              type="button"
+              onClick={handleResetDefaults}
+              className="btn-danger btn-sm"
+            >
+              确定
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmReset(false)}
+              className="btn-secondary btn-sm"
+            >
+              取消
+            </button>
+          </div>
+        )}
       </div>
 
       <div style={{ padding: '18px', background: 'var(--bg-panel)', borderRadius: '8px', display: 'flex', flexDirection: 'column', gap: '18px', border: '1px solid var(--border)' }}>
@@ -53,8 +74,7 @@ export function SettingsPage({ settings, update }: Props) {
             value={settings.sourceAdapter ?? 'toutiao'}
             onChange={(e) => {
               const sourceAdapter = e.target.value as SourceAdapterKind;
-              const source = sourceAdapter === 'evernote' ? 'evernote-archive' : 'toutiao-main';
-              update(sourceAdapter === 'toutiao' ? { sourceAdapter, configPath: '', source } : { sourceAdapter, source });
+              update(getSourceSwitchPatch(sourceAdapter));
             }}
             style={{ width: '280px' }}
           >

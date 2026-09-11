@@ -44,3 +44,6 @@ export interface AppSettings {
 export type PageId = 'login' | 'scan' | 'migrate' | 'cleanup' | 'report' | 'settings';
 
 export type OperationState = 'idle' | 'loading' | 'success' | 'failed';
+
+/** ConfigPrompt 可检查/填写的字段集合（供 required 与查表共用，防拼写漂移）。 */
+export type ConfigField = 'stateDir' | 'vaultPath' | 'favoritesUrl' | 'configPath';

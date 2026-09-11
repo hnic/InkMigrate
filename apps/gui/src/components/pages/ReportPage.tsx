@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { AppSettings, StatusQueryResult } from '../../lib/types.js';
+import { addRecentJob, sanitizeJobId } from '../../lib/gui-helpers.js';
 import { BarChart3, Search, FolderOpen, ExternalLink, History } from 'lucide-react';
 
 interface Props {
@@ -39,9 +40,11 @@ function getStoredRecentJobs(): string[] {
 }
 
 function saveRecentJob(jobId: string) {
+  const safeId = sanitizeJobId(jobId);
+  if (!safeId) return;
   try {
     const existing = getStoredRecentJobs();
-    const updated = [jobId, ...existing.filter((id) => id !== jobId)].slice(0, 8);
+    const updated = addRecentJob(existing, safeId, 8);
     localStorage.setItem(STORAGE_RECENT_JOBS, JSON.stringify(updated));
   } catch {
     // 忽略存储异常
@@ -96,8 +99,9 @@ export function ReportPage({ settings, rpcCall }: Props) {
   }, [selectedJob, settings.stateDir, rpcCall]);
 
   const handleOpenReportsDir = async () => {
-    if (!settings.stateDir || !selectedJob) return;
-    const reportDir = `${settings.stateDir}/reports/${selectedJob}`;
+    const safeJob = sanitizeJobId(selectedJob);
+    if (!settings.stateDir || !safeJob) return;
+    const reportDir = `${settings.stateDir}/reports/${safeJob}`;
     try {
       await invoke('open_in_folder', { path: reportDir });
     } catch (err) {

@@ -91,9 +91,47 @@ async fn open_in_folder(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn open_url(url: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let trimmed = url.trim();
+        if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+            return Err("仅支持打开 http:// 或 https:// 协议的网络链接".to_string());
+        }
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open")
+                .arg(trimmed)
+                .status()
+                .map_err(|e| e.to_string())?;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            std::process::Command::new("rundll32")
+                .args(&["url.dll,FileProtocolHandler", trimmed])
+                .status()
+                .map_err(|e| e.to_string())?;
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            std::process::Command::new("xdg-open")
+                .arg(trimmed)
+                .status()
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn check_path_exists(path: String) -> Result<bool, String> {
-    let expanded = expand_tilde(&path);
-    Ok(std::path::Path::new(&expanded).exists())
+    tokio::task::spawn_blocking(move || {
+        let expanded = expand_tilde(&path);
+        Ok(std::path::Path::new(&expanded).exists())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn expand_tilde(path: &str) -> String {
@@ -187,7 +225,8 @@ fn run_pick_file(prompt: &str, default_path: Option<&str>) -> Result<Option<Stri
 fn run_pick_directory(prompt: &str, default_path: Option<&str>) -> Result<Option<String>, String> {
     let expanded = default_path.map(expand_tilde).unwrap_or_default();
     let script = format!(
-        "[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null; \
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; \
+        [System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null; \
         $dialog = New-Object System.Windows.Forms.FolderBrowserDialog; \
         $dialog.Description = '{}'; \
         if ('{}' -ne '') {{ $dialog.SelectedPath = '{}'; }} \
@@ -218,7 +257,8 @@ fn run_pick_directory(prompt: &str, default_path: Option<&str>) -> Result<Option
 fn run_pick_file(prompt: &str, default_path: Option<&str>) -> Result<Option<String>, String> {
     let expanded = default_path.map(expand_tilde).unwrap_or_default();
     let script = format!(
-        "[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null; \
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; \
+        [System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null; \
         $dialog = New-Object System.Windows.Forms.OpenFileDialog; \
         $dialog.Title = '{}'; \
         if ('{}' -ne '') {{ $dialog.InitialDirectory = '{}'; }} \
@@ -302,6 +342,7 @@ pub fn run() {
             pick_directory,
             pick_file,
             open_in_folder,
+            open_url,
             check_path_exists
         ])
         .build(tauri::generate_context!())

@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type { AppSettings, ResumableJob, MigrateResult, PageId } from '../../lib/types.js';
 import { ConfigPrompt, type ConfigField } from '../ConfigPrompt.js';
 import { normalizeFavoritesUrl, isSendableFavoritesUrl } from '../../lib/favorites-url.js';
+import { computeCanStartMigrate, getRequiredMigrateFields } from '../../lib/gui-helpers.js';
 import { Play, Square, RotateCw, ExternalLink, CheckCircle2, AlertTriangle, ArrowRight } from 'lucide-react';
 
 interface Props {
@@ -126,14 +127,9 @@ export function MigratePage({ settings, update, rpcCall, addLog, activePhase, ca
     }
   }
 
-  // 解耦校验逻辑：Evernote 无需登录态与收藏 URL
-  const canStart = isEvernote
-    ? Boolean(settings.stateDir && settings.vaultPath && settings.configPath)
-    : Boolean(settings.stateDir && settings.vaultPath && settings.favoritesUrl && settings.loggedIn);
-
-  const requiredFields: ConfigField[] = isEvernote
-    ? ['stateDir', 'vaultPath', 'configPath']
-    : ['stateDir', 'vaultPath', 'favoritesUrl'];
+  // 解耦校验逻辑：由 gui-helpers 统一计算，避免与单测产生实现漂移
+  const canStart = computeCanStartMigrate(settings);
+  const requiredFields: ConfigField[] = getRequiredMigrateFields(settings.sourceAdapter);
 
   const statusLabels: Record<string, string> = {
     completed: '完成',

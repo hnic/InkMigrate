@@ -27,16 +27,17 @@ export function PathInput({
 }: PathInputProps) {
   const [exists, setExists] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
-  // 异步检查路径是否存在
+  // 防抖检查路径是否存在
   useEffect(() => {
-    let active = true;
     const trimmed = value?.trim();
     if (!trimmed) {
       setExists(null);
       return;
     }
 
+    let active = true;
     const timer = setTimeout(async () => {
       try {
         const ok = (await invoke('check_path_exists', { path: trimmed })) as boolean;
@@ -44,7 +45,7 @@ export function PathInput({
       } catch {
         if (active) setExists(null);
       }
-    }, 250);
+    }, 200);
 
     return () => {
       active = false;
@@ -55,6 +56,7 @@ export function PathInput({
   const handlePick = useCallback(async () => {
     if (disabled || busy) return;
     setBusy(true);
+    setActionError(null);
     try {
       const command = type === 'directory' ? 'pick_directory' : 'pick_file';
       const picked = (await invoke(command, {
@@ -67,6 +69,8 @@ export function PathInput({
       }
     } catch (err) {
       console.warn('选择路径失败:', err);
+      setActionError(`操作失败: ${err instanceof Error ? err.message : String(err)}`);
+      setTimeout(() => setActionError(null), 4000);
     } finally {
       setBusy(false);
     }
@@ -75,10 +79,13 @@ export function PathInput({
   const handleOpen = useCallback(async () => {
     const trimmed = value?.trim();
     if (!trimmed) return;
+    setActionError(null);
     try {
       await invoke('open_in_folder', { path: trimmed });
     } catch (err) {
       console.warn('在文件管理器中打开失败:', err);
+      setActionError(`打开失败: ${err instanceof Error ? err.message : String(err)}`);
+      setTimeout(() => setActionError(null), 4000);
     }
   }, [value]);
 
@@ -149,6 +156,11 @@ export function PathInput({
           </button>
         )}
       </div>
+      {actionError && (
+        <span style={{ fontSize: '11px', color: 'var(--error)' }}>
+          ⚠️ {actionError}
+        </span>
+      )}
     </div>
   );
 }

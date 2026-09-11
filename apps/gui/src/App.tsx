@@ -12,6 +12,7 @@ import { useSettings } from './hooks/useSettings.js';
 import { useSidecar } from './hooks/useSidecar.js';
 import { useLoginStatus } from './hooks/useLoginStatus.js';
 import type { PageId, SourceAdapterKind } from './lib/types.js';
+import { getSourceSwitchPatch } from './lib/gui-helpers.js';
 import { Layers } from 'lucide-react';
 
 const isMac = /Mac/i.test(navigator.userAgent);
@@ -36,8 +37,7 @@ export default function App() {
   }, [busy]);
 
   const handleSourceChange = (adapter: SourceAdapterKind) => {
-    const source = adapter === 'evernote' ? 'evernote-archive' : 'toutiao-main';
-    update(adapter === 'toutiao' ? { sourceAdapter: adapter, configPath: '', source } : { sourceAdapter: adapter, source });
+    update(getSourceSwitchPatch(adapter));
   };
 
   return (

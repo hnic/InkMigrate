@@ -1,16 +1,17 @@
 import { describe, it, expect } from 'vitest';
 import { normalizeFavoritesUrl, isSendableFavoritesUrl } from '../../lib/favorites-url.js';
+import {
+  computeCanStartMigrate,
+  getRequiredMigrateFields,
+  getMissingConfigFields,
+  getSourceSwitchPatch,
+  addRecentJob,
+  sanitizeJobId,
+} from '../../lib/gui-helpers.js';
 import type { AppSettings } from '../../lib/types.js';
 
 describe('GUI Validation & Logic Tests (避免功能漂移)', () => {
   describe('Evernote vs Toutiao 迁移条件判定解耦测试', () => {
-    function computeCanStartMigrate(settings: AppSettings): boolean {
-      const isEvernote = settings.sourceAdapter === 'evernote';
-      return isEvernote
-        ? Boolean(settings.stateDir && settings.vaultPath && settings.configPath)
-        : Boolean(settings.stateDir && settings.vaultPath && settings.favoritesUrl && settings.loggedIn);
-    }
-
     it('Evernote 文件源模式下：只要具备工作区、Vault与配置文件，即可启动迁移（无需登录与URL）', () => {
       const evernoteSettings: AppSettings = {
         sourceAdapter: 'evernote',
@@ -62,6 +63,11 @@ describe('GUI Validation & Logic Tests (避免功能漂移)', () => {
       toutiaoSettings.favoritesUrl = '';
       expect(computeCanStartMigrate(toutiaoSettings)).toBe(false);
     });
+
+    it('按知识来源正确返回必填字段列表', () => {
+      expect(getRequiredMigrateFields('evernote')).toEqual(['stateDir', 'vaultPath', 'configPath']);
+      expect(getRequiredMigrateFields('toutiao')).toEqual(['stateDir', 'vaultPath', 'favoritesUrl']);
+    });
   });
 
   describe('favoritesUrl 校验与规范化逻辑', () => {
@@ -80,19 +86,12 @@ describe('GUI Validation & Logic Tests (避免功能漂移)', () => {
   });
 
   describe('ConfigPrompt 缺失字段计算逻辑', () => {
-    function getMissingFields(
-      settings: Record<string, string | undefined>,
-      required: string[]
-    ): string[] {
-      return required.filter((field) => !settings[field]?.trim());
-    }
-
     it('纯空格字符串不应被误判为已填写', () => {
       const settings = {
         stateDir: '   ',
         vaultPath: '/Users/test/Vault',
       };
-      const missing = getMissingFields(settings, ['stateDir', 'vaultPath']);
+      const missing = getMissingConfigFields(settings, ['stateDir', 'vaultPath']);
       expect(missing).toEqual(['stateDir']);
     });
 
@@ -102,16 +101,12 @@ describe('GUI Validation & Logic Tests (避免功能漂移)', () => {
         vaultPath: '/Users/test/Vault',
         configPath: 'inkmigrate.yaml',
       };
-      const missing = getMissingFields(settings, ['stateDir', 'vaultPath', 'configPath']);
+      const missing = getMissingConfigFields(settings, ['stateDir', 'vaultPath', 'configPath']);
       expect(missing).toHaveLength(0);
     });
   });
 
   describe('历史任务排序与上限截断逻辑', () => {
-    function addRecentJob(existing: string[], newJobId: string, limit = 8): string[] {
-      return [newJobId, ...existing.filter((id) => id !== newJobId)].slice(0, limit);
-    }
-
     it('新 Job 插入在最前面，且去重不重复', () => {
       const list = ['mig-1', 'mig-2', 'mig-3'];
       const updated = addRecentJob(list, 'mig-2');
@@ -122,6 +117,33 @@ describe('GUI Validation & Logic Tests (避免功能漂移)', () => {
       const list = ['1', '2', '3', '4', '5'];
       const updated = addRecentJob(list, 'new', 4);
       expect(updated).toEqual(['new', '1', '2', '3']);
+    });
+  });
+
+  describe('来源切换 Patch 生成逻辑', () => {
+    it('切换至 toutiao 时应清空 configPath 并设置 source 为 toutiao-main', () => {
+      const patch = getSourceSwitchPatch('toutiao');
+      expect(patch).toEqual({
+        sourceAdapter: 'toutiao',
+        configPath: '',
+        source: 'toutiao-main',
+      });
+    });
+
+    it('切换至 evernote 时应保留现有配置并设置 source 为 evernote-archive', () => {
+      const patch = getSourceSwitchPatch('evernote');
+      expect(patch).toEqual({
+        sourceAdapter: 'evernote',
+        source: 'evernote-archive',
+      });
+    });
+  });
+
+  describe('Job ID 安全清洗过滤（防目录穿越）', () => {
+    it('清除路径穿越符号与斜杠', () => {
+      expect(sanitizeJobId('../../../etc/passwd')).toBe('etcpasswd');
+      expect(sanitizeJobId('job_2026-09-11_abc')).toBe('job_2026-09-11_abc');
+      expect(sanitizeJobId('..\\..\\windows\\system32')).toBe('windowssystem32');
     });
   });
 });

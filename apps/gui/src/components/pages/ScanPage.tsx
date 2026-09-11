@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react';
 import type { AppSettings, PageId, ScanStartResult } from '../../lib/types.js';
 import { ConfigPrompt } from '../ConfigPrompt.js';
 import { normalizeFavoritesUrl, isSendableFavoritesUrl } from '../../lib/favorites-url.js';
+import { openExternalUrl } from '../../lib/opener.js';
 import { Scan, Square, Search, ExternalLink, Folder, AlertTriangle, ArrowRight, ChevronDown, ChevronUp, FileText } from 'lucide-react';
 
 /** 问题清单最多展示条数（超出截断并提示剩余数量）。 */
@@ -355,7 +356,9 @@ function ToutiaoScan({ settings, update, rpcCall, addLog, activePhase, cancel, o
                     <Search size={14} style={{ position: 'absolute', left: '10px', top: '9px', color: 'var(--text-dim)' }} />
                   </div>
                   <span style={{ fontSize: '12px', color: 'var(--text-dim)', whiteSpace: 'nowrap' }}>
-                    显示前 {filteredItems.length} / 共 {result.items.length} 篇
+                    {searchFilter.trim()
+                      ? `匹配 ${filteredItems.length} 篇 (总计 ${result.items.length} 篇)`
+                      : `共 ${result.items.length} 篇 (预览前 ${filteredItems.length} 篇)`}
                   </span>
                 </div>
 
@@ -385,8 +388,14 @@ function ToutiaoScan({ settings, update, rpcCall, addLog, activePhase, cancel, o
                         href={item.canonicalUrl}
                         target="_blank"
                         rel="noreferrer"
-                        style={{ color: 'var(--accent)', display: 'inline-flex', alignItems: 'center', gap: '2px', flexShrink: 0, textDecoration: 'none' }}
-                        title="在浏览器中打开原文"
+                        style={{ color: 'var(--accent)', display: 'inline-flex', alignItems: 'center', gap: '2px', flexShrink: 0, textDecoration: 'none', cursor: 'pointer' }}
+                        title="在系统浏览器中打开原文"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          if (item.canonicalUrl) {
+                            void openExternalUrl(item.canonicalUrl);
+                          }
+                        }}
                       >
                         <ExternalLink size={13} />
                       </a>

@@ -24,6 +24,7 @@ const STATUS_TEXT: Record<OperationState, string> = {
 export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin, profilePath, onNavigate }: Props) {
   const [loginState, setLoginState] = useState<OperationState>('idle');
   const [loading, setLoading] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
 
   async function handleLogin() {
     setLoading(true);
@@ -75,9 +76,7 @@ export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin, pro
   }
 
   async function handleClear() {
-    if (!window.confirm('确定要清除今日头条的本地登录状态吗？清除后需重新扫码。')) {
-      return;
-    }
+    setConfirmClear(false);
     setLoading(true);
     try {
       const result = (await rpcCall('auth.clear', {
@@ -184,14 +183,44 @@ export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin, pro
             <span>{loginLabel}</span>
           </button>
 
-          <button
-            onClick={handleClear}
-            disabled={loading || !settings.loggedIn}
-            className="btn-danger"
-          >
-            <Trash2 size={14} />
-            <span>清除登录</span>
-          </button>
+          {!confirmClear ? (
+            <button
+              onClick={() => setConfirmClear(true)}
+              disabled={loading || !settings.loggedIn}
+              className="btn-danger"
+            >
+              <Trash2 size={14} />
+              <span>清除登录</span>
+            </button>
+          ) : (
+            <div style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '2px 8px',
+              background: 'rgba(239, 68, 68, 0.12)',
+              borderRadius: '6px',
+              border: '1px solid rgba(239, 68, 68, 0.25)',
+            }}>
+              <span style={{ fontSize: '12px', color: 'var(--error)' }}>
+                确定清除？需重新扫码
+              </span>
+              <button
+                onClick={handleClear}
+                disabled={loading}
+                className="btn-danger btn-sm"
+              >
+                确定
+              </button>
+              <button
+                onClick={() => setConfirmClear(false)}
+                disabled={loading}
+                className="btn-secondary btn-sm"
+              >
+                取消
+              </button>
+            </div>
+          )}
 
           {settings.stateDir && (
             <button

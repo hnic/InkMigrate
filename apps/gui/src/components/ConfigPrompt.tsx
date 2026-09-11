@@ -1,9 +1,9 @@
-import type { AppSettings } from '../lib/types.js';
+import type { AppSettings, ConfigField } from '../lib/types.js';
+import { getMissingConfigFields } from '../lib/gui-helpers.js';
 import { PathInput } from './PathInput.js';
 import { AlertTriangle } from 'lucide-react';
 
-/** ConfigPrompt 可检查/填写的字段集合（供 required 与查表共用，防拼写漂移）。 */
-export type ConfigField = 'stateDir' | 'vaultPath' | 'favoritesUrl' | 'configPath';
+export type { ConfigField };
 
 interface Props {
   settings: AppSettings;
@@ -39,8 +39,8 @@ const FIELD_HINTS: Record<ConfigField, string> = {
  * 配置缺失提示框：当必需字段为空时显示输入框让用户原地填写。
  */
 export function ConfigPrompt({ settings, update, required, message }: Props) {
-  // trim 判空：纯空白的路径/URL 不算已配置，否则提示框消失而下游操作失败
-  const missing = required.filter((field) => !settings[field]?.trim());
+  // trim 判空：由 gui-helpers 统一判定，纯空白的路径/URL 不算已配置
+  const missing = getMissingConfigFields(settings, required);
   if (missing.length === 0) return null;
 
   return (
