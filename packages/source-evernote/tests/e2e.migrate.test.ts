@@ -103,6 +103,9 @@ describe('evernote e2e migrate', () => {
       workspaceDir: dbDir,
       reportsDir: join(dbDir, 'reports'),
     });
+    // openDatabase 契约要求调用方 close：Windows 上未关闭的 sqlite 句柄会让
+    // finally 的 rmSync EPERM（mac/Linux 允许删除打开中的文件，故仅 CI windows 腿暴露）
+    db.close();
     return { result, db };
   }
 
@@ -214,8 +217,9 @@ describe('evernote e2e migrate', () => {
       walkAgain(archiveDir);
       expect(after).toHaveLength(before);
     } finally {
-      rmSync(w.dbDir, { recursive: true, force: true });
-      rmSync(w.vaultDir, { recursive: true, force: true });
+      // maxRetries：Windows 删除刚写入的文件可能被 Defender 短暂锁定（EPERM/EBUSY）
+      rmSync(w.dbDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+      rmSync(w.vaultDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -230,8 +234,9 @@ describe('evernote e2e migrate', () => {
     copyFileSync(join(FIXTURES, 'html-export', '剪藏.html'), join(inputDir, '剪藏.html'));
     const { cpSync } = await import('node:fs');
     cpSync(join(FIXTURES, 'html-export', '工作笔记本'), join(inputDir, '工作笔记本'), { recursive: true });
+    let db: DB | undefined;
     try {
-      const db: DB = openDatabase({ path: join(dbDir, 'inkmigrate.sqlite') });
+      db = openDatabase({ path: join(dbDir, 'inkmigrate.sqlite') });
       new SourceInstances(db).create({
         id: 'evernote-archive',
         adapterKind: 'evernote',
@@ -326,7 +331,8 @@ describe('evernote e2e migrate', () => {
       expect(files).toContain('白板照片.png');
       expect(files).toContain('议程.pdf');
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      db?.close(); // 同上：Windows 下句柄未关则 rmSync EPERM
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 });

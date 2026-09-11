@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   collectEnexFiles,
@@ -287,8 +287,10 @@ describe('EvernoteSourceConfigSchema（§15.1）', () => {
 
 describe('resolveInputPaths', () => {
   it('相对路径锚定 workspaceDir', () => {
+    // 期望值用平台自身的 resolve 计算：Windows 上 resolve('/w', …) 产出
+    // 盘符绝对路径（D:\w\…），硬编码 POSIX 字符串会错
     expect(resolveInputPaths(['imports/evernote'], '/w')).toEqual([
-      '/w/imports/evernote',
+      resolve('/w', 'imports/evernote'),
     ]);
     expect(resolveInputPaths(['/abs'], '/w')).toEqual(['/abs']);
   });

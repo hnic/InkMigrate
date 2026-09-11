@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { join, dirname } from 'node:path';
+import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mkdtempSync, rmSync, writeFileSync, copyFileSync, mkdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -121,7 +121,8 @@ describe('extractHtmlNote（§15.12 正文/资源/链接）', () => {
 describe('collectEnexFiles 的 html 收集', () => {
   it('includeHtml 时收集 .html 且跳过 .resources 目录，默认不收集', async () => {
     const withHtml = await collectEnexFiles([HTML_EXPORT], '@@@', { includeHtml: true });
-    expect(withHtml.htmlFiles.map((p) => p.split('/').pop()).sort()).toEqual([
+    // basename 取文件名：split('/') 在 Windows（\ 分隔符）下取到整个绝对路径
+    expect(withHtml.htmlFiles.map((p) => basename(p)).sort()).toEqual([
       '会议记录.html',
       '剪藏.html',
       '随笔.html',

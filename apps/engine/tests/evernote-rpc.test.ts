@@ -69,7 +69,17 @@ describe('engine RPC: evernote file source', () => {
 
   afterAll(async () => {
     proc.kill();
-    rmSync(root, { recursive: true, force: true });
+    // Windows：进程退出是异步的，且 engine 持有 state/ 下的 sqlite 句柄——
+    // 不等 exit 直接 rmSync 会 EPERM；最多等 3s，残余锁定交给 rmSync 重试兜底
+    await new Promise<void>((done) => {
+      if (proc.exitCode !== null) return done();
+      const timer = setTimeout(done, 3000);
+      proc.once('exit', () => {
+        clearTimeout(timer);
+        done();
+      });
+    });
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
   function call(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
