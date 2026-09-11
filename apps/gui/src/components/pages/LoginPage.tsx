@@ -1,35 +1,27 @@
 import { useState } from 'react';
-import type { AppSettings, OperationState, AuthLoginResult } from '../../lib/types.js';
+import type { AppSettings, OperationState, AuthLoginResult, PageId } from '../../lib/types.js';
 import { normalizeFavoritesUrl, isSendableFavoritesUrl } from '../../lib/favorites-url.js';
+import { PathInput } from '../PathInput.js';
+import { LogIn, KeyRound, Trash2, RefreshCw, CheckCircle2, XCircle, Clock, ArrowRight, AlertTriangle } from 'lucide-react';
 
 interface Props {
   settings: AppSettings;
   update: (partial: Partial<AppSettings>) => void;
   rpcCall: (method: string, params: Record<string, unknown>) => Promise<unknown>;
   addLog: (level: 'info' | 'warn' | 'error', message: string) => void;
-  /** 应用级登录态刷新（由 useLoginStatus 提供）。静默，不触发 busy。 */
   refreshLogin: () => Promise<void>;
-  /** Profile 路径（由 useLoginStatus 的 auth.status 顺带返回，避免本页重复查询）。 */
   profilePath: string;
+  onNavigate?: (page: PageId) => void;
 }
 
-/** 状态点颜色 / 文案（process 态优先，否则对齐 settings.loggedIn）。 */
-const STATUS_COLOR: Record<OperationState, string> = {
-  success: 'var(--success)',
-  failed: 'var(--error)',
-  loading: 'var(--warning)',
-  idle: 'var(--text-dim)',
-};
 const STATUS_TEXT: Record<OperationState, string> = {
-  success: '已登录',
-  failed: '登录失败',
+  success: '已登录（会话有效）',
+  failed: '登录失败或已超时',
   loading: '登录中...',
   idle: '未登录',
 };
 
-export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin, profilePath }: Props) {
-  // loginState 现在只承载【过程态】：登录中 / 登录失败。
-  // 稳定态（已登录/未登录）由 settings.loggedIn 驱动，与顶栏保持单一真相源。
+export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin, profilePath, onNavigate }: Props) {
   const [loginState, setLoginState] = useState<OperationState>('idle');
   const [loading, setLoading] = useState(false);
 
@@ -37,21 +29,19 @@ export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin, pro
     setLoading(true);
     setLoginState('loading');
     try {
-      // 粘贴噪声规范化（地址栏复制丢协议头/首尾空白）+ 发送前可读校验：
-      // 让常见粘贴错误以中文提示失败，而非裸 -32602 schema 错误
       const favoritesUrl = normalizeFavoritesUrl(settings.favoritesUrl);
       if (favoritesUrl !== '' && !isSendableFavoritesUrl(favoritesUrl)) {
         throw new Error(`收藏列表 URL 无法识别（需 http(s) 链接）：「${favoritesUrl}」，请在「设置」页修正`);
       }
-      // 自愈回写：规范化改变了输入时同步回设置，后续扫描/迁移页拿到干净值
       if (favoritesUrl !== settings.favoritesUrl && favoritesUrl !== '') {
         update({ favoritesUrl });
       }
-      const result = await rpcCall('auth.login', {
+      const result = (await rpcCall('auth.login', {
         source: settings.source,
         stateDir: settings.stateDir,
         ...(favoritesUrl !== '' ? { favoritesUrl } : {}),
-      }) as AuthLoginResult;
+      })) as AuthLoginResult;
+
       if (typeof result?.state !== 'string') {
         throw new Error('登录响应格式异常（缺少 state 字段）');
       }
@@ -60,24 +50,19 @@ export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin, pro
         setLoginState('failed');
       }
       addLog(ok ? 'info' : 'error', `登录结果：${result.state}`);
-      // 引擎仅在登录证据充分时（DOM/多信号确认，或超时多信号判定）才提取
-      // 收藏 URL——有值即回填，不额外要求 state===logged-in
+
       if (result.favoritesUrl) {
         update({ favoritesUrl: result.favoritesUrl });
         addLog('info', `已自动获取收藏列表 URL`);
       } else if (ok) {
-        // 提取是尽力而为（DOM 选择器可能因头条改版失配），失败必须显式告知去向
         addLog('warn', '未能自动获取收藏列表 URL，请在「扫描」页或「设置」页手动填写');
       }
       if (ok) {
         try {
           await refreshLogin();
         } catch (e) {
-          // 登录本身已成功，刷新失败不应误报为「登录失败」
           addLog('warn', `登录成功，但刷新登录状态失败：${e instanceof Error ? e.message : String(e)}`);
         }
-        // 此时才归位过程态：稳定显示已由 refreshLogin 写入 settings.loggedIn，
-        // 若提前 setLoginState('idle')，loggedIn 写入前卡片会闪现「未登录」
         setLoginState('idle');
       }
     } catch (e) {
@@ -90,14 +75,15 @@ export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin, pro
   }
 
   async function handleClear() {
+    if (!window.confirm('确定要清除今日头条的本地登录状态吗？清除后需重新扫码。')) {
+      return;
+    }
     setLoading(true);
-    // 不复用 loginState='loading'：清除过程中状态点会误显示「登录中...」；
-    // 过程可视化只靠按钮 loading，结束统一归位（顺带清掉陈旧的 failed）
     try {
-      const result = await rpcCall('auth.clear', {
+      const result = (await rpcCall('auth.clear', {
         source: settings.source,
         stateDir: settings.stateDir,
-      }) as { cleared?: boolean };
+      })) as { cleared?: boolean };
       if (typeof result?.cleared !== 'boolean') {
         throw new Error('清除响应格式异常（缺少 cleared 字段）');
       }
@@ -105,20 +91,16 @@ export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin, pro
       try {
         await refreshLogin();
       } catch (e) {
-        // 清除本身已成功，刷新失败不应误报为「清除失败」
         addLog('warn', `Profile 已清除，但刷新登录状态失败：${e instanceof Error ? e.message : String(e)}`);
       }
     } catch (e) {
       addLog('error', `清除失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
-      // 过程态归位，稳定态交回 settings.loggedIn
       setLoginState('idle');
       setLoading(false);
     }
   }
 
-  // 卡片显示判定：loading 过程态优先；稳定态（已登录）优先于陈旧的 failed
-  // 过程态，否则一次登录失败后即使 loggedIn 已翻 true 仍显示「登录失败」
   let displayState: OperationState = 'idle';
   if (loginState === 'loading') {
     displayState = 'loading';
@@ -127,86 +109,118 @@ export function LoginPage({ settings, update, rpcCall, addLog, refreshLogin, pro
   } else if (loginState === 'failed') {
     displayState = 'failed';
   }
-  const statusColor = STATUS_COLOR[displayState];
-  const statusText = STATUS_TEXT[displayState];
-  // 避免嵌套三元：按优先级计算登录按钮文案（loading 覆盖稳定态）
+
   let loginLabel = settings.loggedIn ? '重新登录' : '打开浏览器登录';
   if (loading) loginLabel = '处理中...';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-      <h2 style={{ fontSize: '18px' }}>登录今日头条</h2>
+      <h2 style={{ fontSize: '18px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <KeyRound size={20} />
+        <span>登录今日头条</span>
+      </h2>
 
       {/* 快速配置：如果 stateDir 为空，在这里直接填写 */}
       {!settings.stateDir && (
         <div style={{
           padding: '16px',
-          background: 'rgba(243, 156, 18, 0.1)',
+          background: 'rgba(245, 158, 11, 0.08)',
           borderRadius: '8px',
-          border: '1px solid rgba(243, 156, 18, 0.3)',
+          border: '1px solid rgba(245, 158, 11, 0.25)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '12px',
         }}>
-          <div style={{ fontWeight: 600, marginBottom: '12px' }}>⚠️ 请先配置工作区目录</div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-            <div>
-              <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>工作区目录 (stateDir)</label>
-              <input
-                value={settings.stateDir}
-                onChange={(e) => update({ stateDir: e.target.value })}
-                placeholder="~/.inkmigrate"
-              />
-              <div style={{ fontSize: '12px', color: 'var(--text-dim)', marginTop: '4px' }}>
-                存放数据库、登录 Profile、报告的目录。例如 /Users/you/inkmigrate
-              </div>
-            </div>
-            <div style={{ fontSize: '12px', color: 'var(--text-dim)' }}>
-              💡 登录成功后通常会自动获取收藏列表 URL；若未获取到，可稍后在「扫描」或「设置」页手动填写。
+          <div style={{ fontWeight: 600, color: 'var(--warning)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <AlertTriangle size={16} />
+            <span>请先配置工作区目录</span>
+          </div>
+          <div>
+            <label style={{ display: 'block', marginBottom: '6px', fontSize: '13px', fontWeight: 500 }}>工作区目录 (stateDir)</label>
+            <PathInput
+              value={settings.stateDir}
+              onChange={(val) => update({ stateDir: val })}
+              placeholder="~/.inkmigrate"
+              dialogTitle="选择工作区目录"
+            />
+            <div style={{ fontSize: '12px', color: 'var(--text-dim)', marginTop: '4px' }}>
+              存放数据库、登录 Profile、报告的目录。
             </div>
           </div>
         </div>
       )}
 
       <div style={{
-        padding: '16px',
+        padding: '18px',
         background: 'var(--bg-panel)',
         borderRadius: '8px',
         display: 'flex',
         flexDirection: 'column',
-        gap: '12px',
+        gap: '14px',
+        border: '1px solid var(--border)',
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <span style={{
-            width: '12px', height: '12px', borderRadius: '50%',
-            background: statusColor,
-          }} />
-          <span>{statusText}</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          {displayState === 'success' && <CheckCircle2 size={18} color="var(--success)" />}
+          {displayState === 'failed' && <XCircle size={18} color="var(--error)" />}
+          {displayState === 'loading' && <Clock size={18} color="var(--warning)" />}
+          {displayState === 'idle' && <Clock size={18} color="var(--text-dim)" />}
+          <span style={{ fontWeight: 600, fontSize: '14px' }}>{STATUS_TEXT[displayState]}</span>
         </div>
 
         {profilePath && (
           <div style={{ color: 'var(--text-dim)', fontSize: '12px', wordBreak: 'break-all' }}>
-            Profile: {profilePath}
+            Profile 凭据路径: <code>{profilePath}</code>
           </div>
         )}
 
-        <div style={{ display: 'flex', gap: '8px' }}>
-          <button onClick={handleLogin} disabled={loading || !settings.stateDir}>
-            {loginLabel}
+        <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+          <button
+            onClick={handleLogin}
+            disabled={loading || !settings.stateDir}
+            className="btn-primary"
+            style={{ minWidth: '130px' }}
+          >
+            <LogIn size={15} />
+            <span>{loginLabel}</span>
           </button>
-          <button onClick={handleClear} disabled={loading || !settings.loggedIn} className="btn-danger">
-            清除登录
+
+          <button
+            onClick={handleClear}
+            disabled={loading || !settings.loggedIn}
+            className="btn-danger"
+          >
+            <Trash2 size={14} />
+            <span>清除登录</span>
           </button>
+
+          {settings.stateDir && (
+            <button
+              onClick={() => void refreshLogin()}
+              disabled={loading}
+              className="btn-secondary"
+            >
+              <RefreshCw size={14} />
+              <span>刷新状态</span>
+            </button>
+          )}
+
+          {settings.loggedIn && onNavigate && (
+            <button
+              type="button"
+              onClick={() => onNavigate('scan')}
+              className="btn-secondary"
+              style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+            >
+              <span>前往扫描</span>
+              <ArrowRight size={14} />
+            </button>
+          )}
         </div>
 
         <div style={{ fontSize: '12px', color: 'var(--text-dim)', lineHeight: '1.6' }}>
-          点击登录后会打开浏览器窗口，请在浏览器中扫码完成登录。
-          登录成功后 Profile 会自动保存，后续操作不需要重新登录。
+          💡 点击登录后会自动打开系统浏览器窗口。请在浏览器中扫码完成登录；登录成功后 Profile 会保存在本地，下次使用免登录。
         </div>
       </div>
-
-      {settings.stateDir && (
-        <button onClick={() => void refreshLogin()} disabled={loading} style={{ alignSelf: 'flex-start' }}>
-          检查登录状态
-        </button>
-      )}
     </div>
   );
 }

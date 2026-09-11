@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { AppSettings } from '../../lib/types.js';
 import { ConfigPrompt } from '../ConfigPrompt.js';
+import { Trash2, AlertTriangle, Square, CheckCircle2, XCircle } from 'lucide-react';
 
 interface Props {
   settings: AppSettings;
@@ -8,9 +9,7 @@ interface Props {
   rpcCall: (method: string, params: Record<string, unknown>) => Promise<unknown>;
   addLog: (level: 'info' | 'warn' | 'error', message: string) => void;
   busy: boolean;
-  /** 当前运行的 phase，用于判断按钮文字（是否本页任务在跑）。disabled 仍用 busy。 */
   activePhase: string | null;
-  /** 终止当前正在运行的长任务。 */
   cancel: () => Promise<void>;
 }
 
@@ -30,13 +29,12 @@ export function CleanupPage({ settings, update, rpcCall, addLog, busy, activePha
       const params: Record<string, unknown> = {
         source: settings.source,
         stateDir: settings.stateDir,
-        // M6: 用户已通过危险确认对话框，传服务端确认令牌
         confirmed: true,
       };
       if (maxItems) params.maxItems = parseInt(maxItems, 10);
       if (intervalMs) params.intervalMs = parseInt(intervalMs, 10);
 
-      const res = await rpcCall('cleanup.unfavorite', params) as {
+      const res = (await rpcCall('cleanup.unfavorite', params)) as {
         successCount: number; skipCount: number; failCount: number; unknownCount?: number;
       };
       setResult(res);
@@ -50,7 +48,10 @@ export function CleanupPage({ settings, update, rpcCall, addLog, busy, activePha
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-      <h2 style={{ fontSize: '18px' }}>取消收藏（清理源端）</h2>
+      <h2 style={{ fontSize: '18px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <Trash2 size={20} />
+        <span>取消收藏（清理源端）</span>
+      </h2>
 
       <ConfigPrompt
         settings={settings}
@@ -60,84 +61,100 @@ export function CleanupPage({ settings, update, rpcCall, addLog, busy, activePha
       />
 
       <div style={{
-        padding: '16px',
+        padding: '18px',
         background: 'var(--bg-panel)',
         borderRadius: '8px',
         display: 'flex',
         flexDirection: 'column',
-        gap: '12px',
+        gap: '16px',
+        border: '1px solid var(--border)',
       }}>
         <div style={{
-          padding: '10px 12px',
-          background: 'rgba(231, 76, 60, 0.15)',
+          padding: '12px 14px',
+          background: 'rgba(239, 68, 68, 0.08)',
           borderRadius: '6px',
-          border: '1px solid rgba(231, 76, 60, 0.3)',
+          border: '1px solid rgba(239, 68, 68, 0.25)',
           fontSize: '13px',
+          color: 'var(--text)',
+          lineHeight: '1.6',
+          display: 'flex',
+          gap: '10px',
         }}>
-          ⚠️ 此操作会逐条打开文章详情页并取消收藏。<br/>
-          已迁移到 Obsidian 的内容不会丢失，但头条上的收藏会被移除。<br/>
-          仅清理普通文章（视频/图集/微头条等不动）。为防触发风控，默认每次处理 200 条，每条会模拟人类阅读后再取消（单条约 15-30 秒）；若出现取消失败（疑似风控），将原地等待 15 分钟后重试，重试仍失败则停止任务（已处理项已保存，可下次继续）。
+          <AlertTriangle size={20} color="var(--error)" style={{ flexShrink: 0, marginTop: '2px' }} />
+          <div>
+            <strong>注意事项：</strong>此操作会逐条打开文章详情页并点击取消收藏。<br />
+            已迁移到 Obsidian 的本地笔记不会丢失，但头条云端收藏会被移除。<br />
+            为防风控封禁，默认单次处理 200 条，每条模拟阅读后再取消。若遇到风控挑战将暂停 15 分钟重试。
+          </div>
         </div>
 
         <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
           <div>
-            <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>单次处理条目数（默认 200，防风控）</label>
+            <label style={{ display: 'block', marginBottom: '6px', fontSize: '13px', fontWeight: 500 }}>
+              单次处理条目数（默认 200）
+            </label>
             <input
               type="number"
               value={maxItems}
               onChange={(e) => setMaxItems(e.target.value)}
               placeholder="200"
-              style={{ width: '120px' }}
+              style={{ width: '140px' }}
             />
           </div>
           <div>
-            <label style={{ display: 'block', marginBottom: '4px', fontSize: '13px' }}>条目间隔毫秒（默认 2000，±40% 抖动）</label>
+            <label style={{ display: 'block', marginBottom: '6px', fontSize: '13px', fontWeight: 500 }}>
+              条目间隔毫秒（默认 2000，带抖动）
+            </label>
             <input
               type="number"
               value={intervalMs}
               onChange={(e) => setIntervalMs(e.target.value)}
               placeholder="2000"
-              style={{ width: '120px' }}
+              style={{ width: '140px' }}
             />
           </div>
         </div>
 
         {!confirming ? (
-          <button
-            onClick={() => setConfirming(true)}
-            disabled={busy || !settings.stateDir}
-          >
-            开始取消收藏
-          </button>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            <div style={{ fontSize: '14px', fontWeight: 600 }}>
-              确认要取消收藏吗？此操作不可撤销。
-            </div>
-            <div style={{ display: 'flex', gap: '8px' }}>
-              <button onClick={handleCleanup} disabled={busy} className="btn-danger">
-                {cleaning ? '清理中...' : busy ? '等待其他任务完成...' : '确认取消收藏'}
+          <div style={{ display: 'flex', gap: '10px' }}>
+            <button
+              onClick={() => setConfirming(true)}
+              disabled={busy || !settings.stateDir}
+              className="btn-danger"
+              style={{ minWidth: '130px' }}
+            >
+              <Trash2 size={15} />
+              <span>开始取消收藏</span>
+            </button>
+            {cleaning && (
+              <button onClick={() => void cancel()} className="btn-secondary">
+                <Square size={14} />
+                <span>终止清理</span>
               </button>
-              <button onClick={() => setConfirming(false)} disabled={busy}>
-                取消
+            )}
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', padding: '14px', background: 'var(--bg-hover)', borderRadius: '6px' }}>
+            <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--error)' }}>
+              ⚠️ 确认要开始取消收藏吗？此操作不可逆！
+            </div>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <button onClick={handleCleanup} disabled={busy} className="btn-danger">
+                {cleaning ? '清理中...' : busy ? '等待其他任务完成...' : '确认执行'}
+              </button>
+              <button onClick={() => setConfirming(false)} disabled={busy} className="btn-secondary">
+                取消返回
               </button>
             </div>
           </div>
         )}
 
-        {/* 清理进行中显示终止按钮 */}
-        {cleaning && (
-          <button onClick={() => void cancel()} className="btn-danger">
-            终止清理
-          </button>
-        )}
-
         {error && (
           <div style={{
-            padding: '10px 12px',
-            background: 'rgba(231, 76, 60, 0.15)',
+            padding: '10px 14px',
+            background: 'rgba(239, 68, 68, 0.12)',
             borderRadius: '6px',
-            border: '1px solid rgba(231, 76, 60, 0.3)',
+            border: '1px solid rgba(239, 68, 68, 0.25)',
             color: 'var(--error)',
             fontSize: '13px',
           }}>
@@ -146,23 +163,23 @@ export function CleanupPage({ settings, update, rpcCall, addLog, busy, activePha
         )}
 
         {result && (
-          <div style={{ display: 'flex', gap: '20px', padding: '12px', background: 'var(--bg-hover)', borderRadius: '6px' }}>
+          <div style={{ display: 'flex', gap: '24px', padding: '14px', background: 'var(--bg-hover)', borderRadius: '6px', flexWrap: 'wrap' }}>
             <div>
-              <div style={{ fontSize: '12px', color: 'var(--text-dim)' }}>成功取消</div>
-              <div style={{ fontWeight: 600, color: 'var(--success)' }}>{result.successCount}</div>
+              <div style={{ fontSize: '11px', color: 'var(--text-dim)' }}>成功取消</div>
+              <div style={{ fontWeight: 600, color: 'var(--success)', fontSize: '16px' }}>{result.successCount}</div>
             </div>
             <div>
-              <div style={{ fontSize: '12px', color: 'var(--text-dim)' }}>跳过（未收藏）</div>
-              <div style={{ fontWeight: 600, color: 'var(--text-dim)' }}>{result.skipCount}</div>
+              <div style={{ fontSize: '11px', color: 'var(--text-dim)' }}>跳过（非文章或已无收藏）</div>
+              <div style={{ fontWeight: 600, color: 'var(--text-dim)', fontSize: '16px' }}>{result.skipCount}</div>
             </div>
             <div>
-              <div style={{ fontSize: '12px', color: 'var(--text-dim)' }}>失败</div>
-              <div style={{ fontWeight: 600, color: 'var(--error)' }}>{result.failCount}</div>
+              <div style={{ fontSize: '11px', color: 'var(--text-dim)' }}>失败</div>
+              <div style={{ fontWeight: 600, color: 'var(--error)', fontSize: '16px' }}>{result.failCount}</div>
             </div>
             {result.unknownCount !== undefined && result.unknownCount > 0 && (
               <div>
-                <div style={{ fontSize: '12px', color: 'var(--text-dim)' }}>未知（状态判定失败）</div>
-                <div style={{ fontWeight: 600, color: 'var(--text-dim)' }}>{result.unknownCount}</div>
+                <div style={{ fontSize: '11px', color: 'var(--text-dim)' }}>状态未知</div>
+                <div style={{ fontWeight: 600, color: 'var(--warning)', fontSize: '16px' }}>{result.unknownCount}</div>
               </div>
             )}
           </div>

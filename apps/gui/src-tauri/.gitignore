@@ -4,7 +4,9 @@
 # `pnpm sidecar:build`（scripts/build-sidecar.mjs）生成，不入库；
 # fresh clone 需先执行该脚本再 `tauri build`。
 # 锚定根目录（同 /target），避免误伤深层任意 resources 目录
+/resources
 /resources/
+
 
 # 签名密钥与环境变量，防止误提交（Tauri updater 证书 .key/.p12/.pfx、本地凭据）
 *.pem

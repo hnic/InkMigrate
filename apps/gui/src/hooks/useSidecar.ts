@@ -171,5 +171,10 @@ export function useSidecar() {
     }
   }, [addLog]);
 
-  return { rpcCall, progress, logs, busy, activePhase, healthDegraded, addLog, cancel };
+  const clearLogs = useCallback(() => {
+    setLogs([]);
+  }, []);
+
+  return { rpcCall, progress, logs, busy, activePhase, healthDegraded, addLog, cancel, clearLogs };
 }
+

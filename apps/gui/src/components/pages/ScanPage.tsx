@@ -1,7 +1,8 @@
-import { useState } from 'react';
-import type { AppSettings } from '../../lib/types.js';
+import { useState, useMemo } from 'react';
+import type { AppSettings, PageId, ScanStartResult } from '../../lib/types.js';
 import { ConfigPrompt } from '../ConfigPrompt.js';
 import { normalizeFavoritesUrl, isSendableFavoritesUrl } from '../../lib/favorites-url.js';
+import { Scan, Square, Search, ExternalLink, Folder, AlertTriangle, ArrowRight, ChevronDown, ChevronUp, FileText } from 'lucide-react';
 
 /** 问题清单最多展示条数（超出截断并提示剩余数量）。 */
 const MAX_ISSUES_SHOWN = 5;
@@ -11,21 +12,36 @@ interface Props {
   update: (partial: Partial<AppSettings>) => void;
   rpcCall: (method: string, params: Record<string, unknown>) => Promise<unknown>;
   addLog: (level: 'info' | 'warn' | 'error', message: string) => void;
-  /** 当前运行的 phase：按钮禁用改由 activePhase 判定（避免登录收尾的 busy 锁住扫描）。 */
   activePhase: string | null;
-  /** 终止当前正在运行的长任务。 */
   cancel: () => Promise<void>;
+  onNavigate?: (page: PageId) => void;
 }
 
-export function ScanPage({ settings, update, rpcCall, addLog, activePhase, cancel }: Props) {
+export function ScanPage({ settings, update, rpcCall, addLog, activePhase, cancel, onNavigate }: Props) {
   if (settings.sourceAdapter === 'evernote') {
-    return <EvernotePreview settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} />;
+    return <EvernotePreview settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} onNavigate={onNavigate} />;
   }
-  return <ToutiaoScan settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} activePhase={activePhase} cancel={cancel} />;
+  return (
+    <ToutiaoScan
+      settings={settings}
+      update={update}
+      rpcCall={rpcCall}
+      addLog={addLog}
+      activePhase={activePhase}
+      cancel={cancel}
+      onNavigate={onNavigate}
+    />
+  );
 }
 
 /** §15 Evernote 文件源预览：条目数 + 笔记本分布 + 问题清单（不写库）。 */
-function EvernotePreview({ settings, update, rpcCall, addLog }: Omit<Props, 'activePhase' | 'cancel'>) {
+function EvernotePreview({
+  settings,
+  update,
+  rpcCall,
+  addLog,
+  onNavigate,
+}: Omit<Props, 'activePhase' | 'cancel'>) {
   const [result, setResult] = useState<{
     uniqueItems: number;
     byNotebook: Record<string, number>;
@@ -48,7 +64,6 @@ function EvernotePreview({ settings, update, rpcCall, addLog }: Omit<Props, 'act
         byNotebook?: Record<string, number>;
         issues?: string[];
       };
-      // 响应字段做容错归一，避免后端缺字段时渲染路径抛错
       setResult({
         uniqueItems: res.uniqueItems ?? 0,
         byNotebook: res.byNotebook ?? {},
@@ -71,31 +86,33 @@ function EvernotePreview({ settings, update, rpcCall, addLog }: Omit<Props, 'act
       <ConfigPrompt
         settings={settings}
         update={update}
-        required={['stateDir']}
-        message="⚠️ 请先在设置页填写工作区目录"
+        required={['stateDir', 'configPath']}
+        message="⚠️ 请先在设置页填写工作区目录与配置文件"
       />
 
-      <div style={{ padding: '16px', background: 'var(--bg-panel)', borderRadius: '8px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+      <div style={{ padding: '18px', background: 'var(--bg-panel)', borderRadius: '8px', display: 'flex', flexDirection: 'column', gap: '14px', border: '1px solid var(--border)' }}>
         <div style={{ fontSize: '13px', color: 'var(--text-dim)' }}>
-          读取配置指向的 ENEX/HTML 导出并统计条目数与笔记本分布。纯预览，不写数据库。
+          读取配置指向的 ENEX/HTML 导出文件，统计笔记条目数与笔记本分布。纯本地只读分析，不写入数据库。
         </div>
 
-        <button onClick={handlePreview} disabled={busy || !settings.stateDir || !settings.configPath}>
-          {busy ? '预览中...' : '开始预览'}
-        </button>
-
-        {!settings.configPath && (
-          <div style={{ fontSize: '13px', color: 'var(--warning)' }}>
-            ⚠️ 请先在「设置」页填写配置文件（inkmigrate.yaml）路径
-          </div>
-        )}
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <button
+            onClick={handlePreview}
+            disabled={busy || !settings.stateDir || !settings.configPath}
+            className="btn-primary"
+            style={{ minWidth: '110px' }}
+          >
+            <Scan size={15} />
+            <span>{busy ? '预览中...' : '开始预览'}</span>
+          </button>
+        </div>
 
         {error && (
           <div style={{
-            padding: '10px 12px',
-            background: 'rgba(231, 76, 60, 0.15)',
+            padding: '10px 14px',
+            background: 'rgba(239, 68, 68, 0.12)',
             borderRadius: '6px',
-            border: '1px solid rgba(231, 76, 60, 0.3)',
+            border: '1px solid rgba(239, 68, 68, 0.25)',
             color: 'var(--error)',
             fontSize: '13px',
           }}>
@@ -104,25 +121,44 @@ function EvernotePreview({ settings, update, rpcCall, addLog }: Omit<Props, 'act
         )}
 
         {result && (
-          <div style={{ marginTop: '8px', padding: '12px', background: 'var(--bg-hover)', borderRadius: '6px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            <div>
-              <span style={{ fontSize: '24px', fontWeight: 700, color: 'var(--success)' }}>
-                {result.uniqueItems}
-              </span>
-              <span style={{ color: 'var(--text-dim)', fontSize: '12px' }}> 个条目</span>
+          <div style={{ marginTop: '8px', padding: '16px', background: 'var(--bg-hover)', borderRadius: '6px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <span style={{ fontSize: '28px', fontWeight: 700, color: 'var(--success)' }}>
+                  {result.uniqueItems}
+                </span>
+                <span style={{ color: 'var(--text-dim)', fontSize: '13px' }}> 个有效条目</span>
+              </div>
+              {onNavigate && (
+                <button
+                  type="button"
+                  onClick={() => onNavigate('migrate')}
+                  className="btn-primary btn-sm"
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                >
+                  <span>前往迁移</span>
+                  <ArrowRight size={13} />
+                </button>
+              )}
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '13px' }}>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '13px' }}>
+              <div style={{ fontWeight: 600, fontSize: '12px', color: 'var(--text-dim)', marginBottom: '4px' }}>笔记本分布：</div>
               {Object.entries(result.byNotebook)
                 .sort(([a], [b]) => a.localeCompare(b))
                 .map(([nb, count]) => (
-                  <div key={nb} style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span>📁 {nb}</span>
-                    <span style={{ color: 'var(--text-dim)' }}>{count} 条</span>
+                  <div key={nb} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                      <Folder size={14} color="var(--accent)" />
+                      <span>{nb}</span>
+                    </span>
+                    <span style={{ color: 'var(--text-dim)', fontWeight: 500 }}>{count} 篇</span>
                   </div>
                 ))}
             </div>
+
             {result.issues.length > 0 && (
-              <div style={{ fontSize: '12px', color: 'var(--warning)', whiteSpace: 'pre-wrap' }}>
+              <div style={{ fontSize: '12px', color: 'var(--warning)', whiteSpace: 'pre-wrap', background: 'rgba(245, 158, 11, 0.1)', padding: '10px', borderRadius: '4px' }}>
                 ⚠️ {result.issues.length} 条注意事项：
                 {'\n'}
                 {result.issues.slice(0, MAX_ISSUES_SHOWN).join('\n')}
@@ -136,25 +172,26 @@ function EvernotePreview({ settings, update, rpcCall, addLog }: Omit<Props, 'act
   );
 }
 
-function ToutiaoScan({ settings, update, rpcCall, addLog, activePhase, cancel }: Props) {
+function ToutiaoScan({ settings, update, rpcCall, addLog, activePhase, cancel, onNavigate }: Props) {
   const scanning = activePhase === 'scanning';
-  // 本地同步重入守卫：activePhase 要等 setState 重渲染后才生效，
-  // 快速双击会在按钮禁用前重复触发 scan.start
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ uniqueItems: number; terminationReason: string } | null>(null);
+  const [result, setResult] = useState<{
+    uniqueItems: number;
+    terminationReason: string;
+    items: ScanStartResult['items'];
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [searchFilter, setSearchFilter] = useState('');
+  const [showItemList, setShowItemList] = useState(false);
 
-  // 文案不锁定轮数上限：上限由 engine 控制（key 中的 5 仅为原因标识），改配置时文案不漂移
   const reasonLabels: Record<string, string> = {
-    no_new_items_after_5_cycles: '连续多轮无新内容',
+    no_new_items_after_5_cycles: '连续多轮无新内容（已到底）',
     no_load_more: '没有更多内容',
-    cancelled: '已终止',
+    cancelled: '用户已终止',
   };
 
   async function handleScan() {
     if (busy || scanning) return;
-    // 粘贴噪声规范化 + 发送前可读校验（与 LoginPage 同口径）：常见粘贴错误
-    // （地址栏复制丢协议头/首尾空白）在客户端给出中文提示，而非裸 -32602
     const favoritesUrl = normalizeFavoritesUrl(settings.favoritesUrl);
     if (!isSendableFavoritesUrl(favoritesUrl)) {
       const msg = favoritesUrl === ''
@@ -171,15 +208,16 @@ function ToutiaoScan({ settings, update, rpcCall, addLog, activePhase, cancel }:
     setError(null);
     setBusy(true);
     try {
-      const res = await rpcCall('scan.start', {
+      const res = (await rpcCall('scan.start', {
         source: settings.source,
         stateDir: settings.stateDir,
         favoritesUrl,
-      }) as { uniqueItems?: number; terminationReason?: string };
-      // 响应字段做容错归一，避免后端缺字段时渲染路径抛错
+      })) as ScanStartResult;
+
       setResult({
         uniqueItems: res.uniqueItems ?? 0,
         terminationReason: res.terminationReason ?? '',
+        items: Array.isArray(res.items) ? res.items : [],
       });
       addLog('info', `扫描完成：${res.uniqueItems ?? 0} 条`);
     } catch (e) {
@@ -190,6 +228,19 @@ function ToutiaoScan({ settings, update, rpcCall, addLog, activePhase, cancel }:
       setBusy(false);
     }
   }
+
+  type ScanItem = ScanStartResult['items'][number];
+
+  // 过滤展示的条目明细（限制最多渲染前 100 条以确保极速响应）
+  const filteredItems = useMemo(() => {
+    if (!result?.items) return [];
+    const query = searchFilter.trim().toLowerCase();
+    const matches = query
+      ? result.items.filter((item: ScanItem) => item.title.toLowerCase().includes(query))
+      : result.items;
+    return matches.slice(0, 100);
+  }, [result?.items, searchFilter]);
+
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
@@ -202,40 +253,50 @@ function ToutiaoScan({ settings, update, rpcCall, addLog, activePhase, cancel }:
         message="⚠️ 请先填写工作区目录和收藏列表 URL，并确保已登录"
       />
 
-      <div style={{ padding: '16px', background: 'var(--bg-panel)', borderRadius: '8px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+      <div style={{ padding: '18px', background: 'var(--bg-panel)', borderRadius: '8px', display: 'flex', flexDirection: 'column', gap: '14px', border: '1px solid var(--border)' }}>
         <div style={{ fontSize: '13px', color: 'var(--text-dim)' }}>
-          将打开浏览器扫描你的头条收藏列表。扫描数据会保存到数据库，供后续迁移使用。
+          将打开 Chromium 自动化浏览器，加载并滚动解析你的头条收藏列表。扫描结果将安全入库，供后续迁移到 Obsidian。
         </div>
 
-        <div style={{ display: 'flex', gap: '8px' }}>
-          <button onClick={handleScan} disabled={busy || scanning || !settings.stateDir || !settings.favoritesUrl || !settings.loggedIn}>
-            {scanning ? '扫描中...' : '开始扫描'}
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <button
+            onClick={handleScan}
+            disabled={busy || scanning || !settings.stateDir || !settings.favoritesUrl || !settings.loggedIn}
+            className="btn-primary"
+            style={{ minWidth: '110px' }}
+          >
+            <Scan size={15} />
+            <span>{scanning ? '扫描中...' : '开始扫描'}</span>
           </button>
           <button onClick={() => void cancel()} disabled={!scanning} className="btn-danger">
-            终止
+            <Square size={14} />
+            <span>终止</span>
           </button>
         </div>
-
-        {/* favoritesUrl 缺失时 ConfigPrompt 已内联展示填写框，不再另挂死文字提示 */}
 
         {settings.stateDir && settings.favoritesUrl && !settings.loggedIn && (
           <div style={{
-            padding: '10px 12px',
-            background: 'rgba(243, 156, 18, 0.15)',
+            padding: '10px 14px',
+            background: 'rgba(245, 158, 11, 0.12)',
             borderRadius: '6px',
-            border: '1px solid rgba(243, 156, 18, 0.3)',
+            border: '1px solid rgba(245, 158, 11, 0.25)',
             fontSize: '13px',
+            color: 'var(--warning)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
           }}>
-            ⚠️ 请先在「登录」页面完成登录
+            <AlertTriangle size={16} />
+            <span>请先在「登录」页面完成扫码登录，以便扫描你的个人收藏夹。</span>
           </div>
         )}
 
         {error && (
           <div style={{
-            padding: '10px 12px',
-            background: 'rgba(231, 76, 60, 0.15)',
+            padding: '10px 14px',
+            background: 'rgba(239, 68, 68, 0.12)',
             borderRadius: '6px',
-            border: '1px solid rgba(231, 76, 60, 0.3)',
+            border: '1px solid rgba(239, 68, 68, 0.25)',
             color: 'var(--error)',
             fontSize: '13px',
           }}>
@@ -244,13 +305,96 @@ function ToutiaoScan({ settings, update, rpcCall, addLog, activePhase, cancel }:
         )}
 
         {result && (
-          <div style={{ marginTop: '8px', padding: '12px', background: 'var(--bg-hover)', borderRadius: '6px' }}>
-            <div style={{ fontSize: '24px', fontWeight: 700, color: 'var(--success)' }}>
-              {result.uniqueItems}
+          <div style={{ marginTop: '8px', padding: '16px', background: 'var(--bg-hover)', borderRadius: '6px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+              <div>
+                <span style={{ fontSize: '28px', fontWeight: 700, color: 'var(--success)' }}>
+                  {result.uniqueItems}
+                </span>
+                <span style={{ color: 'var(--text-dim)', fontSize: '13px' }}>
+                  {' '}个唯一条目 · {reasonLabels[result.terminationReason] ?? result.terminationReason}
+                </span>
+              </div>
+
+              <div style={{ display: 'flex', gap: '8px' }}>
+                {result.items.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowItemList((prev) => !prev)}
+                    className="btn-secondary btn-sm"
+                  >
+                    {showItemList ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                    <span>{showItemList ? '收起明细' : '查看条目明细'}</span>
+                  </button>
+                )}
+                {onNavigate && (
+                  <button
+                    type="button"
+                    onClick={() => onNavigate('migrate')}
+                    className="btn-primary btn-sm"
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                  >
+                    <span>前往迁移</span>
+                    <ArrowRight size={13} />
+                  </button>
+                )}
+              </div>
             </div>
-            <div style={{ color: 'var(--text-dim)', fontSize: '12px' }}>
-              个唯一条目 · {reasonLabels[result.terminationReason] ?? result.terminationReason}
-            </div>
+
+            {/* 条目明细表格 */}
+            {showItemList && result.items.length > 0 && (
+              <div style={{ borderTop: '1px solid var(--border)', paddingTop: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <div style={{ position: 'relative', flex: 1 }}>
+                    <input
+                      value={searchFilter}
+                      onChange={(e) => setSearchFilter(e.target.value)}
+                      placeholder="搜索文章标题..."
+                      style={{ paddingLeft: '30px', fontSize: '12px', height: '32px' }}
+                    />
+                    <Search size={14} style={{ position: 'absolute', left: '10px', top: '9px', color: 'var(--text-dim)' }} />
+                  </div>
+                  <span style={{ fontSize: '12px', color: 'var(--text-dim)', whiteSpace: 'nowrap' }}>
+                    显示前 {filteredItems.length} / 共 {result.items.length} 篇
+                  </span>
+                </div>
+
+                <div style={{ maxHeight: '220px', overflowY: 'auto', border: '1px solid var(--border)', borderRadius: '4px' }}>
+                  {filteredItems.map((item: ScanItem, idx: number) => (
+                    <div
+                      key={item.externalId ?? idx}
+                      style={{
+                        padding: '6px 10px',
+                        borderBottom: '1px solid rgba(255,255,255,0.05)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: '12px',
+                        fontSize: '12px',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', overflow: 'hidden' }}>
+                        <span className="badge badge-neutral" style={{ fontSize: '10px', padding: '1px 6px' }}>
+                          {item.contentKind}
+                        </span>
+                        <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {item.title || '(无标题)'}
+                        </span>
+                      </div>
+                      <a
+                        href={item.canonicalUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ color: 'var(--accent)', display: 'inline-flex', alignItems: 'center', gap: '2px', flexShrink: 0, textDecoration: 'none' }}
+                        title="在浏览器中打开原文"
+                      >
+                        <ExternalLink size={13} />
+                      </a>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

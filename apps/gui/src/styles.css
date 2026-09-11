@@ -1,19 +1,21 @@
 :root {
   /* 声明深色配色，让 select 弹层/滚动条/自动填充等原生控件表面也走深色 */
   color-scheme: dark;
-  --bg: #1a1a2e;
-  --bg-panel: #16213e;
-  --bg-hover: #0f3460;
-  --text: #e0e0e0;
-  --text-dim: #a0a0a0;
-  --accent: #0f3460;
-  --accent-hover: #1a4a7a;
-  --success: #2ecc71;
-  --warning: #f39c12;
-  --error: #e74c3c;
-  --error-hover: #c0392b;
-  --border: #2a2a4a;
-  --focus: #4a9eff;
+  --bg: #0f172a;
+  --bg-panel: #1e293b;
+  --bg-hover: #334155;
+  --bg-active: #475569;
+  --text: #f8fafc;
+  --text-dim: #94a3b8;
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --success: #10b981;
+  --warning: #f59e0b;
+  --error: #ef4444;
+  --error-hover: #dc2626;
+  --border: #334155;
+  --border-light: #475569;
+  --focus: #3b82f6;
 }
 
 * {
@@ -23,22 +25,49 @@
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
   background: var(--bg);
   color: var(--text);
   font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
 }
 
+/* 现代化滚动条 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-light);
+}
+
+/* 按钮基础样式 */
 button {
   background: var(--accent);
-  color: var(--text);
-  border: none;
+  color: #ffffff;
+  border: 1px solid transparent;
   padding: 8px 16px;
   border-radius: 6px;
   cursor: pointer;
   font-family: inherit;
-  font-size: 14px;
-  transition: background 0.2s;
+  font-size: 13px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
 }
 
 button:hover:not(:disabled) {
@@ -46,16 +75,55 @@ button:hover:not(:disabled) {
 }
 
 button:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
+}
+
+/* 语义分类按钮 */
+button.btn-primary {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+button.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+button.btn-secondary {
+  background: var(--bg-hover);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+button.btn-secondary:hover:not(:disabled) {
+  background: var(--bg-active);
+  border-color: var(--border-light);
+}
+
+button.btn-ghost {
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid transparent;
+}
+
+button.btn-ghost:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
 button.btn-danger {
   background: var(--error);
+  color: #ffffff;
 }
 
 button.btn-danger:hover:not(:disabled) {
   background: var(--error-hover);
+}
+
+button.btn-sm {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 4px;
 }
 
 /* 文本类输入控件（checkbox/radio/file 保持原生外观，避免被 width:100% 拉伸） */
@@ -67,22 +135,66 @@ select {
   border: 1px solid var(--border);
   padding: 8px 12px;
   border-radius: 6px;
-  font-size: 14px;
+  font-size: 13px;
   font-family: inherit;
   width: 100%;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-/* 高对比焦点环：仅靠 border 变色在深色主题下难以辨识 */
-input:focus-visible, textarea:focus-visible, select:focus-visible {
+input:hover:not(:disabled),
+textarea:hover:not(:disabled),
+select:hover:not(:disabled) {
+  border-color: var(--border-light);
+}
+
+/* 高对比焦点环 */
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 1px;
   border-color: var(--focus);
 }
 
-/* 按钮同样补焦点环：键盘导航时不依赖各浏览器不一致的默认描边 */
 button:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
+}
+
+/* 徽标 / 标签 */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.badge-success {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--success);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.badge-warning {
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--warning);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.badge-error {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--error);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.badge-neutral {
+  background: var(--bg-hover);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
 }
 
 /* 减少动效偏好：关闭过渡动画（!important 用于覆盖组件内联 transition） */

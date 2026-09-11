@@ -9,7 +9,9 @@ export type {
   AuthLoginResult,
   AuthStatusResult,
   HealthDegradedNotification,
+  ScanStartResult,
 } from '@inkmigrate/protocol';
+
 
 import type { LogNotification } from '@inkmigrate/protocol';
 
