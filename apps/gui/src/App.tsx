@@ -13,6 +13,9 @@ import { useSidecar } from './hooks/useSidecar.js';
 import { useLoginStatus } from './hooks/useLoginStatus.js';
 import type { PageId } from './lib/types.js';
 
+// macOS 用 Overlay 标题栏(红绿灯叠在顶栏上),需给按钮留出左侧空间;其余平台保留原生标题栏
+const isMac = /Mac/i.test(navigator.userAgent);
+
 export default function App() {
   const [page, setPage] = useState<PageId>('login');
   const { settings, update } = useSettings();
@@ -25,28 +28,32 @@ export default function App() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
-      {/* 顶栏 */}
-      <header style={{
-        padding: '8px 16px',
-        background: 'var(--bg-panel)',
-        display: 'flex',
-        alignItems: 'center',
-        gap: '12px',
-        borderBottom: '1px solid var(--border)',
-      }}>
-        <img src="/logo.png" alt="InkMigrate 墨迁" style={{ width: '20px', height: '20px', borderRadius: '4px' }} />
-        <span style={{ fontWeight: 700, fontSize: '16px' }}>InkMigrate 墨迁</span>
-        <span style={{ flex: 1 }} />
+      {/* 顶栏：兼作窗口拖拽区（data-tauri-drag-region），子元素统一 pointer-events:none 以免挡住拖拽 */}
+      <header
+        data-tauri-drag-region
+        style={{
+          padding: `8px 16px 8px ${isMac ? 78 : 16}px`,
+          background: 'var(--bg-panel)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '12px',
+          borderBottom: '1px solid var(--border)',
+        }}
+      >
+        <img src="/logo.png" alt="InkMigrate 墨迁" style={{ width: '20px', height: '20px', borderRadius: '4px', pointerEvents: 'none' }} />
+        <span style={{ fontWeight: 700, fontSize: '16px', pointerEvents: 'none' }}>InkMigrate 墨迁</span>
+        <span style={{ flex: 1, pointerEvents: 'none' }} />
         {/* evernote 文件源无登录流程，不显示登录指示（否则永远误显示「未登录」） */}
         {settings.stateDir && !isEvernote && (
           <span style={{
             fontSize: '12px',
             color: settings.loggedIn ? 'var(--success)' : 'var(--text-dim)',
+            pointerEvents: 'none',
           }}>
             ● {settings.loggedIn ? '已登录' : '未登录'}
           </span>
         )}
-        {busy && <span style={{ color: 'var(--warning)', fontSize: '12px' }}>● 处理中</span>}
+        {busy && <span style={{ color: 'var(--warning)', fontSize: '12px', pointerEvents: 'none' }}>● 处理中</span>}
       </header>
 
       {/* 主区域 */}

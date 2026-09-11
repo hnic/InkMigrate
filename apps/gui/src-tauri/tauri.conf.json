@@ -12,7 +12,8 @@
   "app": {
     "windows": [
       {
-        "title": "InkMigrate 墨迁",
+        "title": "",
+        "titleBarStyle": "Overlay",
         "width": 1000,
         "height": 700,
         "resizable": true,
