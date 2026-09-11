@@ -61,6 +61,11 @@ describe('redactor (§19.2)', () => {
     const samplePath = `${homedir()}/secret/file`;
     expect(r(samplePath)).not.toContain(homedir());
     expect(r(samplePath)).toContain('[HOME]');
+    // 反斜杠分隔符形态（Windows 日志实际形态；曾因正则类 [\/] 只匹配 / 而整体
+    // 漏脱敏，CI windows 腿回归发现）。homedir 的 / 换成 \ 构造，全平台可验证。
+    const backslashPath = `${homedir().replace(/\//g, '\\')}/secret/file`;
+    expect(r(backslashPath)).not.toContain(homedir());
+    expect(r(backslashPath)).toContain('[HOME]');
   });
 
   it('passes through innocuous content', () => {

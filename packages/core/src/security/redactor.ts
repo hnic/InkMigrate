@@ -56,13 +56,15 @@ export function createRedactor(): Redactor {
   // 大小写不敏感 + 双分隔符容忍：Windows/macOS 文件系统大小写不敏感，日志中
   // `c:\users\name` / `C:/Users/name` / `C:\Users\name` 变体都会出现；先把
   // 分隔符归一为 `/` 再转义、最后展开为字符类，两种斜杠与任意大小写均命中。
+  // 类内必须写两个反斜杠：RegExp 把单个 `\/` 解析为"转义的 /"（等价 [/]，
+  // 不匹配 \），导致 Windows 反斜杠路径完全漏脱敏（CI windows 腿回归发现）。
   const homeRe =
     home.length > 1 && home !== '/'
       ? new RegExp(
           home
             .replace(/[\\/]/g, '/')
             .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-            .replace(/\//g, '[\\/]'),
+            .replace(/\//g, '[\\\\/]'),
           'gi',
         )
       : null;
