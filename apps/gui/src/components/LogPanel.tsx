@@ -1,54 +1,59 @@
-import { memo, useEffect, useRef } from 'react';
+import { memo, useEffect, useRef, useState, useMemo } from 'react';
 import type { CSSProperties } from 'react';
 import type { LogEntry } from '../lib/types.js';
+import { Terminal, ChevronUp, ChevronDown, Trash2, Copy, Check } from 'lucide-react';
 
-/** level → 颜色：按 level 联合类型建表（模块级常量，避免每次渲染重建），
- *  新增 level 时编译期即可发现遗漏。 */
 const LOG_COLORS: Record<LogEntry['level'], string> = {
   info: 'var(--text)',
   warn: 'var(--warning)',
   error: 'var(--error)',
 };
 
-// 静态样式提升到模块级（同 LOG_COLORS）：日志追加会触发整面板重渲染
 const ROOT_STYLE: CSSProperties = {
-  flex: 1,
   display: 'flex',
   flexDirection: 'column',
   background: 'var(--bg-panel)',
   borderRadius: '8px',
-  padding: '12px',
-  minHeight: '0',
+  border: '1px solid var(--border)',
+  overflow: 'hidden',
+  height: '100%',
 };
-const HEADER_STYLE: CSSProperties = { fontWeight: 600, marginBottom: '8px', fontSize: '13px' };
+
 const SCROLL_STYLE: CSSProperties = {
   flex: 1,
   overflowY: 'auto',
-  fontFamily: 'ui-monospace, "SF Mono", monospace',
+  fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace',
   fontSize: '12px',
-  lineHeight: '1.7',
+  lineHeight: '1.65',
+  padding: '8px 12px',
 };
-const TIMESTAMP_STYLE: CSSProperties = { color: 'var(--text-dim)' };
-const EMPTY_STYLE: CSSProperties = { color: 'var(--text-dim)' };
 
-/** 单条日志行。条目不可变且 id 稳定，memo 后仅新增行重渲染/重格式化时间戳。 */
+const TIMESTAMP_STYLE: CSSProperties = { color: 'var(--text-dim)', marginRight: '6px' };
+const EMPTY_STYLE: CSSProperties = { color: 'var(--text-dim)', fontStyle: 'italic' };
+
 const LogRow = memo(function LogRow({ log }: { log: LogEntry }) {
   return (
-    <div style={{ color: LOG_COLORS[log.level] ?? 'var(--text)' }}>
+    <div style={{ color: LOG_COLORS[log.level] ?? 'var(--text)', wordBreak: 'break-all' }}>
       <span style={TIMESTAMP_STYLE}>
-        {new Date(log.timestamp).toLocaleTimeString('zh-CN', { hour12: false })}{' '}
+        {new Date(log.timestamp).toLocaleTimeString('zh-CN', { hour12: false })}
       </span>
       {log.message}
     </div>
   );
 });
 
-export function LogPanel({ logs }: { logs: LogEntry[] }) {
+interface LogPanelProps {
+  logs: LogEntry[];
+  collapsed: boolean;
+  onToggleCollapse: () => void;
+  onClear?: () => void;
+}
+
+export function LogPanel({ logs, collapsed, onToggleCollapse, onClear }: LogPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  // 记录「用户上一次滚动后」是否位于底部（即新内容插入前的状态）：
-  // 若在 effect 里事后测量，一次追加超过 40px 的内容（多条日志/换行消息）
-  // 会被误判为用户已上翻，自动跟随悄悄失效
   const wasAtBottomRef = useRef(true);
+  const [filter, setFilter] = useState<'all' | 'error' | 'warn' | 'info'>('all');
+  const [copied, setCopied] = useState(false);
 
   const handleScroll = () => {
     const el = containerRef.current;
@@ -56,20 +61,190 @@ export function LogPanel({ logs }: { logs: LogEntry[] }) {
     wasAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
   };
 
+  const filteredLogs = useMemo(() => {
+    if (filter === 'all') return logs;
+    return logs.filter((log) => log.level === filter);
+  }, [logs, filter]);
+
   useEffect(() => {
     const el = containerRef.current;
-    // 直接设置容器 scrollTop，不用 scrollIntoView（会连带滚动整页）
-    if (el && wasAtBottomRef.current) el.scrollTop = el.scrollHeight;
-  }, [logs]);
+    if (el && wasAtBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [filteredLogs]);
+
+  const handleCopy = async () => {
+    if (logs.length === 0) return;
+    const text = logs
+      .map(
+        (l) =>
+          `[${new Date(l.timestamp).toISOString()}] [${l.level.toUpperCase()}] ${l.message}`
+      )
+      .join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.warn('复制日志失败:', err);
+    }
+  };
+
+  const latestLog = logs[logs.length - 1];
+
+  // 折叠模式下只渲染紧凑条
+  if (collapsed) {
+    return (
+      <div
+        onClick={onToggleCollapse}
+        style={{
+          height: '36px',
+          background: 'var(--bg-panel)',
+          borderRadius: '6px',
+          border: '1px solid var(--border)',
+          display: 'flex',
+          alignItems: 'center',
+          padding: '0 12px',
+          gap: '10px',
+          cursor: 'pointer',
+          userSelect: 'none',
+          fontSize: '12px',
+        }}
+        title="点击展开日志控制台"
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600, color: 'var(--text-dim)' }}>
+          <Terminal size={14} />
+          <span>控制台</span>
+          <span className="badge badge-neutral" style={{ fontSize: '10px', padding: '0 5px' }}>
+            {logs.length}
+          </span>
+        </div>
+
+        <div style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: latestLog ? LOG_COLORS[latestLog.level] : 'var(--text-dim)', opacity: 0.9 }}>
+          {latestLog ? (
+            <>
+              <span style={TIMESTAMP_STYLE}>
+                {new Date(latestLog.timestamp).toLocaleTimeString('zh-CN', { hour12: false })}
+              </span>
+              {latestLog.message}
+            </>
+          ) : (
+            '就绪'
+          )}
+        </div>
+
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleCollapse();
+          }}
+          className="btn-ghost btn-sm"
+          style={{ padding: '4px' }}
+        >
+          <ChevronUp size={15} />
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div style={ROOT_STYLE}>
-      <div style={HEADER_STYLE}>日志</div>
+      {/* 顶部工具栏 */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: '8px 12px',
+        borderBottom: '1px solid var(--border)',
+        background: 'rgba(0,0,0,0.15)',
+        fontSize: '12px',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600 }}>
+          <Terminal size={15} />
+          <span>控制台日志</span>
+          <span className="badge badge-neutral" style={{ fontSize: '10px' }}>
+            {logs.length}
+          </span>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          {/* 级别过滤 */}
+          <div style={{ display: 'flex', borderRadius: '4px', overflow: 'hidden', border: '1px solid var(--border)', background: 'var(--bg)' }}>
+            <button
+              type="button"
+              onClick={() => setFilter('all')}
+              className={filter === 'all' ? 'btn-primary btn-sm' : 'btn-ghost btn-sm'}
+              style={{ borderRadius: 0, padding: '2px 8px', fontSize: '11px' }}
+            >
+              全部
+            </button>
+            <button
+              type="button"
+              onClick={() => setFilter('error')}
+              className={filter === 'error' ? 'btn-danger btn-sm' : 'btn-ghost btn-sm'}
+              style={{ borderRadius: 0, padding: '2px 8px', fontSize: '11px' }}
+            >
+              错误
+            </button>
+            <button
+              type="button"
+              onClick={() => setFilter('warn')}
+              className={filter === 'warn' ? 'btn-secondary btn-sm' : 'btn-ghost btn-sm'}
+              style={{ borderRadius: 0, padding: '2px 8px', fontSize: '11px', color: filter === 'warn' ? 'var(--warning)' : undefined }}
+            >
+              警告
+            </button>
+          </div>
+
+          {/* 复制 */}
+          <button
+            type="button"
+            onClick={handleCopy}
+            disabled={logs.length === 0}
+            className="btn-ghost btn-sm"
+            title="复制全部日志"
+            style={{ padding: '4px 6px', display: 'inline-flex', alignItems: 'center', gap: '3px' }}
+          >
+            {copied ? <Check size={13} color="var(--success)" /> : <Copy size={13} />}
+            <span>{copied ? '已复制' : '复制'}</span>
+          </button>
+
+          {/* 清空 */}
+          {onClear && (
+            <button
+              type="button"
+              onClick={onClear}
+              disabled={logs.length === 0}
+              className="btn-ghost btn-sm"
+              title="清空当前日志面板"
+              style={{ padding: '4px 6px' }}
+            >
+              <Trash2 size={13} />
+            </button>
+          )}
+
+          {/* 折叠 */}
+          <button
+            type="button"
+            onClick={onToggleCollapse}
+            className="btn-ghost btn-sm"
+            title="折叠日志"
+            style={{ padding: '4px' }}
+          >
+            <ChevronDown size={15} />
+          </button>
+        </div>
+      </div>
+
+      {/* 滚动内容区 */}
       <div ref={containerRef} onScroll={handleScroll} style={SCROLL_STYLE}>
-        {logs.length === 0 ? (
-          <span style={EMPTY_STYLE}>等待操作...</span>
+        {filteredLogs.length === 0 ? (
+          <span style={EMPTY_STYLE}>
+            {logs.length === 0 ? '等待操作...' : '无匹配该级别的日志'}
+          </span>
         ) : (
-          logs.map((log) => <LogRow key={log.id} log={log} />)
+          filteredLogs.map((log) => <LogRow key={log.id} log={log} />)
         )}
       </div>
     </div>

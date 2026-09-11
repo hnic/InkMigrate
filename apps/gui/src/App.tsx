@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Sidebar } from './components/Sidebar.js';
 import { ProgressBar } from './components/ProgressBar.js';
 import { LogPanel } from './components/LogPanel.js';
@@ -11,24 +11,38 @@ import { SettingsPage } from './components/pages/SettingsPage.js';
 import { useSettings } from './hooks/useSettings.js';
 import { useSidecar } from './hooks/useSidecar.js';
 import { useLoginStatus } from './hooks/useLoginStatus.js';
-import type { PageId } from './lib/types.js';
+import type { PageId, SourceAdapterKind } from './lib/types.js';
+import { getSourceSwitchPatch } from './lib/gui-helpers.js';
+import { Layers } from 'lucide-react';
 
-// macOS 用 Overlay 标题栏(红绿灯叠在顶栏上),需给按钮留出左侧空间;其余平台保留原生标题栏
 const isMac = /Mac/i.test(navigator.userAgent);
 
 export default function App() {
   const [page, setPage] = useState<PageId>('login');
+  const [logCollapsed, setLogCollapsed] = useState(true);
+
   const { settings, update } = useSettings();
-  const { rpcCall, progress, logs, busy, activePhase, healthDegraded, addLog, cancel } = useSidecar();
+  const { rpcCall, progress, logs, busy, activePhase, healthDegraded, addLog, cancel, clearLogs } = useSidecar();
   const { refresh: refreshLogin, profilePath } = useLoginStatus({ settings, update });
-  // Evernote 文件源无登录/清理步骤：login 与 cleanup 页均重定向到扫描
+
   const isEvernote = settings.sourceAdapter === 'evernote';
   const effectivePage: PageId =
     isEvernote && (page === 'login' || page === 'cleanup') ? 'scan' : page;
 
+  // 任务开始运行时自动展开日志抽屉方便观察，完成后不强制折叠
+  useEffect(() => {
+    if (busy) {
+      setLogCollapsed(false);
+    }
+  }, [busy]);
+
+  const handleSourceChange = (adapter: SourceAdapterKind) => {
+    update(getSourceSwitchPatch(adapter));
+  };
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
-      {/* 顶栏：兼作窗口拖拽区（data-tauri-drag-region），子元素统一 pointer-events:none 以免挡住拖拽 */}
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'var(--bg)' }}>
+      {/* 顶栏：兼作窗口拖拽区 */}
       <header
         data-tauri-drag-region
         style={{
@@ -38,38 +52,67 @@ export default function App() {
           alignItems: 'center',
           gap: '12px',
           borderBottom: '1px solid var(--border)',
+          height: '46px',
         }}
       >
         <img src="/logo.png" alt="InkMigrate 墨迁" style={{ width: '20px', height: '20px', borderRadius: '4px', pointerEvents: 'none' }} />
-        <span style={{ fontWeight: 700, fontSize: '16px', pointerEvents: 'none' }}>InkMigrate 墨迁</span>
+        <span style={{ fontWeight: 700, fontSize: '15px', pointerEvents: 'none' }}>InkMigrate 墨迁</span>
+
+        {/* 顶部轻量来源切换器 */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginLeft: '12px' }}>
+          <Layers size={14} color="var(--text-dim)" />
+          <select
+            value={settings.sourceAdapter ?? 'toutiao'}
+            onChange={(e) => handleSourceChange(e.target.value as SourceAdapterKind)}
+            style={{
+              padding: '2px 8px',
+              fontSize: '12px',
+              height: '26px',
+              width: '160px',
+              background: 'var(--bg)',
+              borderColor: 'var(--border)',
+            }}
+          >
+            <option value="toutiao">今日头条</option>
+            <option value="evernote">Evernote / 印象笔记</option>
+          </select>
+        </div>
+
         <span style={{ flex: 1, pointerEvents: 'none' }} />
-        {/* evernote 文件源无登录流程，不显示登录指示（否则永远误显示「未登录」） */}
+
+        {/* 登录与运行指示 */}
         {settings.stateDir && !isEvernote && (
-          <span style={{
-            fontSize: '12px',
-            color: settings.loggedIn ? 'var(--success)' : 'var(--text-dim)',
-            pointerEvents: 'none',
-          }}>
+          <span
+            className={`badge ${settings.loggedIn ? 'badge-success' : 'badge-neutral'}`}
+            style={{ pointerEvents: 'none' }}
+          >
             ● {settings.loggedIn ? '已登录' : '未登录'}
           </span>
         )}
-        {busy && <span style={{ color: 'var(--warning)', fontSize: '12px', pointerEvents: 'none' }}>● 处理中</span>}
+        {busy && (
+          <span className="badge badge-warning" style={{ pointerEvents: 'none' }}>
+            ● 处理中 ({activePhase ?? 'busy'})
+          </span>
+        )}
       </header>
 
       {/* 主区域 */}
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
         {/* 侧边栏 */}
         <aside style={{
-          padding: '12px 8px',
+          padding: '12px 10px',
           background: 'var(--bg-panel)',
           borderRight: '1px solid var(--border)',
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'space-between',
         }}>
           <Sidebar current={effectivePage} onSelect={setPage} sourceAdapter={settings.sourceAdapter} />
         </aside>
 
         {/* 内容区 */}
-        <main style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '20px', gap: '12px', overflow: 'hidden' }}>
-          {/* 引擎降级提示（uncaughtException 后显示，需重启应用解除） */}
+        <main style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '16px 20px', gap: '12px', overflow: 'hidden' }}>
+          {/* 引擎降级提示 */}
           {healthDegraded !== null && (
             <div role="alert" style={{
               padding: '10px 14px',
@@ -96,18 +139,67 @@ export default function App() {
           <ProgressBar progress={progress} />
 
           {/* 当前页面 */}
-          <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
-            {effectivePage === 'login' && <LoginPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} refreshLogin={refreshLogin} profilePath={profilePath} />}
-            {effectivePage === 'scan' && <ScanPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} activePhase={activePhase} cancel={cancel} />}
-            {effectivePage === 'migrate' && <MigratePage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} activePhase={activePhase} cancel={cancel} />}
-            {effectivePage === 'cleanup' && <CleanupPage settings={settings} update={update} rpcCall={rpcCall} addLog={addLog} busy={busy} activePhase={activePhase} cancel={cancel} />}
+          <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, paddingRight: '4px' }}>
+            {effectivePage === 'login' && (
+              <LoginPage
+                settings={settings}
+                update={update}
+                rpcCall={rpcCall}
+                addLog={addLog}
+                refreshLogin={refreshLogin}
+                profilePath={profilePath}
+                onNavigate={setPage}
+              />
+            )}
+            {effectivePage === 'scan' && (
+              <ScanPage
+                settings={settings}
+                update={update}
+                rpcCall={rpcCall}
+                addLog={addLog}
+                activePhase={activePhase}
+                cancel={cancel}
+                onNavigate={setPage}
+              />
+            )}
+            {effectivePage === 'migrate' && (
+              <MigratePage
+                settings={settings}
+                update={update}
+                rpcCall={rpcCall}
+                addLog={addLog}
+                activePhase={activePhase}
+                cancel={cancel}
+                onNavigate={setPage}
+              />
+            )}
+            {effectivePage === 'cleanup' && (
+              <CleanupPage
+                settings={settings}
+                update={update}
+                rpcCall={rpcCall}
+                addLog={addLog}
+                busy={busy}
+                activePhase={activePhase}
+                cancel={cancel}
+              />
+            )}
             {effectivePage === 'report' && <ReportPage settings={settings} rpcCall={rpcCall} />}
             {effectivePage === 'settings' && <SettingsPage settings={settings} update={update} />}
           </div>
 
-          {/* 日志面板（始终显示在底部） */}
-          <div style={{ height: '180px', flexShrink: 0 }}>
-            <LogPanel logs={logs} />
+          {/* 可折叠的底部日志面板抽屉 */}
+          <div style={{
+            height: logCollapsed ? '36px' : '190px',
+            flexShrink: 0,
+            transition: 'height 0.2s ease',
+          }}>
+            <LogPanel
+              logs={logs}
+              collapsed={logCollapsed}
+              onToggleCollapse={() => setLogCollapsed((prev) => !prev)}
+              onClear={clearLogs}
+            />
           </div>
         </main>
       </div>
