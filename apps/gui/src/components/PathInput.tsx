@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { FolderOpen, FileSearch, ExternalLink, CheckCircle2, AlertCircle } from 'lucide-react';
 
@@ -28,6 +28,22 @@ export function PathInput({
   const [exists, setExists] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showError = useCallback((msg: string) => {
+    setActionError(msg);
+    if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+    errorTimerRef.current = setTimeout(() => {
+      setActionError(null);
+      errorTimerRef.current = null;
+    }, 4000);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+    };
+  }, []);
 
   // 防抖检查路径是否存在
   useEffect(() => {
@@ -57,6 +73,7 @@ export function PathInput({
     if (disabled || busy) return;
     setBusy(true);
     setActionError(null);
+    if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
     try {
       const command = type === 'directory' ? 'pick_directory' : 'pick_file';
       const picked = (await invoke(command, {
@@ -69,25 +86,24 @@ export function PathInput({
       }
     } catch (err) {
       console.warn('选择路径失败:', err);
-      setActionError(`操作失败: ${err instanceof Error ? err.message : String(err)}`);
-      setTimeout(() => setActionError(null), 4000);
+      showError(`操作失败: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setBusy(false);
     }
-  }, [disabled, busy, type, dialogTitle, value, onChange]);
+  }, [disabled, busy, type, dialogTitle, value, onChange, showError]);
 
   const handleOpen = useCallback(async () => {
     const trimmed = value?.trim();
     if (!trimmed) return;
     setActionError(null);
+    if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
     try {
       await invoke('open_in_folder', { path: trimmed });
     } catch (err) {
       console.warn('在文件管理器中打开失败:', err);
-      setActionError(`打开失败: ${err instanceof Error ? err.message : String(err)}`);
-      setTimeout(() => setActionError(null), 4000);
+      showError(`打开失败: ${err instanceof Error ? err.message : String(err)}`);
     }
-  }, [value]);
+  }, [value, showError]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', ...style }}>

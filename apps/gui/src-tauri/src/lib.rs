@@ -94,7 +94,8 @@ async fn open_in_folder(path: String) -> Result<(), String> {
 async fn open_url(url: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         let trimmed = url.trim();
-        if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+        let lower = trimmed.to_ascii_lowercase();
+        if !lower.starts_with("http://") && !lower.starts_with("https://") {
             return Err("仅支持打开 http:// 或 https:// 协议的网络链接".to_string());
         }
         #[cfg(target_os = "macos")]

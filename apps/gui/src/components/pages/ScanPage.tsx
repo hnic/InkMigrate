@@ -232,14 +232,17 @@ function ToutiaoScan({ settings, update, rpcCall, addLog, activePhase, cancel, o
 
   type ScanItem = ScanStartResult['items'][number];
 
-  // 过滤展示的条目明细（限制最多渲染前 100 条以确保极速响应）
-  const filteredItems = useMemo(() => {
-    if (!result?.items) return [];
+  // 过滤展示的条目明细（限制最多渲染前 100 条以确保极速响应，同时保留真实命中总数）
+  const { filteredItems, matchCount } = useMemo(() => {
+    if (!result?.items) return { filteredItems: [] as ScanItem[], matchCount: 0 };
     const query = searchFilter.trim().toLowerCase();
     const matches = query
       ? result.items.filter((item: ScanItem) => item.title.toLowerCase().includes(query))
       : result.items;
-    return matches.slice(0, 100);
+    return {
+      filteredItems: matches.slice(0, 100),
+      matchCount: matches.length,
+    };
   }, [result?.items, searchFilter]);
 
 
@@ -357,8 +360,10 @@ function ToutiaoScan({ settings, update, rpcCall, addLog, activePhase, cancel, o
                   </div>
                   <span style={{ fontSize: '12px', color: 'var(--text-dim)', whiteSpace: 'nowrap' }}>
                     {searchFilter.trim()
-                      ? `匹配 ${filteredItems.length} 篇 (总计 ${result.items.length} 篇)`
-                      : `共 ${result.items.length} 篇 (预览前 ${filteredItems.length} 篇)`}
+                      ? `匹配 ${matchCount} 篇${matchCount > 100 ? '（渲染前 100 篇）' : ''} / 共 ${result.items.length} 篇`
+                      : result.items.length > 100
+                        ? `共 ${result.items.length} 篇（渲染前 100 篇）`
+                        : `共 ${result.items.length} 篇`}
                   </span>
                 </div>
 
