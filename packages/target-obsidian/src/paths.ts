@@ -104,6 +104,10 @@ export function noteRelativePath(i: NotePathInput): string {
     maxFilenameLength: i.config.maxFilenameLength,
   });
   const filename = `${body}.md`;
+  // flat：用户显式选择平铺——省略 source/内容类型/笔记本目录段，仅剩文件名
+  if (i.config.notePathLayout === 'flat') {
+    return filename;
+  }
   const safeSourceId = sanitizePathSegment(i.sourceInstanceId);
   // importSubdir 为空 = 省略该段（笔记位于 <sourceInstanceId>/... 下），
   // 不再回退为 Vault 根平铺（索引生成器同语义）

@@ -318,3 +318,31 @@ describe('detectLinkBase（vaultPath 相对 Obsidian vault 根的前缀探测）
     expect(detectLinkBase(root)).toBe('');
   });
 });
+
+
+describe('notePathLayout=flat（笔记平铺 vaultPath 根）', () => {
+  it('flat：路径仅剩文件名，无 source/内容类型段', () => {
+    const p = noteRelativePath({
+      config: { ...baseConfig, importSubdir: '', notePathLayout: 'flat', filenameShortId: false },
+      sourceInstanceId: 'toutiao-main',
+      contentKind: 'article',
+      title: '标题',
+      stableKey: 'k',
+      stableShortId: 'aaaaaaaaaa',
+    });
+    expect(p).toBe('标题.md');
+  });
+
+  it('flat 下 Evernote 笔记本目录段同样省略（用户显式选择平铺）', () => {
+    const p = noteRelativePath({
+      config: { ...baseConfig, importSubdir: '', notePathLayout: 'flat', filenameShortId: false },
+      sourceInstanceId: 'evernote-archive',
+      contentKind: 'note',
+      title: '笔记甲',
+      stableKey: 'k2',
+      stableShortId: 'bbbbbbbbbb',
+      notePathSegments: ['Work', 'Projects'],
+    });
+    expect(p).toBe('笔记甲.md');
+  });
+});

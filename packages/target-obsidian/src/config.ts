@@ -69,6 +69,19 @@ export const ObsidianTargetConfigSchema = z
     /** §13.4 文件名主体最大长度，默认 100。 */
     maxFilenameLength: z.number().int().positive().default(100),
     /**
+     * 笔记目录布局：
+     * - `by-source`（默认）：`<sourceInstanceId>/<内容类型|笔记本目录段>/<标题>.md`
+     * - `flat`：笔记直接平铺在 vaultPath 根（仅 `<标题>.md`）。同标题靠 -2/-3
+     *   兜底；跨来源同标题也会撞（flat 适合单来源、与既有平铺快照合并的场景）。
+     * 附件目录布局不受此开关影响（始终 Attachments/<sourceInstanceId>/im-…）。
+     */
+    notePathLayout: z.enum(['by-source', 'flat']).default('by-source'),
+    /**
+     * §13.8 是否生成收藏索引（分片 _索引/ + 入口收藏索引.md）。flat 单目录
+     * 场景通常不需要（文件浏览器即索引），默认 true 保持现行为。
+     */
+    generateIndex: z.boolean().default(true),
+    /**
      * §13.4 笔记文件名是否携带 stableShortId 后缀（`标题-<shortId>.md`）。
      * 默认 false（纯标题名，75cfaa6 口径——用户对输出文件名的一贯要求；
      * d8c3f7b 曾按 PRD 设为 true 造成短哈希后缀回归）。true 时同目录同名

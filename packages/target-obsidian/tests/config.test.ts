@@ -16,6 +16,9 @@ describe('ObsidianTargetConfigSchema (§13.2/§13.7/§13.9)', () => {
     // 即 GUI 用户的实际行为；d8c3f7b 曾按 PRD §13.4 设回 true 导致短哈希后缀
     // 回归（2026-09-11 实际迁移文件名带 -<sha256前8位>），钉住防止再次回退
     expect(cfg.filenameShortId).toBe(false);
+    // 布局开关默认保持现行为（GUI legacyTargetConfig 单独接线 flat）
+    expect(cfg.notePathLayout).toBe('by-source');
+    expect(cfg.generateIndex).toBe(true);
     expect(cfg.collectionMapping).toEqual({ toTags: false, toFolders: false });
   });
 

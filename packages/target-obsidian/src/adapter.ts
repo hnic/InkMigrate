@@ -562,6 +562,8 @@ async function verifyNote(
  */
 async function renderIndexNotes(ctx: TargetContext): Promise<TargetWriteResult[]> {
   const config = parseConfig(ctx);
+  // generateIndex=false：用户显式关闭（flat 单目录场景，文件浏览器即索引）
+  if (!config.generateIndex) return [];
   validateVault(config.vaultPath);
   const sourceInstanceId = ctx.sourceInstanceId;
   const inputs = ctx.indexEntries;

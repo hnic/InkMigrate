@@ -5,7 +5,7 @@ import {
 } from '../src/index.js';
 
 describe('wiring smoke', () => {
-  it('legacyTargetConfig 返回平铺 Vault 布局的 7 键配置', () => {
+  it('legacyTargetConfig 返回平铺 Vault 布局的 9 键配置（flat + 无索引）', () => {
     expect(legacyTargetConfig('/tmp/vault')).toEqual({
       vaultPath: '/tmp/vault',
       importSubdir: '',
@@ -14,6 +14,9 @@ describe('wiring smoke', () => {
       overwritePolicy: 'preserve',
       collectionMapping: { toTags: false, toFolders: false },
       maxFilenameLength: 100,
+      // 2026-09-11 用户需求：平铺根 + 不生成收藏索引（yaml config 可改回）
+      notePathLayout: 'flat',
+      generateIndex: false,
     });
   });
 

@@ -277,6 +277,17 @@ describe('createObsidianTarget (§8.4 + §13)', () => {
       expect(existsSync(abs)).toBe(true);
     });
 
+    it('generateIndex=false 时不生成任何索引（flat 单目录场景）', async () => {
+      const result = await adapter.renderIndex!({
+        ...ctx(vault.vaultPath, { generateIndex: false }),
+        sourceInstanceId: 's1',
+        indexEntries: [
+          { title: '文章1', relativePath: '文章1.md', contentKind: 'article', collections: [] },
+        ],
+      });
+      expect(result).toEqual([]);
+    });
+
     it('无 indexEntries 时返回空数组（不报错）', async () => {
       const result = await adapter.renderIndex!({
         ...ctx(vault.vaultPath),

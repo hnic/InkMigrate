@@ -189,6 +189,10 @@ export function legacyTargetConfig(vaultPath: string): Record<string, unknown> {
     overwritePolicy: 'preserve',
     collectionMapping: { toTags: false, toFolders: false },
     maxFilenameLength: 100,
+    // 2026-09-11 用户需求：头条笔记平铺 vaultPath 根（无来源/类型分层、无索引），
+    // 与既有历史平铺快照合并；yaml config 用户可自行改回 by-source/true
+    notePathLayout: 'flat',
+    generateIndex: false,
   };
 }
 
