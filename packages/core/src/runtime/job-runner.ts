@@ -1,4 +1,6 @@
 import type { DB } from '../storage/database.js';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import type {
   SourceAdapter,
   TargetAdapter,
@@ -710,9 +712,27 @@ async function processOneItem(
     i.ref.fingerprint,
   );
 
-  // §17.2 幂等：已 verified 的条目直接跳过（断点续跑场景）
+  // §17.2 幂等：已 verified 的条目直接跳过（断点续跑场景）。但 DB 说 verified
+  // 不等于文件还在——用户手动删除/移动 Vault 文件后 artifact 记录仍指向旧路径，
+  // 静默跳过会让重跑"completed"却 0 文件落盘（2026-09-11 实测：删短 ID 批次后
+  // 重跑报 440 verified、实际无产出）。跳过前用 note artifact 的相对路径到
+  // vaultPath 下核实磁盘存在；文件缺失或无 artifact 记录均降级为重迁移
+  //（走 extract → write → verify 全流程，artifact 由 commitTxn 幂等 UPDATE 刷新）。
   if (existingItem !== undefined && existingItem.status === 'verified') {
-    return 'verified';
+    const artifact =
+      existingItem.id !== undefined
+        ? i.targetArtifacts.findVerifiedNoteArtifact(existingItem.id, i.targetInstanceId)
+        : undefined;
+    const fileStillThere =
+      artifact !== undefined &&
+      existsSync(join(i.targetContext.vaultPath, artifact.relativePath));
+    if (fileStillThere) {
+      return 'verified';
+    }
+    log(
+      'info',
+      `已迁移条目的产物文件不在磁盘（${artifact?.relativePath ?? '无 note artifact 记录'}），重新迁移`,
+    );
   }
 
   // R3-H1: 计算本次 attempt_no（已有最大值 + 1）。原硬编码 attemptNo:1 在 resume 时

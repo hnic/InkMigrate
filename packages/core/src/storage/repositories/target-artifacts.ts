@@ -83,6 +83,28 @@ export class TargetArtifacts {
   }
 
   /**
+   * §17.2 幂等跳过的磁盘佐证：查找 source_item 在【指定目标实例】下最近一条
+   * verified note artifact。限定 artifact_kind='note'（index 是 Job 级、
+   * source_item_id 为空；附件缺一则由对账口径覆盖，不在此粒度）；
+   * 限定 target_instance_id——同一来源迁到不同目标实例（不同 Vault）时，
+   * 旧实例的 artifact 不能证明新实例有产出。
+   */
+  findVerifiedNoteArtifact(
+    sourceItemId: number,
+    targetInstanceId: string,
+  ): TargetArtifactRow | undefined {
+    return this.db
+      .prepare(
+        `SELECT ${TARGET_ARTIFACT_COLUMNS}
+         FROM target_artifacts
+         WHERE source_item_id=? AND target_instance_id=? AND artifact_kind='note'
+           AND status='verified'
+         ORDER BY id DESC LIMIT 1`,
+      )
+      .get(sourceItemId, targetInstanceId) as TargetArtifactRow | undefined;
+  }
+
+  /**
    * 按 (target_instance_id, relative_path) 精确查找（走表级 UNIQUE 约束对应的索引）。
    *
    * UNIQUE(target_instance_id, relative_path) 是跨 Job 约束：同一目标实例下同一路径

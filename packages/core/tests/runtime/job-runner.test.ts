@@ -819,4 +819,94 @@ describe('runMigrationJob (§11 端到端)', () => {
     expect(counts.permanent_failed ?? 0).toBe(0);
     expect(counts.skipped).toBeGreaterThan(0);
   });
+
+  it('§17.2 幂等跳过校验磁盘产物：文件在→跳过；文件被删→重跑重建', async () => {
+    // 回归场景（2026-09-11 真实事故）：用户手动删除 Vault 里的迁移文件后重跑，
+    // source_items 仍是 verified → processOneItem 直接跳过 → Job "completed 440
+    // verified" 但 0 文件落盘。DB 说 verified 不等于文件还在——跳过前必须用
+    // note artifact 的相对路径到 vaultPath 下核实磁盘存在，缺失即降级为重迁移。
+    new SourceInstances(db).create({
+      id: 's1', adapterKind: 'toutiao', adapterVersion: '1.0.0',
+      adapterApiVersion: '1.0.0', configHash: 'h', createdAt: 't', updatedAt: 't',
+    });
+    new TargetInstances(db).create({
+      id: 't1', adapterKind: 'obsidian', adapterVersion: '1.0.0',
+      adapterApiVersion: '1.0.0', configHash: 'h', createdAt: 't', updatedAt: 't',
+    });
+    for (const j of ['j-keep', 'j-del', 'j-del2']) {
+      new MigrationJobs(db).create({
+        id: j, sourceInstanceId: 's1', targetInstanceId: 't1',
+        status: 'created', currentStage: 'preflight', createdAt: 't', updatedAt: 't',
+      });
+    }
+
+    const fp = computeFingerprint(deriveFingerprintInput({ contentId: '7770001112223' }));
+    let extractCalls = 0;
+    const makeAdapter = (): SourceAdapter => ({
+      ...createToutiaoSource(),
+      async *scan() {
+        const ref: SourceItemRef = {
+          sourceInstanceId: 's1',
+          externalId: '7770001112223',
+          canonicalUrl: 'https://www.toutiao.com/article/7770001112223/',
+          title: '777 磁盘校验',
+          contentKind: 'article',
+          discoveredAt: new Date().toISOString(),
+          fingerprint: fp,
+          sourceMetadata: {},
+        };
+        yield ref;
+      },
+      async extract(ref) {
+        extractCalls++;
+        const item: SourceItem = {
+          ref, title: '777 磁盘校验',
+          tags: [], collections: [], assets: [], links: [],
+          quality: 'full', degradations: [],
+          extractionMethod: 'fixture', extractionWarnings: [], sourceMetadata: {},
+        };
+        return item;
+      },
+    });
+    const targetCtx: TargetContext = {
+      config: {},
+      workspaceDir: dbDir, vaultPath: vaultDir,
+      targetConfig: {
+        vaultPath: vaultDir, importSubdir: '', attachmentsSubdir: 'Attachments',
+        linkStyle: 'wikilink', overwritePolicy: 'preserve',
+        collectionMapping: { toTags: false, toFolders: false }, maxFilenameLength: 100,
+      } as Record<string, unknown>,
+    };
+    const run = (jobId: string) =>
+      runMigrationJob({
+        db, jobId,
+        sourceAdapter: makeAdapter(), targetAdapter: createObsidianTarget(),
+        sourceInstanceId: 's1', targetInstanceId: 't1',
+        targetContext: targetCtx, workspaceDir: dbDir, reportsDir: join(dbDir, 'reports'),
+      });
+
+    // 第一轮：迁移成功，文件落盘
+    const r1 = await run('j-keep');
+    expect(r1.status).toBe('completed');
+    const arts1 = new TargetArtifacts(db).listByJob('j-keep').filter((a) => a.artifactKind === 'note');
+    expect(arts1.length).toBe(1);
+    const notePath = join(vaultDir, arts1[0]!.relativePath);
+    expect(existsSync(notePath)).toBe(true);
+    expect(extractCalls).toBe(1);
+
+    // 第二轮（文件仍在）：§17.2 正常幂等——不 extract、不重写
+    const r2 = await run('j-del');
+    expect(r2.status).toBe('completed');
+    expect(extractCalls).toBe(1);
+
+    // 第三轮（文件被用户删除）：修复前静默跳过（completed 但 0 文件）；
+    // 修复后降级为重迁移——重新 extract 并重建文件
+    rmSync(notePath);
+    const r3 = await run('j-del2');
+    expect(r3.status).toBe('completed');
+    expect(existsSync(notePath)).toBe(true);
+    expect(extractCalls).toBe(2);
+    const refreshed = new TargetArtifacts(db).findByTargetPath('t1', arts1[0]!.relativePath);
+    expect(refreshed).toBeDefined();
+  });
 });
