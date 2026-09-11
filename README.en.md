@@ -100,35 +100,56 @@ inkmigrate resume --job <JOB_ID> --state-dir .inkmigrate --vault-path "/path/to/
 
 ---
 
-## 🛠 Desktop App Packaging (macOS .app / .dmg)
+## 🛠 Cross-Platform Desktop Packaging (macOS & Windows)
 
-InkMigrate packages a self-contained desktop bundle with **Tauri 2 + Node.js Sidecar + Embedded Chromium**. The resulting `.app` and `.dmg` bundles require no pre-installed Node.js or system dependencies on target machines.
+InkMigrate bundles a fully self-contained desktop package powered by **Tauri 2 + Node.js Sidecar + Embedded Headless Chromium**. The bundled distribution carries its own platform-specific Node runtime, native SQLite driver, and crawling engine, requiring zero pre-installed dependencies on user machines.
 
-### 1. Prerequisites
-- **Node.js**: ≥ 24.15.0
-- **pnpm**: ≥ 11
-- **Rust / Cargo**: Latest stable (`rustup`)
-- **Xcode Command Line Tools**: `xcode-select --install`
-
-### 2. Build the Bundle
-Run the single top-level packaging command:
+Run the unified command from the root directory on either platform:
 
 ```bash
-# Compiles monorepo + builds self-contained sidecar (Node + Chromium) + bundles macOS .app & .dmg
+# Topological build + bundle sidecar dependencies + package native distribution
 pnpm bundle
 ```
 
-### 3. Artifact Locations
+---
+
+### 🍎 macOS Packaging (.app / .dmg)
+
+#### 1. Prerequisites
+- **Node.js**: ≥ 24.15.0 / **pnpm**: ≥ 11
+- **Rust / Cargo**: Latest stable (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
+- **Xcode Command Line Tools**: `xcode-select --install`
+
+#### 2. Artifact Locations
 - **macOS Application**: `apps/gui/src-tauri/target/release/bundle/macos/InkMigrate.app`
 - **macOS Disk Image (DMG)**: `apps/gui/src-tauri/target/release/bundle/dmg/InkMigrate_1.0.0_aarch64.dmg` (or `x64`)
 
-### 4. macOS Gatekeeper Note
-For locally built, unsigned apps, macOS may show *"InkMigrate is damaged and can't be opened"*. Strip the quarantine flag using:
-
+#### 3. macOS Gatekeeper Note
+For locally built, unsigned apps, macOS may report *"InkMigrate is damaged and can't be opened"*. Strip the quarantine attribute using:
 ```bash
 xattr -cr /Applications/InkMigrate.app
 ```
 *(Or navigate to **System Settings -> Privacy & Security** and click **Open Anyway**).*
+
+---
+
+### 🪟 Windows Packaging (.exe / .msi)
+
+#### 1. Prerequisites
+- **Node.js**: ≥ 24.15.0 / **pnpm**: ≥ 11
+- **Rust / Cargo**: Latest stable ([rustup-init.exe](https://win.rustup.rs/))
+- **Visual Studio 2022 C++ Build Tools**: Ensure **"Desktop development with C++"** is checked (required for compiling native `better-sqlite3` bindings)
+- **WebView2 Runtime**: Pre-installed on Windows 10/11
+
+#### 2. Artifact Locations
+Running `pnpm bundle` in PowerShell produces:
+- **NSIS Setup Executable**: `apps/gui/src-tauri/target/release/bundle/nsis/InkMigrate_1.0.0_x64-setup.exe`
+- **MSI Windows Installer**: `apps/gui/src-tauri/target/release/bundle/msi/InkMigrate_1.0.0_x64_en-US.msi`
+
+#### 3. Windows SmartScreen Note
+For self-built packages without commercial EV code signing certificates, Windows Defender SmartScreen may display *"Windows protected your PC"*:
+- Click **"More info"**;
+- Click **"Run anyway"** to proceed with installation.
 
 ---
 

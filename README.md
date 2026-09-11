@@ -215,42 +215,36 @@ inkmigrate migrate --source evernote-archive --target obsidian-main --state-dir 
 
 ---
 
-## 🛠 macOS 桌面端打包指南（构建 .app / .dmg）
+## 🛠 跨平台桌面端打包指南（macOS & Windows）
 
-InkMigrate 采用了 **Tauri 2 + Node.js Sidecar + 内嵌无头 Chromium** 的高内聚自包含架构。构建产出的 `.app` 与 `.dmg` 内部已包含 Node 运行时、原生 SQLite 驱动与离线爬虫引擎，在目标 macOS 电脑上无需配置开发环境即可开箱即用。
+InkMigrate 采用了 **Tauri 2 + Node.js Sidecar + 内嵌无头 Chromium** 的高内聚自包含架构。构建产出的安装包内部已完整携带对应平台的 Node.js 运行时、原生 SQLite 驱动与离线爬虫引擎，在目标机器上无需安装 Node.js 或配置开发环境即可开箱即用。
 
-### 1. 准备构建环境
-确保本机具备以下工具：
-- **Node.js**：≥ 24.15.0
-- **pnpm**：≥ 11
-- **Rust / Cargo**：最新稳定版（`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`）
-- **Xcode Command Line Tools**：`xcode-select --install`
-
-### 2. 一键执行全量打包
-
-项目根目录已提供一键整合构建命令（包含前置依赖编译、Sidecar 二进制组装与 Tauri 打包流水线）：
+无论在哪一平台上，项目根目录均支持通过统一命令完成全量打包：
 
 ```bash
-# 全量构建：TypeScript 编译 + Sidecar 资源组装 + macOS 原生 App/DMG 封装
+# 全量构建：TypeScript 编译 + 当前平台 Sidecar 资源组装 + 原生安装包封装
 pnpm bundle
 ```
 
 > **构建流水线说明**：
-> - 底层自动执行 `scripts/build-sidecar.mjs`，通过 esbuild 把引擎打为自包含单文件，并自动提取当前平台适用的 `better_sqlite3.node` 与 Playwright 驱动注入到 Sidecar 资源包；
-> - 最终调用 `tauri build` 生成独立原生应用。
+> - 底层自动调用 `scripts/build-sidecar.mjs`，通过 esbuild 把引擎打为自包含单文件，并自动抽取当前操作系统专用（macOS / Windows）的 `node` 二进制、`better_sqlite3.node` 原生驱动与 Playwright Chromium 注入到 Sidecar 资源包；
+> - 最终调用 `tauri build` 生成免环境依赖的独立原生安装包。
 
-### 3. 构建产物定位
+---
 
-打包成功后，安装包与二进制产物将生成在以下路径：
+### 🍎 macOS 平台打包（.app / .dmg）
+
+#### 1. 环境准备
+- **Node.js**：≥ 24.15.0 / **pnpm**：≥ 11
+- **Rust / Cargo**：最新稳定版（`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`）
+- **Xcode Command Line Tools**：`xcode-select --install`
+
+#### 2. 构建产物定位
 - **macOS 原生应用程序**：`apps/gui/src-tauri/target/release/bundle/macos/InkMigrate.app`
-- **macOS 安装镜像 (DMG)**：`apps/gui/src-tauri/target/release/bundle/dmg/InkMigrate_1.0.0_aarch64.dmg`（根据您的芯片架构生成 `aarch64` 或 `x64`）
+- **macOS 安装镜像 (DMG)**：`apps/gui/src-tauri/target/release/bundle/dmg/InkMigrate_1.0.0_aarch64.dmg`（根据芯片架构生成 `aarch64` 或 `x64`）
 
-### 4. 首次打开安全提示（Gatekeeper 绕过）
-
-由于本地自行构建的软件包未经 Apple 商业付费证书公证（Notarization），macOS 安全机制（Gatekeeper）在双击打开时可能会提示 *“InkMigrate 已损坏，无法打开”* 或 *“来自未知开发者”*。
-
-只需在终端中执行以下命令清除隔离属性即可正常运行：
-
+#### 3. 首次打开安全提示（Gatekeeper 绕过）
+由于本地自构建软件包未经过 Apple 商业开发者证书公证（Notarization），首次双击可能会提示 *“已损坏”* 或 *“未受信任开发者”*。在终端执行以下命令清除隔离标记即可：
 ```bash
 # 解除安装到「应用程序」中的隔离属性
 xattr -cr /Applications/InkMigrate.app
@@ -258,7 +252,27 @@ xattr -cr /Applications/InkMigrate.app
 # 或针对当前目录下的 .app 文件解除
 xattr -cr path/to/InkMigrate.app
 ```
-*（也可以在 macOS「系统设置」->「隐私与安全性」底部，点击「仍要打开」即可正常启动）*
+*(亦可在 macOS「系统设置」->「隐私与安全性」底部点击「仍要打开」)*
+
+---
+
+### 🪟 Windows 平台打包（.exe / .msi）
+
+#### 1. 环境准备
+- **Node.js**：≥ 24.15.0 / **pnpm**：≥ 11
+- **Rust / Cargo**：最新稳定版（[rustup-init.exe](https://win.rustup.rs/)）
+- **Visual Studio 2022 C++ 生成工具**：需勾选 **“使用 C++ 的桌面开发”**（Desktop development with C++，用于编译 `better-sqlite3` 原生模块）
+- **WebView2 运行时**：Windows 10/11 系统通常已自带
+
+#### 2. 构建产物定位
+执行 `pnpm bundle` 后，安装包生成在：
+- **NSIS 一键安装程序**：`apps/gui/src-tauri/target/release/bundle/nsis/InkMigrate_1.0.0_x64-setup.exe`
+- **MSI Windows 安装包**：`apps/gui/src-tauri/target/release/bundle/msi/InkMigrate_1.0.0_x64_en-US.msi`
+
+#### 3. 首次安装 SmartScreen 提示
+自构建软件包无商业 EV 代码签名证书时，Windows Defender SmartScreen 可能会弹出 *“Windows 已保护你的电脑”* 提示：
+- 点击对话框中的 **“更多信息” (More info)**；
+- 点击 **“仍要运行” (Run anyway)** 即可继续正常安装。
 
 ---
 
