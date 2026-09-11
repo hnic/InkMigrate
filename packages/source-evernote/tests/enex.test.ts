@@ -288,11 +288,12 @@ describe('EvernoteSourceConfigSchema（§15.1）', () => {
 describe('resolveInputPaths', () => {
   it('相对路径锚定 workspaceDir', () => {
     // 期望值用平台自身的 resolve 计算：Windows 上 resolve('/w', …) 产出
-    // 盘符绝对路径（D:\w\…），硬编码 POSIX 字符串会错
+    // 盘符绝对路径（D:\w\…）；'/abs' 亦会被 resolve 成 D:\abs，硬编码 POSIX
+    // 字符串会错
     expect(resolveInputPaths(['imports/evernote'], '/w')).toEqual([
       resolve('/w', 'imports/evernote'),
     ]);
-    expect(resolveInputPaths(['/abs'], '/w')).toEqual(['/abs']);
+    expect(resolveInputPaths(['/abs'], '/w')).toEqual([resolve('/abs')]);
   });
 });
 

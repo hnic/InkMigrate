@@ -143,7 +143,8 @@ describe('evernote e2e migrate', () => {
       expect(noteA.content).toContain('[[笔记乙]]');
       // Work@@@Projects.enex → Work/Projects/ 层级（notebookShortId 默认 false → 纯名）
       const workNote = mdFiles.find((m) => m.content.includes('项目会议纪要'))!;
-      expect(workNote.path).toMatch(/\/Work\/Projects\//);
+      // 路径分隔符归一后匹配：Windows 产物为 \Work\Projects\
+      expect(workNote.path.replace(/\\/g, '/')).toMatch(/\/Work\/Projects\//);
       // 笔记本目录用纯名称（默认 notebookShortId=false）
       const notebookDirs = readdirSync(archiveDir).filter((d) => !d.startsWith('_') && !d.startsWith('.'));
       expect(notebookDirs).toContain('basic');
