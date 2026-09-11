@@ -173,7 +173,8 @@ describe('engine RPC: evernote file source', () => {
     walk(archive);
     expect(mdFiles).toHaveLength(5);
     expect(mdFiles.some((c) => c.includes('笔记甲'))).toBe(true);
-    expect(mdFiles.some((c) => c.includes('[[笔记乙-'))).toBe(true);
+    // filenameShortId 默认 false（c14443e）→ 纯标题 wikilink，无短哈希后缀
+    expect(mdFiles.some((c) => c.includes('[[笔记乙]]'))).toBe(true);
     // 附件按原名落盘
     const attach = join(w.vaultDir, 'Attachments/InkMigrate/evernote-archive');
     expect(existsSync(join(attach))).toBe(true);

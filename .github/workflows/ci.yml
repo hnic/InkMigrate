@@ -50,6 +50,11 @@ jobs:
       - name: Typecheck
         run: pnpm -r run typecheck
 
+      - name: Generate test fixtures
+        # evernote 的 .enex fixtures 被 .gitignore 排除（PRD §24.4：脚本确定性生成、不入库），
+        # fresh clone/CI 必须先生成再跑测试，否则 ENOENT（见 .gitignore *.enex 注释）
+        run: pnpm -r run gen:fixtures
+
       - name: Test
         run: pnpm -r run test
 
