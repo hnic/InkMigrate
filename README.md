@@ -215,6 +215,53 @@ inkmigrate migrate --source evernote-archive --target obsidian-main --state-dir 
 
 ---
 
+## 🛠 macOS 桌面端打包指南（构建 .app / .dmg）
+
+InkMigrate 采用了 **Tauri 2 + Node.js Sidecar + 内嵌无头 Chromium** 的高内聚自包含架构。构建产出的 `.app` 与 `.dmg` 内部已包含 Node 运行时、原生 SQLite 驱动与离线爬虫引擎，在目标 macOS 电脑上无需配置开发环境即可开箱即用。
+
+### 1. 准备构建环境
+确保本机具备以下工具：
+- **Node.js**：≥ 24.15.0
+- **pnpm**：≥ 11
+- **Rust / Cargo**：最新稳定版（`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`）
+- **Xcode Command Line Tools**：`xcode-select --install`
+
+### 2. 一键执行全量打包
+
+项目根目录已提供一键整合构建命令（包含前置依赖编译、Sidecar 二进制组装与 Tauri 打包流水线）：
+
+```bash
+# 全量构建：TypeScript 编译 + Sidecar 资源组装 + macOS 原生 App/DMG 封装
+pnpm bundle
+```
+
+> **构建流水线说明**：
+> - 底层自动执行 `scripts/build-sidecar.mjs`，通过 esbuild 把引擎打为自包含单文件，并自动提取当前平台适用的 `better_sqlite3.node` 与 Playwright 驱动注入到 Sidecar 资源包；
+> - 最终调用 `tauri build` 生成独立原生应用。
+
+### 3. 构建产物定位
+
+打包成功后，安装包与二进制产物将生成在以下路径：
+- **macOS 原生应用程序**：`apps/gui/src-tauri/target/release/bundle/macos/InkMigrate.app`
+- **macOS 安装镜像 (DMG)**：`apps/gui/src-tauri/target/release/bundle/dmg/InkMigrate_1.0.0_aarch64.dmg`（根据您的芯片架构生成 `aarch64` 或 `x64`）
+
+### 4. 首次打开安全提示（Gatekeeper 绕过）
+
+由于本地自行构建的软件包未经 Apple 商业付费证书公证（Notarization），macOS 安全机制（Gatekeeper）在双击打开时可能会提示 *“InkMigrate 已损坏，无法打开”* 或 *“来自未知开发者”*。
+
+只需在终端中执行以下命令清除隔离属性即可正常运行：
+
+```bash
+# 解除安装到「应用程序」中的隔离属性
+xattr -cr /Applications/InkMigrate.app
+
+# 或针对当前目录下的 .app 文件解除
+xattr -cr path/to/InkMigrate.app
+```
+*（也可以在 macOS「系统设置」->「隐私与安全性」底部，点击「仍要打开」即可正常启动）*
+
+---
+
 ## 🏛 架构设计
 
 InkMigrate 采用现代化的 pnpm monorepo 模块化分层架构：

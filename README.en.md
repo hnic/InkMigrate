@@ -100,6 +100,38 @@ inkmigrate resume --job <JOB_ID> --state-dir .inkmigrate --vault-path "/path/to/
 
 ---
 
+## 🛠 Desktop App Packaging (macOS .app / .dmg)
+
+InkMigrate packages a self-contained desktop bundle with **Tauri 2 + Node.js Sidecar + Embedded Chromium**. The resulting `.app` and `.dmg` bundles require no pre-installed Node.js or system dependencies on target machines.
+
+### 1. Prerequisites
+- **Node.js**: ≥ 24.15.0
+- **pnpm**: ≥ 11
+- **Rust / Cargo**: Latest stable (`rustup`)
+- **Xcode Command Line Tools**: `xcode-select --install`
+
+### 2. Build the Bundle
+Run the single top-level packaging command:
+
+```bash
+# Compiles monorepo + builds self-contained sidecar (Node + Chromium) + bundles macOS .app & .dmg
+pnpm bundle
+```
+
+### 3. Artifact Locations
+- **macOS Application**: `apps/gui/src-tauri/target/release/bundle/macos/InkMigrate.app`
+- **macOS Disk Image (DMG)**: `apps/gui/src-tauri/target/release/bundle/dmg/InkMigrate_1.0.0_aarch64.dmg` (or `x64`)
+
+### 4. macOS Gatekeeper Note
+For locally built, unsigned apps, macOS may show *"InkMigrate is damaged and can't be opened"*. Strip the quarantine flag using:
+
+```bash
+xattr -cr /Applications/InkMigrate.app
+```
+*(Or navigate to **System Settings -> Privacy & Security** and click **Open Anyway**).*
+
+---
+
 ## 🏛 Architecture
 
 Monorepo powered by `pnpm workspace`:
