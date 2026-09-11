@@ -70,11 +70,12 @@ export const ObsidianTargetConfigSchema = z
     maxFilenameLength: z.number().int().positive().default(100),
     /**
      * §13.4 笔记文件名是否携带 stableShortId 后缀（`标题-<shortId>.md`）。
-     * 默认 true（重跑幂等的关键）。false 时为纯标题名：同目录同名标题靠
-     * plan 阶段 -2/-3 序号兜底，重跑/续跑可能产生副本——适合一次性迁移、
-     * 追求干净文件名的场景。
+     * 默认 false（纯标题名，75cfaa6 口径——用户对输出文件名的一贯要求；
+     * d8c3f7b 曾按 PRD 设为 true 造成短哈希后缀回归）。true 时同目录同名
+     * 标题靠 shortId 区分保证重跑幂等；false 时靠 plan 阶段 -2/-3 序号兜底，
+     * 重跑/续跑可能产生副本——适合一次性迁移、追求干净文件名的场景。
      */
-    filenameShortId: z.boolean().default(true),
+    filenameShortId: z.boolean().default(false),
     /**
      * §13.7 附件目录布局：
      * - `by-note`（默认）`：<attachmentsSubdir>/<sourceInstanceId>/<itemKey>/<file>`，跨笔记隔离。

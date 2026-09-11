@@ -12,6 +12,10 @@ describe('ObsidianTargetConfigSchema (§13.2/§13.7/§13.9)', () => {
     expect(cfg.importSubdir).toBe('Imports/InkMigrate');
     expect(cfg.attachmentsSubdir).toBe('Attachments/InkMigrate');
     expect(cfg.maxFilenameLength).toBe(100);
+    // 默认纯标题文件名（75cfaa6 口径）：GUI 无 filenameShortId 配置入口，默认值
+    // 即 GUI 用户的实际行为；d8c3f7b 曾按 PRD §13.4 设回 true 导致短哈希后缀
+    // 回归（2026-09-11 实际迁移文件名带 -<sha256前8位>），钉住防止再次回退
+    expect(cfg.filenameShortId).toBe(false);
     expect(cfg.collectionMapping).toEqual({ toTags: false, toFolders: false });
   });
 

@@ -72,9 +72,10 @@ describe('createObsidianTarget (§8.4 + §13)', () => {
       );
       const plan = await adapter.plan(item, ctx(vault.vaultPath));
       expect(plan.relativePath).toContain('Imports/InkMigrate/toutiao-main/文章/');
-      // §13.4 文件名含 stableShortId 后缀（指纹 sha256:a×64 → dd23d36f27）
+      // §13.4 默认纯标题文件名（filenameShortId=false，75cfaa6 口径）：
+      // 短哈希后缀需显式 filenameShortId: true 才有
       expect(plan.relativePath).toBe(
-        'Imports/InkMigrate/toutiao-main/文章/人工智能如何改变软件开发-dd23d36f27.md',
+        'Imports/InkMigrate/toutiao-main/文章/人工智能如何改变软件开发.md',
       );
       expect(plan.artifactKind).toBe('note');
 
