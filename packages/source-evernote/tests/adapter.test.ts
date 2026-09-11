@@ -81,18 +81,16 @@ describe('createEvernoteSource', () => {
       const meta = (workRef!.sourceMetadata as { enex: Record<string, unknown> }).enex;
       expect(meta.stack).toBe('Work');
       expect(meta.notebook).toBe('Projects');
-      // §13.3 目录段：[Stack, 笔记本-notebookKey前8位]
+      // §13.3 目录段：[Stack, 笔记本]（notebookShortId 默认 false → 纯笔记本名）
       const segments = meta.notePathSegments as string[];
       expect(segments).toHaveLength(2);
       expect(segments[0]).toBe('Work');
-      expect(segments[1]).toMatch(/^Projects-[0-9a-f]{8}$/);
+      expect(segments[1]).toBe('Projects');
       const basicRef = refs.find((r) => r.title === '第一条笔记');
       const basicMeta = (basicRef!.sourceMetadata as { enex: Record<string, unknown> }).enex;
       expect(basicMeta.stack).toBeUndefined();
       expect(basicMeta.notebook).toBe('basic');
-      expect(basicMeta.notePathSegments).toEqual([
-        expect.stringMatching(/^basic-[0-9a-f]{8}$/),
-      ]);
+      expect(basicMeta.notePathSegments).toEqual(['basic']);
     } finally {
       rmSync(input, { recursive: true, force: true });
     }
@@ -354,6 +352,8 @@ describe('createEvernoteSource', () => {
       const adapter = createEvernoteSource({
         sourceInstanceId: 'evernote-archive',
         inputPaths: [input],
+        // 显式开启后缀：默认已改 false（纯名），此用例保留 key8 后缀分支的覆盖
+        notebookShortId: true,
         notebookMappings: {
           basic: { stack: '映射栈', notebook: '映射笔记本', mergeKey: null },
         },

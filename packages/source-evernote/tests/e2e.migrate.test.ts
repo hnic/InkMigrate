@@ -134,16 +134,16 @@ describe('evernote e2e migrate', () => {
       // §15.10：互链笔记的 wikilink 指向真实落盘文件名
       const noteB = mdFiles.find((m) => m.path.includes('笔记乙'))!;
       expect(noteB).toBeDefined();
-      const noteBShortId = (noteB.path.match(/笔记乙-([0-9a-f]{10})\.md/) ?? [])[1] ?? '';
+      expect(noteB.path).toMatch(/笔记乙\.md$/); // filenameShortId 默认 false → 纯标题
       const noteA = mdFiles.find((m) => m.path.includes('笔记甲'))!;
       // 链接文字与目标标题相同时省略别名（§15.10）
-      expect(noteA.content).toContain(`[[笔记乙-${noteBShortId}]]`);
-      // Work@@@Projects.enex → Work/Projects-<key8>/ 层级
+      expect(noteA.content).toContain('[[笔记乙]]');
+      // Work@@@Projects.enex → Work/Projects/ 层级（notebookShortId 默认 false → 纯名）
       const workNote = mdFiles.find((m) => m.content.includes('项目会议纪要'))!;
-      expect(workNote.path).toMatch(/\/Work\/Projects-[0-9a-f]{8}\//);
-      // 各笔记本目录带 8 位 notebookKey 短 ID 后缀
+      expect(workNote.path).toMatch(/\/Work\/Projects\//);
+      // 笔记本目录用纯名称（默认 notebookShortId=false）
       const notebookDirs = readdirSync(archiveDir).filter((d) => !d.startsWith('_') && !d.startsWith('.'));
-      expect(notebookDirs.some((d) => /^basic-[0-9a-f]{8}$/.test(d))).toBe(true);
+      expect(notebookDirs).toContain('basic');
       expect(notebookDirs).toContain('Work');
 
       // 附件目录按 item-key 隔离（§15.7.4）
@@ -291,7 +291,7 @@ describe('evernote e2e migrate', () => {
       expect(result.scanCount).toBe(3);
       expect(result.reconciliationOk).toBe(true);
 
-      // §13.3 HTML 笔记目录：工作笔记本-<key8>/ 与 根目录笔记本 html-export-<key8>/
+      // §13.3 HTML 笔记目录：工作笔记本/（notebookShortId 默认 false → 纯名）
       const archiveDir = join(vaultDir, 'Imports/InkMigrate/evernote-archive');
       const contents: string[] = [];
       // 深度 ≥1 的 .md 才是笔记（根下的收藏索引是索引文件）
@@ -304,9 +304,7 @@ describe('evernote e2e migrate', () => {
       };
       walkMd(archiveDir);
       expect(contents).toHaveLength(3);
-      expect(
-        readdirSync(archiveDir).some((d) => /^工作笔记本-[0-9a-f]{8}$/.test(d)),
-      ).toBe(true);
+      expect(readdirSync(archiveDir)).toContain('工作笔记本');
       const meeting = contents.find((c) => c.includes('会议记录'))!;
       expect(meeting).toBeDefined();
       // 图片内嵌 wikilink（原文件名）+ PDF 进附件区，脚本被清洗
