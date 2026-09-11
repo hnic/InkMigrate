@@ -185,7 +185,7 @@ importers:
         version: link:../target-obsidian
       '@inkmigrate/testkit':
         specifier: workspace:*
-        version: file:packages/testkit(vitest@2.1.9(@types/node@24.13.2)(jsdom@27.4.0))
+        version: link:../testkit
       '@types/jsdom':
         specifier: ^27.0.0
         version: 27.0.0
@@ -1101,14 +1101,6 @@ packages:
     peerDependenciesMeta:
       '@noble/hashes':
         optional: true
-
-  '@inkmigrate/core@file:packages/core':
-    resolution: {directory: packages/core, type: directory}
-
-  '@inkmigrate/testkit@file:packages/testkit':
-    resolution: {directory: packages/testkit, type: directory}
-    peerDependencies:
-      vitest: '>=2 <3'
 
   '@jridgewell/gen-mapping@0.3.13':
     resolution: {integrity: sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==}
@@ -2770,19 +2762,6 @@ snapshots:
     optional: true
 
   '@exodus/bytes@1.15.1': {}
-
-  '@inkmigrate/core@file:packages/core':
-    dependencies:
-      better-sqlite3: 11.10.0
-      pino: 9.14.0
-      semver: 7.8.5
-      yaml: 2.9.0
-      zod: 3.25.76
-
-  '@inkmigrate/testkit@file:packages/testkit(vitest@2.1.9(@types/node@24.13.2)(jsdom@27.4.0))':
-    dependencies:
-      '@inkmigrate/core': file:packages/core
-      vitest: 2.1.9(@types/node@24.13.2)(jsdom@27.4.0)
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:
