@@ -50,6 +50,8 @@ export interface GenerateIndexInput {
    * 保留用户内容。留空 = 全量生成（首次运行）。
    */
   knownArtifacts?: readonly KnownIndexArtifact[];
+  /** wikilink 目标的 vault 根前缀（vaultPath 为子文件夹时非空，见 paths.ts detectLinkBase）。 */
+  linkBase?: string;
 }
 
 /**
@@ -114,6 +116,7 @@ export function generateShardIndexes(i: GenerateIndexInput): GenerateIndexResult
       shardEntries,
       i.config.linkStyle,
       dirname(relativePath),
+      i.linkBase,
     );
     const written = writeShard(i.vaultPath, relativePath, content, knownByPath.get(relativePath));
     shards.push({
@@ -134,7 +137,7 @@ export function generateShardIndexes(i: GenerateIndexInput): GenerateIndexResult
   // （<importSubdir>/<src>），而非 indexDir（<importSubdir>/<src>/_索引）——
   // 入口文件与 _索引 是兄弟关系，markdown 相对链接需从入口文件位置算起。
   const entryDir = dirname(entryIndexRel);
-  const entryContent = renderEntryIndex(shards, safeSourceId, i.config.linkStyle, entryDir);
+  const entryContent = renderEntryIndex(shards, safeSourceId, i.config.linkStyle, entryDir, i.linkBase);
   const entryWritten = writeShard(i.vaultPath, entryIndexRel, entryContent, knownByPath.get(entryIndexRel));
 
   return {
@@ -233,11 +236,13 @@ function formatIndexLink(
   targetRelPath: string,
   fromDir: string,
   linkStyle: 'wikilink' | 'markdown',
+  linkBase = '',
 ): string {
   if (linkStyle === 'wikilink') {
+    const base = linkBase !== '' ? `${linkBase}/` : '';
     const target = targetRelPath.replace(/\.md$/, '');
     const alias = label.replace(/[[\]|]/g, '');
-    return alias.length > 0 ? `- [[${target}|${alias}]]` : `- [[${target}]]`;
+    return alias.length > 0 ? `- [[${base}${target}|${alias}]]` : `- [[${base}${target}]]`;
   }
   const rel = relative(fromDir, targetRelPath).split('\\').join('/');
   const url = /\s/.test(rel) ? `<${rel}>` : rel;
@@ -250,10 +255,12 @@ function renderShardMarkdown(
   linkStyle: 'wikilink' | 'markdown',
   /** 分片文件所在目录（相对 Vault 根），用于计算 markdown 链接的相对路径。§缺陷4 */
   shardDir: string,
+  /** wikilink 目标的 vault 根前缀（见 GenerateIndexInput.linkBase）。 */
+  linkBase?: string,
 ): string {
   const lines: string[] = [`# ${shardKey}`, ''];
   for (const e of entries) {
-    lines.push(formatIndexLink(e.title, e.relativePath, shardDir, linkStyle));
+    lines.push(formatIndexLink(e.title, e.relativePath, shardDir, linkStyle, linkBase));
   }
   lines.push('');
   return lines.join('\n');
@@ -265,6 +272,8 @@ function renderEntryIndex(
   linkStyle: 'wikilink' | 'markdown',
   /** entry index 文件所在目录（相对 Vault 根），用于 markdown 链接的相对路径计算。 */
   entryDir: string,
+  /** wikilink 目标的 vault 根前缀（见 GenerateIndexInput.linkBase）。 */
+  linkBase?: string,
 ): string {
   const lines: string[] = [
     `# ${sourceInstanceId} 收藏索引`,
@@ -273,7 +282,7 @@ function renderEntryIndex(
     '',
   ];
   for (const shard of shards) {
-    lines.push(formatIndexLink(shard.shardKey, shard.relativePath, entryDir, linkStyle));
+    lines.push(formatIndexLink(shard.shardKey, shard.relativePath, entryDir, linkStyle, linkBase));
   }
   lines.push('');
   return lines.join('\n');

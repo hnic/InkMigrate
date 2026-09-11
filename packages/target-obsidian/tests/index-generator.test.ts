@@ -243,3 +243,23 @@ describe('generateShardIndexes (§13.8)', () => {
     expect(essay.entries.map((e) => e.title)).toEqual(['随笔']);
   });
 });
+
+describe('linkBase 前缀（vaultPath 为 vault 子文件夹时的 wikilink 对齐）', () => {
+  it('分片索引的条目 wikilink 带 vault 根前缀；markdown 风格不带', () => {
+    const v = mkdtempSync(join(tmpdir(), 'idx-base-'));
+    try {
+      const wiki = generateShardIndexes({
+        config, vaultPath: v, sourceInstanceId: 's1', entries, groupBy: ['month'],
+        linkBase: 'toutiao',
+      });
+      expect(wiki.shards.length).toBeGreaterThan(0);
+      for (const s of wiki.shards) {
+        const content = readFileSync(join(v, s.relativePath), 'utf8');
+        // 条目 wikilink 以 vault 根前缀开头（严格按 vault 根解析可命中）
+        expect(content).toContain('[[toutiao/Imports/InkMigrate/s1/文章/');
+      }
+    } finally {
+      rmSync(v, { recursive: true, force: true });
+    }
+  });
+});

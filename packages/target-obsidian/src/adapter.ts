@@ -25,6 +25,7 @@ import {
   noteAbsolutePath,
   assetRelativePath,
   assetAbsolutePath,
+  detectLinkBase,
 } from './paths.js';
 import { stringifyFrontmatter } from './frontmatter.js';
 import { renderBody, htmlToMarkdown, convertEvernoteWikilinks } from './body.js';
@@ -185,6 +186,9 @@ async function planNote(
     sourceContentHash: srcHash,
   });
 
+  // wikilink 前缀：vaultPath 为 vault 子文件夹时（祖先含 .obsidian），链接文本
+  // 需带 vault 根前缀才能被 Obsidian 严格解析命中（磁盘路径不受影响，见 paths.ts）
+  const linkBase = detectLinkBase(config.vaultPath);
   // R9: bodyHtml 为纯空白时 htmlToMarkdown 返回 ''，原实现不回退 bodyText 导致正文丢失。
   // 改为：先尝试 bodyHtml→markdown，结果为空时回退 bodyText。
   let markdownBody = '';
@@ -193,6 +197,7 @@ async function planNote(
       sourceInstanceId: item.ref.sourceInstanceId,
       filenameShortId: config.filenameShortId,
       maxFilenameLength: config.maxFilenameLength,
+      linkBase,
     });
   }
   if (markdownBody.length === 0) {
@@ -344,6 +349,7 @@ async function planNote(
     assetLinks,
     attachmentLinks,
     linkStyle: config.linkStyle,
+    linkBase,
   });
 
   const renderedContent = frontmatter + body;
@@ -576,6 +582,7 @@ async function renderIndexNotes(ctx: TargetContext): Promise<TargetWriteResult[]
     sourceInstanceId,
     entries,
     groupBy: config.indexGroupBy,
+    linkBase: detectLinkBase(config.vaultPath),
     ...(ctx.knownIndexArtifacts !== undefined
       ? { knownArtifacts: ctx.knownIndexArtifacts }
       : {}),

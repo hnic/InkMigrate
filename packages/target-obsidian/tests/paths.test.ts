@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -7,6 +7,7 @@ import {
   noteRelativePath,
   noteAbsolutePath,
   assetRelativePath,
+  detectLinkBase,
 } from '../src/paths.js';
 import type { ObsidianTargetConfig } from '../src/config.js';
 
@@ -293,5 +294,27 @@ describe('自定义布局（filenameShortId / flat 附件 / 空 importSubdir）'
       stableShortId: 'aaaaaaaaaa',
     });
     expect(p).toBe('toutiao-main/文章/标题-aaaaaaaaaa.md');
+  });
+});
+
+describe('detectLinkBase（vaultPath 相对 Obsidian vault 根的前缀探测）', () => {
+  it('vaultPath 即 vault 根（祖先无 .obsidian）→ 空串（现行为不变）', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ig-root-'));
+    expect(detectLinkBase(root)).toBe('');
+  });
+
+  it('vaultPath 是 vault 子文件夹 → 单段前缀', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ig-sub-'));
+    mkdirSync(join(root, '.obsidian'));
+    mkdirSync(join(root, 'toutiao'));
+    expect(detectLinkBase(join(root, 'toutiao'))).toBe('toutiao');
+  });
+
+  it('多层嵌套 → 多段前缀；vault 根自身返回空串（自己的 .obsidian 不算祖先）', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ig-deep-'));
+    mkdirSync(join(root, '.obsidian'));
+    mkdirSync(join(root, 'toutiao', 'deep'), { recursive: true });
+    expect(detectLinkBase(join(root, 'toutiao', 'deep'))).toBe('toutiao/deep');
+    expect(detectLinkBase(root)).toBe('');
   });
 });

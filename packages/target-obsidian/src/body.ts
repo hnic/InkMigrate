@@ -34,6 +34,12 @@ export interface WikilinkResolveContext {
   filenameShortId: boolean;
   /** §13.4 标题主体长度上限（与目标配置一致，保证 wikilink 指向真实文件名）。 */
   maxFilenameLength: number;
+  /**
+   * wikilink 目标的 vault 根前缀（vaultPath 为 vault 子文件夹时非空，见
+   * paths.ts detectLinkBase）。链接目标加上前缀后按 Obsidian vault 根严格
+   * 解析才能命中；磁盘路径不受影响。
+   */
+  linkBase?: string;
 }
 
 /**
@@ -67,10 +73,11 @@ export function convertEvernoteWikilinks(markdown: string, ctx: WikilinkResolveC
         suffix,
         maxFilenameLength: ctx.maxFilenameLength,
       });
+      const base = ctx.linkBase !== undefined && ctx.linkBase !== '' ? `${ctx.linkBase}/` : '';
       const safeText = text.replace(/[[\]|]/g, '');
       return safeText.length > 0 && text !== title
-        ? `[[${target}|${safeText}]]`
-        : `[[${target}]]`;
+        ? `[[${base}${target}|${safeText}]]`
+        : `[[${base}${target}]]`;
     },
   );
 }
@@ -98,6 +105,8 @@ export interface RenderBodyInput {
   attachmentLinks?: readonly string[];
   /** §13.7 链接风格，默认 wikilink。 */
   linkStyle?: 'wikilink' | 'markdown';
+  /** wikilink 目标的 vault 根前缀（见 WikilinkResolveContext.linkBase）。 */
+  linkBase?: string;
 }
 
 /** §13.6 正文模板渲染。 */
@@ -132,12 +141,13 @@ export function renderBody(i: RenderBodyInput): string {
   for (const l of infoLines) lines.push(`> ${l}`);
   lines.push('');
 
+  const base = i.linkBase !== undefined && i.linkBase !== '' ? `${i.linkBase}/` : '';
   let body = i.markdownBody;
   // 替换附件占位符
   for (const link of i.assetLinks) {
     const embed =
       linkStyle === 'wikilink'
-        ? `![[${link.relativePath}]]`
+        ? `![[${base}${link.relativePath}]]`
         : `![](${mdDestination(link.relativePath)})`;
     body = body.split(link.markdownPlaceholder).join(embed);
   }
@@ -152,7 +162,7 @@ export function renderBody(i: RenderBodyInput): string {
       const label = relPath.split('/').pop() ?? relPath;
       const link =
         linkStyle === 'wikilink'
-          ? `[[${relPath}]]`
+          ? `[[${base}${relPath}]]`
           : // 标签转义 `[`/`]`/`\`，目标按 mdDestination 处理空格。
             `[${label.replace(/([\\[\]])/g, '\\$1')}](${mdDestination(relPath)})`;
       lines.push(`- ${link}`);

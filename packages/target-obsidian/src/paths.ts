@@ -5,6 +5,7 @@ import {
   sanitizeFilename,
   type SourceContentKind,
 } from '@inkmigrate/core';
+import { basename, dirname, join, resolve } from 'node:path';
 import type { ObsidianTargetConfig } from './config.js';
 
 /**
@@ -174,4 +175,33 @@ export function assetAbsolutePath(
   relativePath: string,
 ): string {
   return resolveWithin(vaultPath, relativePath);
+}
+
+/**
+ * 探测 vaultPath 相对 Obsidian vault 根的路径前缀（wikilink 语义对齐）。
+ *
+ * Obsidian 的 wikilink 按 vault 根解析，而本适配器的全部相对路径（笔记/附件/
+ * 索引）以 vaultPath 为基准。当用户把 vault 的子文件夹当迁移目标（如
+ * `<vault>/toutiao`）时，两个基准不一致：链接文本按 vaultPath 相对生成，
+ * Obsidian 却到 vault 根下找，产生断链/错配（2026-09-11 实测）。
+ *
+ * 判据：vaultPath 的祖先目录里最近的含 `.obsidian` 者（多层 .obsidian 时取最近
+ * ——与 Obsidian 打开内层为独立 vault 的语义一致）即 vault 根，返回它到
+ * vaultPath 的相对路径（posix 斜杠）。vaultPath 自身含 `.obsidian` 不算——
+ * 那说明 vaultPath 就是 vault 根；祖先均无 `.obsidian`（目录还没在 Obsidian
+ * 打开过等）返回空串，维持现行为（链接 = vaultPath 相对路径）。
+ */
+export function detectLinkBase(vaultPath: string): string {
+  const segments: string[] = [];
+  let dir = resolve(vaultPath);
+  for (;;) {
+    // 当前层先进 segments 再查父亲——命中时当前层（vaultPath 侧）必须计入前缀
+    segments.push(basename(dir));
+    const parent = dirname(dir);
+    if (parent === dir) return '';
+    if (existsSync(join(parent, '.obsidian'))) {
+      return segments.reverse().join('/');
+    }
+    dir = parent;
+  }
 }

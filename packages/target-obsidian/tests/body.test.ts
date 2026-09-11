@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderBody, htmlToMarkdown } from '../src/body.js';
+import { renderBody, htmlToMarkdown, convertEvernoteWikilinks } from '../src/body.js';
 import { makeFullArticleItem, makeDegradedItem } from './helpers/fixtures.js';
 
 describe('htmlToMarkdown (§13.6 turndown)', () => {
@@ -125,5 +125,48 @@ describe('renderBody (§13.6 正文模板)', () => {
     // 标题仅在 frontmatter 中，正文不注入 H1。
     expect(body).not.toContain('# 人工智能如何改变软件开发');
     expect(body).toContain('来源信息');
+  });
+});
+
+describe('linkBase 前缀（vaultPath 为 vault 子文件夹时的 wikilink 对齐）', () => {
+  const item = makeFullArticleItem();
+
+  it('renderBody：wikilink 嵌入与附件区链接带前缀；markdown 风格不带', () => {
+    const base = renderBody({
+      item,
+      markdownBody: 'A \x00IMG1\x00 B',
+      assetLinks: [{ markdownPlaceholder: '\x00IMG1\x00', relativePath: 'Attachments/toutiao-main/im-x/001.jpg' }],
+      attachmentLinks: ['Attachments/toutiao-main/im-x/报告.pdf'],
+      linkBase: 'toutiao',
+    });
+    expect(base).toContain('![[toutiao/Attachments/toutiao-main/im-x/001.jpg]]');
+    expect(base).toContain('[[toutiao/Attachments/toutiao-main/im-x/报告.pdf]]');
+
+    const md = renderBody({
+      item,
+      markdownBody: 'A \x00IMG1\x00 B',
+      assetLinks: [{ markdownPlaceholder: '\x00IMG1\x00', relativePath: 'Attachments/toutiao-main/im-x/001.jpg' }],
+      linkStyle: 'markdown',
+      linkBase: 'toutiao',
+    });
+    // markdown 链接语义按笔记相对路径解析，不加 vault 根前缀（维持现行为）
+    expect(md).toContain('![](Attachments/toutiao-main/im-x/001.jpg)');
+  });
+
+  it('convertEvernoteWikilinks：内部链接目标带前缀', () => {
+    const out = convertEvernoteWikilinks(
+      '[链接](evernote-wikilink://' + 'a'.repeat(64) + '/' + encodeURIComponent('笔记乙') + ')',
+      { sourceInstanceId: 's1', filenameShortId: false, maxFilenameLength: 100, linkBase: 'toutiao' },
+    );
+    expect(out).toBe('[[toutiao/笔记乙|链接]]'); // 链接文字≠标题 → 保留别名（既有语义）
+  });
+
+  it('linkBase 缺省为空串：行为与现状完全一致', () => {
+    const out = renderBody({
+      item,
+      markdownBody: 'A \x00IMG1\x00 B',
+      assetLinks: [{ markdownPlaceholder: '\x00IMG1\x00', relativePath: 'Attachments/x/001.jpg' }],
+    });
+    expect(out).toContain('![[Attachments/x/001.jpg]]');
   });
 });
