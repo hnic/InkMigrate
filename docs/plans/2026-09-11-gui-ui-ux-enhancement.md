@@ -92,3 +92,29 @@
 - [x] **扫描明细可见**：头条扫描完成后可展开查看文章标题清单与原文外链。
 - [x] **历史报告可切**：报告页列出近期任务，点击即可查看状态分布卡片，可直接打开本地对应报告文件夹。
 - [x] **零功能漂移**：核心库（core/engine/adapters）363+71+129+31 项既有单元测试全部通过。
+
+---
+
+## 5. 独立评审与重要问题修复记录 (Review & Fixes)
+
+在完成初版重构后，通过独立评审发现了 4 个在桌面端真实 WebView（WKWebView）环境下的重要缺陷并完成针对性修复：
+
+1. **`window.confirm` 在 macOS WKWebView 静默失效修复**：
+   - **成因**：Tauri 底层 Wry 的 `WryWebViewUIDelegate` 未实现 `runJavaScriptConfirmPanelWithMessage`，导致 JS `window.confirm()` 永远返回 `false`。
+   - **修复**：`LoginPage.tsx` 与 `SettingsPage.tsx` 完全移除 `window.confirm`，改用内联两步确认模式（`confirmClear` 与 `confirmReset`），桌面原生交互稳定无阻塞。
+
+2. **`target="_blank"` 外链点击无反应修复**：
+   - **成因**：WKWebView 默认拦截新窗口弹出且 `new_window_handler` 为 None。
+   - **修复**：在 `lib.rs` 增加带协议白名单校验的原生 `open_url` 命令，前端封装 `openExternalUrl` 拦截点击，交由系统默认浏览器打开。
+
+3. **Windows 路径选择器中文乱码防范**：
+   - **修复**：在 `lib.rs` 的 PowerShell 脚本前缀增加 `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;`，确保中文字符串返回不被 OEM 代码页破坏。
+
+4. **单测逻辑提取（杜绝复制逻辑假绿）**：
+   - **修复**：将 `computeCanStartMigrate`、`getRequiredMigrateFields`、`getMissingConfigFields`、`getSourceSwitchPatch`、`addRecentJob`、`sanitizeJobId` 集中提取至 `src/lib/gui-helpers.ts`。组件与单测共同导入同一份真实代码，新增 4 项针对性测试（13/13 全部通过）。
+
+5. **次要细节增强**：
+   - `check_path_exists` 统一封装至 `tokio::task::spawn_blocking`。
+   - `ReportPage.tsx` 对 Job ID 增加严格正则过滤，防御 `../` 本地目录穿越。
+   - `PathInput.tsx` 增加操作异常状态提示反馈。
+   - 扫描明细表格计数文案区分过滤命中数与总篇数。
